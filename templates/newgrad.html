@@ -11,7 +11,7 @@
             if (isLoading) {
                 setTimeout(function () {
                     window.location.reload();
-                }, 5000);
+                }, 30000);
             }
         });
     </script>
@@ -164,7 +164,7 @@
             {% if updated_at %}
                 &nbsp;&middot;&nbsp; Last refreshed: {{ updated_at.strftime('%Y-%m-%d %H:%M:%S') }}
             {% elif loading %}
-                &nbsp;&middot;&nbsp; Loading data... (auto-refreshing every 5 seconds)
+                &nbsp;&middot;&nbsp; Loading data... (auto-refreshing every 30 seconds)
             {% endif %}
         </div>
         <div class="actions">
@@ -226,7 +226,7 @@
     </table>
 
     {% if not jobs %}
-        <p>{% if loading %}No jobs yet &mdash; fetching in the background. This page will auto-refresh in 5 seconds.{% else %}No jobs match the current filters.{% endif %}</p>
+        <p>{% if loading %}No jobs yet &mdash; fetching in the background. This page will auto-refresh in 30 seconds.{% else %}No jobs match the current filters.{% endif %}</p>
     {% endif %}
 </div>
 </body>

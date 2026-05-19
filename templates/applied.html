@@ -92,21 +92,75 @@
             border: 1px solid #e5e7eb;
         }
         .button-ghost:hover { background: #f9fafb; color: #374151; }
-        .filter-form {
+        .filter-bar {
             display: flex;
             flex-wrap: wrap;
             gap: 12px;
             align-items: center;
-            margin-bottom: 24px;
+            margin-bottom: 16px;
         }
-        .filter-form input {
+        .filter-bar input {
             padding: 10px 12px;
             border-radius: 10px;
             border: 1px solid #cbd5e1;
             background: white;
             color: #0f172a;
-            min-width: 260px;
+            min-width: 240px;
         }
+        /* Category tabs */
+        .cat-tabs {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+            margin-bottom: 20px;
+        }
+        .cat-tab {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 16px;
+            border-radius: 999px;
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 0.88rem;
+            border: 1.5px solid #e5e7eb;
+            background: white;
+            color: #4b5563;
+            transition: background 0.12s, color 0.12s, border-color 0.12s;
+        }
+        .cat-tab:hover { border-color: #93c5fd; color: #1d4ed8; }
+        .cat-tab.active-all    { background: #1f2937; color: white; border-color: #1f2937; }
+        .cat-tab.active-applied    { background: #dcfce7; color: #166534; border-color: #86efac; }
+        .cat-tab.active-interview  { background: #dbeafe; color: #1d4ed8; border-color: #93c5fd; }
+        .cat-tab.active-rejected   { background: #fee2e2; color: #991b1b; border-color: #fca5a5; }
+        .cat-count {
+            background: rgba(0,0,0,0.08);
+            border-radius: 999px;
+            padding: 1px 7px;
+            font-size: 0.8rem;
+        }
+        /* Summary cards */
+        .summary-cards {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 24px;
+        }
+        .summary-card {
+            flex: 1;
+            min-width: 120px;
+            background: white;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 16px 20px;
+            text-align: center;
+        }
+        .summary-card .num { font-size: 2rem; font-weight: 700; }
+        .summary-card .lbl { font-size: 0.82rem; color: #6b7280; margin-top: 2px; }
+        .num-applied   { color: #16a34a; }
+        .num-interview { color: #2563eb; }
+        .num-rejected  { color: #dc2626; }
+        .num-all       { color: #1f2937; }
         table {
             width: 100%;
             border-collapse: collapse;
@@ -125,6 +179,8 @@
         }
         td a { color: #1d4ed8; text-decoration: none; }
         td a:hover { text-decoration: underline; }
+        tr.row-interview { background: #eff6ff; }
+        tr.row-rejected  { background: #fff5f5; }
         .error {
             padding: 16px;
             margin-bottom: 24px;
@@ -140,15 +196,17 @@
             color: #92400e;
             font-size: 0.9rem;
         }
-        .status-badge {
+        .badge {
             display: inline-block;
             padding: 3px 10px;
             border-radius: 999px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            background: #dcfce7;
-            color: #166534;
+            font-size: 0.78rem;
+            font-weight: 700;
+            white-space: nowrap;
         }
+        .badge-applied   { background: #dcfce7; color: #166534; }
+        .badge-interview { background: #dbeafe; color: #1d4ed8; }
+        .badge-rejected  { background: #fee2e2; color: #991b1b; }
     </style>
 </head>
 <body>
@@ -162,7 +220,7 @@
     <header>
         <h1>Applied Jobs Tracker</h1>
         <div class="meta">
-            Searches your Outlook mailbox via Microsoft Graph for job application confirmation emails.
+            Searches your Outlook mailbox via Microsoft Graph for job-related emails — applications, interviews, and rejections.
         </div>
     </header>
 
@@ -179,7 +237,8 @@
     <div class="token-form">
         {% if has_token %}
             <h2>Access token active</h2>
-            <p>Your Microsoft Graph token is loaded. <a href="/applied?clear_token=1">Clear token</a> to sign out.</p>
+            <p>Your Microsoft Graph token is loaded. Results are cached for 5 minutes.
+               <a href="/applied?refresh=1">Refresh now</a> &nbsp;·&nbsp; <a href="/applied?clear_token=1">Clear token</a></p>
         {% else %}
             <h2>Connect your Outlook mailbox</h2>
             <ol>
@@ -197,7 +256,51 @@
     </div>
 
     {% if has_token %}
-        <form class="filter-form" method="get" action="/applied">
+        <!-- Summary cards -->
+        {% if counts.all > 0 %}
+        <div class="summary-cards">
+            <div class="summary-card">
+                <div class="num num-all">{{ counts.all }}</div>
+                <div class="lbl">Total emails</div>
+            </div>
+            <div class="summary-card">
+                <div class="num num-applied">{{ counts.applied }}</div>
+                <div class="lbl">Applications</div>
+            </div>
+            <div class="summary-card">
+                <div class="num num-interview">{{ counts.interview }}</div>
+                <div class="lbl">Interviews</div>
+            </div>
+            <div class="summary-card">
+                <div class="num num-rejected">{{ counts.rejected }}</div>
+                <div class="lbl">Rejections</div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Category tabs -->
+        <div class="cat-tabs">
+            <a href="/applied?cat=all{% if search_query %}&q={{ search_query }}{% endif %}"
+               class="cat-tab {% if category_filter == 'all' %}active-all{% endif %}">
+                All <span class="cat-count">{{ counts.all }}</span>
+            </a>
+            <a href="/applied?cat=applied{% if search_query %}&q={{ search_query }}{% endif %}"
+               class="cat-tab {% if category_filter == 'applied' %}active-applied{% endif %}">
+                ✅ Applied <span class="cat-count">{{ counts.applied }}</span>
+            </a>
+            <a href="/applied?cat=interview{% if search_query %}&q={{ search_query }}{% endif %}"
+               class="cat-tab {% if category_filter == 'interview' %}active-interview{% endif %}">
+                📅 Interviews <span class="cat-count">{{ counts.interview }}</span>
+            </a>
+            <a href="/applied?cat=rejected{% if search_query %}&q={{ search_query }}{% endif %}"
+               class="cat-tab {% if category_filter == 'rejected' %}active-rejected{% endif %}">
+                ❌ Rejections <span class="cat-count">{{ counts.rejected }}</span>
+            </a>
+        </div>
+
+        <!-- Search form -->
+        <form class="filter-bar" method="get" action="/applied">
+            <input type="hidden" name="cat" value="{{ category_filter }}" />
             <input
                 type="text"
                 name="q"
@@ -206,15 +309,20 @@
             />
             <button class="button" type="submit">Filter</button>
             {% if search_query %}
-                <a class="button button-ghost" href="/applied">Clear</a>
+                <a class="button button-ghost" href="/applied?cat={{ category_filter }}">Clear</a>
             {% endif %}
         </form>
 
         {% if jobs %}
-            <p><strong>{{ jobs|length }}</strong> application email{{ 's' if jobs|length != 1 }} found{% if search_query %} matching "<em>{{ search_query }}</em>"{% endif %}.</p>
+            <p>
+                <strong>{{ jobs|length }}</strong> email{{ 's' if jobs|length != 1 }}
+                {% if category_filter != 'all' %}in <em>{{ category_filter }}</em>{% endif %}
+                {% if search_query %} matching "<em>{{ search_query }}</em>"{% endif %}.
+            </p>
             <table>
                 <thead>
                     <tr>
+                        <th>Status</th>
                         <th>Subject</th>
                         <th>From</th>
                         <th>Received</th>
@@ -223,7 +331,16 @@
                 </thead>
                 <tbody>
                     {% for job in jobs %}
-                        <tr>
+                        <tr class="row-{{ job.category }}">
+                            <td>
+                                {% if job.category == 'applied' %}
+                                    <span class="badge badge-applied">Applied</span>
+                                {% elif job.category == 'interview' %}
+                                    <span class="badge badge-interview">Interview</span>
+                                {% elif job.category == 'rejected' %}
+                                    <span class="badge badge-rejected">Rejected</span>
+                                {% endif %}
+                            </td>
                             <td>{{ job.subject }}</td>
                             <td>
                                 {{ job.company }}<br />
@@ -242,7 +359,13 @@
                 </tbody>
             </table>
         {% else %}
-            <p>No application confirmation emails found in your mailbox. Try broadening your search or check that your token has <code>Mail.ReadWrite</code> permission.</p>
+            <p>No emails found
+                {% if category_filter != 'all' %}in <em>{{ category_filter }}</em>{% endif %}
+                {% if search_query %} matching "<em>{{ search_query }}</em>"{% endif %}.
+                {% if counts.all == 0 %}
+                    Check that your token has <code>Mail.Read</code> permission.
+                {% endif %}
+            </p>
         {% endif %}
     {% endif %}
 </div>

@@ -514,18 +514,48 @@ def newgrad() -> str:
 # Applied jobs tracker — reads from Microsoft Graph (user's mailbox)
 # ---------------------------------------------------------------------------
 
-# Subjects/senders that signal a job application confirmation
-_APPLICATION_SUBJECTS = re.compile(
-    r"application|applied|thank you for applying|we received your|your application"
-    r"|application received|submission confirmed",
+# Subject-line patterns for classifying incoming emails
+_REJECTION_SUBJECTS = re.compile(
+    r"unfortunately|not\s+moving\s+forward|not\s+selected|not\s+a\s+fit|"
+    r"other\s+candidates|decided\s+not\s+to\s+(move|proceed)|we\s+regret|"
+    r"no\s+longer\s+consider|position\s+has\s+been\s+filled|"
+    r"pursuing\s+other|chosen\s+not\s+to|unable\s+to\s+offer|"
+    r"will\s+not\s+be\s+moving|did\s+not\s+select|application\s+update",
     re.IGNORECASE,
 )
-_APPLICATION_SENDERS = re.compile(
+_INTERVIEW_SUBJECTS = re.compile(
+    r"\binterview\b|phone\s+screen|video\s+(call|interview)|"
+    r"coding\s+(challenge|assessment|test)|take[\s-]?home|"
+    r"technical\s+(assessment|screen|interview|round|challenge)|"
+    r"next\s+steps?|let.s\s+(chat|talk|connect)|"
+    r"schedule\s+(a\s+)?(call|meeting|time)|meet\s+with|"
+    r"hiring\s+manager|assessment\s+invitation|skills\s+assessment",
+    re.IGNORECASE,
+)
+_APPLICATION_SUBJECTS = re.compile(
+    r"thank\s+you\s+for\s+(applying|your\s+(interest|application))|"
+    r"application\s+(received|submitted|confirmed|complete|on\s+file|confirmation)|"
+    r"we\s+received\s+your\s+application|successfully\s+applied|"
+    r"your\s+application\s+(to|for|has\s+been|was\s+received)|"
+    r"submission\s+confirmed|applied\s+to\b|you.ve\s+applied|"
+    r"application\s+for\s+the\s+position",
+    re.IGNORECASE,
+)
+_ATS_SENDERS = re.compile(
     r"greenhouse\.io|lever\.co|workday\.com|icims\.com|jobvite\.com"
     r"|smartrecruiters\.com|taleo\.net|successfactors\.com|myworkdayjobs\.com"
-    r"|linkedin\.com|indeed\.com|noreply|no-reply|careers|recruiting|talent",
+    r"|linkedin\.com|indeed\.com|ziprecruiter\.com|glassdoor\.com"
+    r"|careers?@|recruiting@|talent@|jobs@|no.?reply.*career|noreply.*job",
     re.IGNORECASE,
 )
+
+# Graph KQL queries — run separately so each can paginate independently
+_GRAPH_SEARCHES = [
+    '"thank you for applying" OR "application received" OR "application submitted" OR "successfully applied"',
+    '"your application" OR "application confirmation" OR "you\'ve applied" OR "submission confirmed"',
+    '"interview" OR "phone screen" OR "technical assessment" OR "coding challenge" OR "next steps"',
+    '"unfortunately" OR "not moving forward" OR "not selected" OR "we regret" OR "other candidates"',
+]
 
 
 def _graph_request(access_token: str, path: str) -> dict:
@@ -543,66 +573,119 @@ def _graph_request(access_token: str, path: str) -> dict:
         raise RuntimeError(f"Graph API {exc.code}: {body[:300]}") from exc
 
 
+_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
+
+
+def _classify_email(subject: str, sender_addr: str) -> Optional[str]:
+    """Return 'rejected', 'interview', 'applied', or None (discard)."""
+    # Rejection takes highest priority — a rejection is never an "application"
+    if _REJECTION_SUBJECTS.search(subject):
+        return "rejected"
+    if _INTERVIEW_SUBJECTS.search(subject):
+        return "interview"
+    if _APPLICATION_SUBJECTS.search(subject):
+        return "applied"
+    # ATS sender with no clear category → likely an application confirmation
+    if _ATS_SENDERS.search(sender_addr):
+        return "applied"
+    return None
+
+
+def _graph_search_messages(access_token: str, query: str) -> list[dict]:
+    """Fetch messages matching a KQL query, up to 2 pages (200 results)."""
+    encoded_q = urllib.parse.quote(query)
+    path: Optional[str] = (
+        f"/me/messages"
+        f"?$search={encoded_q}"
+        f"&$top=100"
+        f"&$select=id,subject,receivedDateTime,from,webLink"
+    )
+    messages: list[dict] = []
+    pages = 0
+    while path and pages < 2:
+        data = _graph_request(access_token, path)
+        messages.extend(data.get("value", []))
+        pages += 1
+        next_link: str = data.get("@odata.nextLink", "")
+        if next_link and next_link.startswith(_GRAPH_BASE):
+            path = next_link[len(_GRAPH_BASE):]
+        else:
+            path = None
+    return messages
+
+
+# Per-token result cache: token_hash -> (results, expires_at)
+_applied_cache: Dict[str, Any] = {}
+_applied_cache_lock = threading.Lock()
+_APPLIED_CACHE_TTL = timedelta(minutes=5)
+
+
 def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
-    """Search the user's mailbox for job-application confirmation emails.
+    """Search the user's mailbox for job-related emails, categorized by type.
 
-    Uses Graph's $search parameter across the last 6 months of mail.
-    Returns a list of dicts with keys: subject, company, received, sender, link.
+    Runs the 4 Graph searches in parallel and classifies each email as
+    'applied', 'interview', or 'rejected'. Results are cached per token
+    for 5 minutes to avoid redundant network calls on filter/tab switches.
     """
-    # Run two searches and merge: one on subject keyword, one on common ATS senders
-    search_queries = [
-        '"application" OR "applied" OR "thank you for applying" OR "application received"',
-    ]
+    import hashlib
+    token_key = hashlib.sha256(access_token.encode()).hexdigest()
+    now = datetime.now()
+
+    with _applied_cache_lock:
+        cached = _applied_cache.get(token_key)
+        if cached and cached["expires_at"] > now:
+            return cached["results"]
+
     seen_ids: set[str] = set()
-    results: list[dict[str, Any]] = []
+    all_messages: list[dict] = []
 
-    for q in search_queries:
-        encoded_q = urllib.parse.quote(f'"{q}"')
-        path = (
-            f"/me/messages"
-            f"?$search={encoded_q}"
-            f"&$top=100"
-            f"&$select=id,subject,receivedDateTime,from,webLink"
-            f"&$orderby=receivedDateTime+desc"
-        )
-        try:
-            data = _graph_request(access_token, path)
-        except RuntimeError:
-            # $orderby incompatible with $search — retry without it
-            path_no_sort = (
-                f"/me/messages"
-                f"?$search={encoded_q}"
-                f"&$top=100"
-                f"&$select=id,subject,receivedDateTime,from,webLink"
-            )
-            data = _graph_request(access_token, path_no_sort)
-
-        for msg in data.get("value", []):
-            msg_id = msg.get("id", "")
-            if msg_id in seen_ids:
-                continue
-            subject = msg.get("subject", "") or ""
-            sender_addr = (msg.get("from", {}).get("emailAddress", {}).get("address") or "")
-            sender_name = (msg.get("from", {}).get("emailAddress", {}).get("name") or "")
-            # Filter to only likely application emails
-            if not (_APPLICATION_SUBJECTS.search(subject) or _APPLICATION_SENDERS.search(sender_addr)):
-                continue
-            seen_ids.add(msg_id)
-            received_raw = msg.get("receivedDateTime", "")
+    # Run all searches in parallel
+    with ThreadPoolExecutor(max_workers=len(_GRAPH_SEARCHES)) as executor:
+        futures = {
+            executor.submit(_graph_search_messages, access_token, q): q
+            for q in _GRAPH_SEARCHES
+        }
+        for future in as_completed(futures):
             try:
-                received_dt = datetime.fromisoformat(received_raw.replace("Z", "+00:00"))
-                received = received_dt.strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                received = received_raw[:10]
-            results.append({
-                "subject": subject,
-                "company": sender_name,
-                "sender":  sender_addr,
-                "received": received,
-                "link": msg.get("webLink", ""),
-            })
+                all_messages.extend(future.result())
+            except RuntimeError:
+                pass
 
-    results.sort(key=lambda m: m["received"], reverse=True)
+    results: list[dict[str, Any]] = []
+    for msg in all_messages:
+        msg_id = msg.get("id", "")
+        if msg_id in seen_ids:
+            continue
+        subject = msg.get("subject", "") or ""
+        sender_addr = (msg.get("from", {}).get("emailAddress", {}).get("address") or "")
+        sender_name = (msg.get("from", {}).get("emailAddress", {}).get("name") or "")
+        category = _classify_email(subject, sender_addr)
+        if category is None:
+            continue
+        seen_ids.add(msg_id)
+        received_raw = msg.get("receivedDateTime", "")
+        try:
+            received_dt = datetime.fromisoformat(received_raw.replace("Z", "+00:00"))
+            received = received_dt.strftime("%Y-%m-%d %H:%M")
+            received_sort = received_dt.isoformat()
+        except Exception:
+            received = received_raw[:10]
+            received_sort = received_raw
+        results.append({
+            "subject": subject,
+            "company": sender_name,
+            "sender": sender_addr,
+            "received": received,
+            "received_sort": received_sort,
+            "link": msg.get("webLink", ""),
+            "category": category,
+        })
+
+    results.sort(key=lambda m: m.get("received_sort", ""), reverse=True)
+
+    with _applied_cache_lock:
+        _applied_cache[token_key] = {"results": results, "expires_at": now + _APPLIED_CACHE_TTL}
+
     return results
 
 
@@ -611,6 +694,7 @@ def applied() -> str:
     error: str = ""
     jobs: list[dict] = []
     search_query = request.args.get("q", "").strip()
+    category_filter = request.args.get("cat", "all")
     token_submitted = ""
 
     if request.method == "POST":
@@ -624,6 +708,20 @@ def applied() -> str:
     if request.args.get("clear_token"):
         session.pop("graph_token", None)
         access_token = ""
+        # Also evict the cache for this token
+        import hashlib
+        if access_token:
+            token_key = hashlib.sha256(access_token.encode()).hexdigest()
+            with _applied_cache_lock:
+                _applied_cache.pop(token_key, None)
+
+    if request.args.get("refresh"):
+        stored = session.get("graph_token", "")
+        if stored:
+            import hashlib
+            token_key = hashlib.sha256(stored.encode()).hexdigest()
+            with _applied_cache_lock:
+                _applied_cache.pop(token_key, None)
 
     if access_token:
         try:
@@ -633,6 +731,16 @@ def applied() -> str:
             if "401" in error or "InvalidAuthenticationToken" in error:
                 session.pop("graph_token", None)
                 error = "Access token expired or invalid. Please paste a new one."
+
+    counts = {
+        "all": len(jobs),
+        "applied": sum(1 for j in jobs if j.get("category") == "applied"),
+        "interview": sum(1 for j in jobs if j.get("category") == "interview"),
+        "rejected": sum(1 for j in jobs if j.get("category") == "rejected"),
+    }
+
+    if category_filter != "all":
+        jobs = [j for j in jobs if j.get("category") == category_filter]
 
     if search_query and jobs:
         sq = search_query.lower()
@@ -644,6 +752,8 @@ def applied() -> str:
         error=error,
         has_token=bool(access_token),
         search_query=search_query,
+        category_filter=category_filter,
+        counts=counts,
     )
 
 
