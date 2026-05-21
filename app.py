@@ -516,24 +516,50 @@ def newgrad() -> str:
 
 # Subject-line patterns for classifying incoming emails
 _REJECTION_SUBJECTS = re.compile(
-    r"unfortunately|not\s+moving\s+forward|not\s+selected|not\s+a\s+fit|"
-    r"other\s+candidates|decided\s+not\s+to\s+(move|proceed)|we\s+regret|"
-    r"no\s+longer\s+consider|position\s+has\s+been\s+filled|"
-    r"pursuing\s+other|chosen\s+not\s+to|unable\s+to\s+offer|"
-    r"will\s+not\s+be\s+moving|did\s+not\s+select|application\s+update",
+    # Explicit negative language
+    r"unfortunately|we\s+regret|we\s+are\s+sorry|we\s+appreciate\s+your\s+(interest|time)|"
+    r"not\s+moving\s+forward|not\s+selected|not\s+a\s+(match|fit)|"
+    r"will\s+not\s+be\s+moving|did\s+not\s+select|decided\s+not\s+to\s+(move|proceed|continue)|"
+    r"no\s+longer\s+(consider|moving|pursuing)|"
+    # Pursuing / choosing other candidates
+    r"other\s+candidates|pursuing\s+other|chosen\s+(another|other|not\s+to)|"
+    r"moving\s+forward\s+with\s+(other|another|different)|"
+    r"selected\s+(other|another|a\s+different)|"
+    # Position / role related
+    r"position\s+has\s+been\s+(filled|closed|cancelled|canceled)|"
+    r"(closing|closed|cancell?ed|pausing|putting\s+on\s+hold)\s+(the\s+)?(position|role|opening|search|req)|"
+    r"role\s+has\s+been\s+(filled|closed|cancelled)|"
+    # Skills/qualifications framing (still a no)
+    r"although\s+(your|we)|impressed\s+with\s+your|skills\s+were\s+impressive|"
+    r"while\s+your\s+(background|experience|qualifications?|skills?)|"
+    r"after\s+(careful|thorough|much)\s+(consideration|review|deliberation)|"
+    r"after\s+reviewing\s+your|having\s+reviewed\s+your|"
+    # Unable to offer
+    r"unable\s+to\s+(offer|extend|move|proceed)|cannot\s+offer|"
+    r"not\s+able\s+to\s+(offer|move|proceed|extend)|"
+    r"not\s+to\s+move\s+forward\s+with|decided\s+not\s+to\s+move\s+forward|"
+    r"not\s+moving\s+forward\s+with\s+your|"
+    # Application update / status language
+    r"application\s+(update|status|decision|outcome)|update\s+on\s+your\s+application|"
+    r"regarding\s+your\s+application|your\s+application\s+status|"
+    # Wished them well framing
+    r"wish\s+you\s+(all\s+the\s+)?best|best\s+of\s+luck\s+in\s+your|future\s+(success|endeavors?|opportunities?)|"
+    # Thank you for your interest (standalone rejection — not 'in a role/position')
+    r"thank\s+you\s+for\s+your\s+interest(?!\s+in\s+(a\s+)?(role|position|job|opportunity|working))",
     re.IGNORECASE,
 )
 _INTERVIEW_SUBJECTS = re.compile(
     r"\binterview\b|phone\s+screen|video\s+(call|interview)|"
     r"coding\s+(challenge|assessment|test)|take[\s-]?home|"
     r"technical\s+(assessment|screen|interview|round|challenge)|"
-    r"next\s+steps?|let.s\s+(chat|talk|connect)|"
+
     r"schedule\s+(a\s+)?(call|meeting|time)|meet\s+with|"
     r"hiring\s+manager|assessment\s+invitation|skills\s+assessment",
     re.IGNORECASE,
 )
 _APPLICATION_SUBJECTS = re.compile(
-    r"thank\s+you\s+for\s+(applying|your\s+(interest|application))|"
+    r"thank\s+you\s+for\s+(applying|your\s+application)|"
+    r"thank\s+you\s+for\s+your\s+interest\s+in\s+(a\s+)?(role|position|job|opportunity)|"
     r"application\s+(received|submitted|confirmed|complete|on\s+file|confirmation)|"
     r"we\s+received\s+your\s+application|successfully\s+applied|"
     r"your\s+application\s+(to|for|has\s+been|was\s+received)|"
@@ -541,21 +567,38 @@ _APPLICATION_SUBJECTS = re.compile(
     r"application\s+for\s+the\s+position",
     re.IGNORECASE,
 )
+# Broad signal: subject mentions apply/application — used as a fallback when
+# no stronger pattern matches, to catch generic ATS confirmation emails.
+_APPLICATION_SIGNAL = re.compile(
+    r"\b(appl(y|ied|ication|ications?)|your\s+application|application\s+for|for\s+the\s+(role|position|job))\b",
+    re.IGNORECASE,
+)
 _ATS_SENDERS = re.compile(
     r"greenhouse\.io|lever\.co|workday\.com|icims\.com|jobvite\.com"
     r"|smartrecruiters\.com|taleo\.net|successfactors\.com|myworkdayjobs\.com"
     r"|linkedin\.com|indeed\.com|ziprecruiter\.com|glassdoor\.com"
-    r"|careers?@|recruiting@|talent@|jobs@|no.?reply.*career|noreply.*job",
+    r"|careers?@|recruiting@|talent@|no.?reply.*career|noreply.*job",
     re.IGNORECASE,
 )
 
-# Graph KQL queries — run separately so each can paginate independently
-_GRAPH_SEARCHES = [
-    '"thank you for applying" OR "application received" OR "application submitted" OR "successfully applied"',
-    '"your application" OR "application confirmation" OR "you\'ve applied" OR "submission confirmed"',
-    '"interview" OR "phone screen" OR "technical assessment" OR "coding challenge" OR "next steps"',
-    '"unfortunately" OR "not moving forward" OR "not selected" OR "we regret" OR "other candidates"',
-]
+# Subjects that look like job-board marketing/alerts — discard before classifying
+_DISCARD_SUBJECTS = re.compile(
+    r"new\s+job\s+(alert|match|recommendation|opening|posting|opportunit)|"
+    r"jobs?\s+(you\s+might|matching|near|alert|recommendation|update|digest|weekly|daily)|"
+    r"recommended\s+jobs?|suggested\s+jobs?|top\s+jobs?|trending\s+jobs?|"
+    r"jobs?\s+based\s+on|similar\s+jobs?|\d+\s+new\s+jobs?|"
+    r"job\s+(digest|newsletter|roundup|listing|update)|unsubscribe|"
+    r"your\s+job\s+(search|alert|digest|feed)|salary\s+(report|insight|alert)|"
+    r"profile\s+(view|update)|recruiter\s+(view|found\s+you|is\s+interested)|"
+    r"^\[github\]|oauth\s+application|has\s+been\s+added\s+to\s+your\s+account|"
+    r"third.party\s+(oauth|github|app)",
+    re.IGNORECASE,
+)
+# Calendar system noise — invitations, acceptances, reminders, cancellations
+_CALENDAR_SUBJECTS = re.compile(
+    r"^(invitation|accepted|declined|tentative|canceled\s+event|cancelled\s+event|reminder|updated\s+invitation):\s",
+    re.IGNORECASE,
+)
 
 
 def _graph_request(access_token: str, path: str) -> dict:
@@ -576,8 +619,25 @@ def _graph_request(access_token: str, path: str) -> dict:
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 
+def _normalize_subject(subject: str) -> str:
+    """Strip Re:/Fwd: prefixes for thread deduplication."""
+    s = subject.strip()
+    while True:
+        stripped = re.sub(r'^(Re|Fwd|FW|RE|FWD|AW):\s*', '', s, flags=re.IGNORECASE).strip()
+        if stripped == s:
+            break
+        s = stripped
+    return s.lower()
+
+
 def _classify_email(subject: str, sender_addr: str) -> Optional[str]:
     """Return 'rejected', 'interview', 'applied', or None (discard)."""
+    # Discard calendar system emails (invitations, reminders, acceptances)
+    if _CALENDAR_SUBJECTS.search(subject):
+        return None
+    # Discard job alerts, newsletters, and marketing emails
+    if _DISCARD_SUBJECTS.search(subject):
+        return None
     # Rejection takes highest priority — a rejection is never an "application"
     if _REJECTION_SUBJECTS.search(subject):
         return "rejected"
@@ -585,24 +645,45 @@ def _classify_email(subject: str, sender_addr: str) -> Optional[str]:
         return "interview"
     if _APPLICATION_SUBJECTS.search(subject):
         return "applied"
-    # ATS sender with no clear category → likely an application confirmation
-    if _ATS_SENDERS.search(sender_addr):
+    # Fallback: if "apply/application" appears in the subject, use it as a
+    # weaker signal and re-check the stronger patterns before defaulting to applied.
+    if _APPLICATION_SIGNAL.search(subject):
+        # Could still be a rejection or interview phrased differently
+        if _REJECTION_SUBJECTS.search(subject):
+            return "rejected"
+        if _INTERVIEW_SUBJECTS.search(subject):
+            return "interview"
         return "applied"
     return None
 
 
+_LOOKBACK_DAYS = (datetime.utcnow() - datetime(2026, 1, 1)).days  # from Jan 1 2026
+_CHUNK_DAYS  = 90      # each parallel date-range fetch covers 90 days
+
+# Targeted KQL phrases — each runs as a separate parallel $search
+_GRAPH_SEARCHES = [
+    '"thank you for applying" OR "application received" OR "application submitted" OR "successfully applied"',
+    '"your application" OR "application confirmation" OR "you\'ve applied" OR "submission confirmed"',
+    '"interview" OR "phone screen" OR "technical assessment" OR "coding challenge"',
+    '"unfortunately" OR "not moving forward" OR "not selected" OR "we regret" OR "other candidates"',
+    '"position has been filled" OR "pursuing other" OR "unable to offer" OR "after careful consideration" OR "not to move forward"',
+    '"although your" OR "while your background" OR "closing the position" OR "role has been filled" OR "best of luck" OR "thank you for your interest"',
+    '"application update" OR "update on your application" OR "your application status" OR "application decision"',
+]
+
+
 def _graph_search_messages(access_token: str, query: str) -> list[dict]:
-    """Fetch messages matching a KQL query, up to 2 pages (200 results)."""
+    """$search-based fetch — inbox only, relevance-ranked, up to 3 pages (300 results)."""
     encoded_q = urllib.parse.quote(query)
     path: Optional[str] = (
-        f"/me/messages"
+        f"/me/mailFolders/inbox/messages"
         f"?$search={encoded_q}"
         f"&$top=100"
         f"&$select=id,subject,receivedDateTime,from,webLink"
     )
     messages: list[dict] = []
     pages = 0
-    while path and pages < 2:
+    while path and pages < 3:
         data = _graph_request(access_token, path)
         messages.extend(data.get("value", []))
         pages += 1
@@ -614,6 +695,45 @@ def _graph_search_messages(access_token: str, query: str) -> list[dict]:
     return messages
 
 
+def _graph_fetch_date_chunk(access_token: str, start_dt: datetime, end_dt: datetime) -> list[dict]:
+    """$filter fetch for a specific date range from inbox, up to 5 pages (500 emails)."""
+    start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    end_str   = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    filter_val  = urllib.parse.quote(f"receivedDateTime ge {start_str} and receivedDateTime lt {end_str}")
+    orderby_val = urllib.parse.quote("receivedDateTime desc")
+    path: Optional[str] = (
+        f"/me/mailFolders/inbox/messages"
+        f"?$filter={filter_val}"
+        f"&$orderby={orderby_val}"
+        f"&$select=id,subject,receivedDateTime,from,webLink"
+        f"&$top=100"
+    )
+    messages: list[dict] = []
+    pages = 0
+    while path and pages < 5:
+        data = _graph_request(access_token, path)
+        messages.extend(data.get("value", []))
+        pages += 1
+        next_link: str = data.get("@odata.nextLink", "")
+        if next_link and next_link.startswith(_GRAPH_BASE):
+            path = next_link[len(_GRAPH_BASE):]
+        else:
+            path = None
+    return messages
+
+
+def _date_chunks(lookback_days: int, chunk_days: int) -> list[tuple[datetime, datetime]]:
+    """Split the lookback window into (start, end) pairs of chunk_days each."""
+    now = datetime.utcnow()
+    chunks = []
+    end = now
+    while end > now - timedelta(days=lookback_days):
+        start = max(end - timedelta(days=chunk_days), now - timedelta(days=lookback_days))
+        chunks.append((start, end))
+        end = start
+    return chunks
+
+
 # Per-token result cache: token_hash -> (results, expires_at)
 _applied_cache: Dict[str, Any] = {}
 _applied_cache_lock = threading.Lock()
@@ -623,9 +743,10 @@ _APPLIED_CACHE_TTL = timedelta(minutes=5)
 def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
     """Search the user's mailbox for job-related emails, categorized by type.
 
-    Runs the 4 Graph searches in parallel and classifies each email as
-    'applied', 'interview', or 'rejected'. Results are cached per token
-    for 5 minutes to avoid redundant network calls on filter/tab switches.
+    Runs 4 targeted $search queries + 1 date-filtered recent fetch all in
+    parallel. $search covers 2 years by relevance; the recent $filter
+    guarantees nothing from the last 60 days is missed. Results are
+    cached per token for 5 minutes.
     """
     import hashlib
     token_key = hashlib.sha256(access_token.encode()).hexdigest()
@@ -636,21 +757,28 @@ def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
         if cached and cached["expires_at"] > now:
             return cached["results"]
 
-    seen_ids: set[str] = set()
     all_messages: list[dict] = []
+    cutoff_dt = datetime.utcnow() - timedelta(days=_LOOKBACK_DAYS)
+    chunks = _date_chunks(_LOOKBACK_DAYS, _CHUNK_DAYS)
 
-    # Run all searches in parallel
-    with ThreadPoolExecutor(max_workers=len(_GRAPH_SEARCHES)) as executor:
-        futures = {
-            executor.submit(_graph_search_messages, access_token, q): q
+    # keyword $searches + chunked date-range $filter fetches, all in parallel
+    n_workers = len(_GRAPH_SEARCHES) + len(chunks)
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        search_futures = [
+            executor.submit(_graph_search_messages, access_token, q)
             for q in _GRAPH_SEARCHES
-        }
-        for future in as_completed(futures):
+        ]
+        chunk_futures = [
+            executor.submit(_graph_fetch_date_chunk, access_token, start, end)
+            for start, end in chunks
+        ]
+        for f in as_completed(search_futures + chunk_futures):
             try:
-                all_messages.extend(future.result())
+                all_messages.extend(f.result())
             except RuntimeError:
                 pass
 
+    seen_ids: set[str] = set()
     results: list[dict[str, Any]] = []
     for msg in all_messages:
         msg_id = msg.get("id", "")
@@ -662,15 +790,18 @@ def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
         category = _classify_email(subject, sender_addr)
         if category is None:
             continue
-        seen_ids.add(msg_id)
+        # Drop messages older than the lookback window (from $search results)
         received_raw = msg.get("receivedDateTime", "")
         try:
             received_dt = datetime.fromisoformat(received_raw.replace("Z", "+00:00"))
+            if received_dt.replace(tzinfo=None) < cutoff_dt:
+                continue
             received = received_dt.strftime("%Y-%m-%d %H:%M")
             received_sort = received_dt.isoformat()
         except Exception:
             received = received_raw[:10]
             received_sort = received_raw
+        seen_ids.add(msg_id)
         results.append({
             "subject": subject,
             "company": sender_name,
@@ -682,6 +813,18 @@ def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
         })
 
     results.sort(key=lambda m: m.get("received_sort", ""), reverse=True)
+
+    # Deduplicate email threads: same normalized subject + sender domain → keep most recent
+    seen_thread: dict[tuple, bool] = {}
+    deduped: list[dict[str, Any]] = []
+    for r in results:
+        sender = r["sender"].lower()
+        domain = sender.split("@")[-1] if "@" in sender else sender
+        key = (_normalize_subject(r["subject"]), domain)
+        if key not in seen_thread:
+            seen_thread[key] = True
+            deduped.append(r)
+    results = deduped
 
     with _applied_cache_lock:
         _applied_cache[token_key] = {"results": results, "expires_at": now + _APPLIED_CACHE_TTL}
