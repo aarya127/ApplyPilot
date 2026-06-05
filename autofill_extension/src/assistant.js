@@ -1,38 +1,50 @@
-const result = document.getElementById("result");
+const chatLog = document.getElementById("chatLog");
 const reviewList = document.getElementById("reviewList");
-const profileStatus = document.getElementById("profileStatus");
-const autofillButton = document.getElementById("autofillButton");
-const assistantButton = document.getElementById("assistantButton");
-const previewButton = document.getElementById("previewButton");
+const assistantStatus = document.getElementById("assistantStatus");
 const scanButton = document.getElementById("scanButton");
-const saveAnswersButton = document.getElementById("saveAnswersButton");
+const previewButton = document.getElementById("previewButton");
 const fillSelectedButton = document.getElementById("fillSelectedButton");
+const saveAnswersButton = document.getElementById("saveAnswersButton");
 const trackButton = document.getElementById("trackButton");
 const optionsButton = document.getElementById("optionsButton");
+const countryButtons = Array.from(document.querySelectorAll("[data-country]"));
 
 let lastPreview = null;
 let lastFillResult = null;
 
-initPopup();
+initAssistant();
 
-assistantButton.addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+countryButtons.forEach((button) => {
+  button.addEventListener("click", async () => {
+    const country = button.dataset.country;
+    await setTargetCountry(country);
+    addMessage("user", country === "usa" ? "This is a USA role." : "This is a Canadian role.");
+    addMessage("agent", `Got it. I will use your ${country === "usa" ? "USA" : "Canadian"} address and eligibility answers for this page.`);
+  });
+});
 
-  if (!chrome.sidePanel?.open || !tab?.id) {
-    result.textContent = "Side panel is not available in this Chrome version.";
+scanButton.addEventListener("click", async () => {
+  setBusy("Scanning the current application page...");
+  const response = await sendToActiveTab({ type: "SCAN_FIELDS" });
+
+  if (!response?.ok) {
+    showError(response?.error || "I could not scan this page.");
     return;
   }
 
-  await chrome.sidePanel.open({ tabId: tab.id });
-  window.close();
+  const frameText = response.frameCount
+    ? ` across ${response.accessibleFrameCount}/${response.frameCount} accessible frame(s)`
+    : "";
+  addMessage("agent", `I found ${response.count} fillable field(s)${frameText}.`);
+  assistantStatus.textContent = "Scan complete";
 });
 
 previewButton.addEventListener("click", async () => {
-  setBusy("Building autofill preview...");
+  setBusy("Building a review plan...");
   const response = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
 
   if (!response?.ok) {
-    showError(response?.error || "Could not preview this page.");
+    showError(response?.error || "I could not build a preview for this page.");
     return;
   }
 
@@ -41,61 +53,36 @@ previewButton.addEventListener("click", async () => {
   renderReview(response.result);
 });
 
-autofillButton.addEventListener("click", async () => {
-  setBusy("Filling current page...");
-  const response = await sendToActiveTab({ type: "AUTOFILL_PAGE" });
-
-  if (!response?.ok) {
-    showError(response?.error || "Could not autofill this page.");
-    return;
-  }
-
-  const { scanned, mapped, filled, failures } = response.result;
-  result.textContent = `Scanned ${scanned} fields, mapped ${mapped}, filled ${filled}.`;
-
-  if (failures?.length) {
-    result.textContent += ` ${failures.length} field(s) need review.`;
-  }
-
-  lastFillResult = response.result;
-  trackButton.disabled = false;
-});
-
 fillSelectedButton.addEventListener("click", async () => {
   const selected = getSelectedMappings();
 
   if (!selected.length) {
-    result.textContent = "No reviewed fields selected.";
+    addMessage("agent", "Nothing is selected yet. Preview the page, then keep the fields you want checked.");
     return;
   }
 
-  setBusy("Filling selected fields...");
+  setBusy("Filling the selected reviewed fields...");
   const response = await sendToActiveTab({
     type: "APPLY_AUTOFILL_MAPPINGS",
     mappings: selected
   });
 
   if (!response?.ok) {
-    showError(response?.error || "Could not fill selected fields.");
+    showError(response?.error || "I could not fill the selected fields.");
     return;
-  }
-
-  const { filled, failures } = response.result;
-  result.textContent = `Filled ${filled} selected field(s).`;
-
-  if (failures?.length) {
-    result.textContent += ` ${failures.length} field(s) need review.`;
   }
 
   lastFillResult = response.result;
   trackButton.disabled = false;
+  addMessage("agent", `Filled ${response.result.filled} selected field(s). Please review the page before submitting.`);
+  assistantStatus.textContent = "Filled";
 });
 
 saveAnswersButton.addEventListener("click", async () => {
   const answers = collectNewAnswers();
 
   if (!Object.keys(answers).length) {
-    result.textContent = "No new answers entered.";
+    addMessage("agent", "I do not see any new answers to save yet.");
     return;
   }
 
@@ -104,32 +91,12 @@ saveAnswersButton.addEventListener("click", async () => {
   profile.answers = { ...(profile.answers || {}), ...answers };
   await chrome.storage.local.set({ candidateProfile: profile });
 
-  result.textContent = `Saved ${Object.keys(answers).length} answer(s). Refreshing preview...`;
+  addMessage("agent", `Saved ${Object.keys(answers).length} answer(s). I will remember those for next time.`);
   const response = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
-
   if (response?.ok) {
     lastPreview = response.result;
     renderReview(response.result);
   }
-});
-
-scanButton.addEventListener("click", async () => {
-  setBusy("Scanning page...");
-  const response = await sendToActiveTab({ type: "SCAN_FIELDS" });
-
-  if (!response?.ok) {
-    showError(response?.error || "Could not scan this page.");
-    return;
-  }
-
-  const frameText = response.frameCount
-    ? ` across ${response.accessibleFrameCount}/${response.frameCount} accessible frame(s)`
-    : "";
-  result.textContent = `Found ${response.count} fillable field(s)${frameText}.`;
-});
-
-optionsButton.addEventListener("click", () => {
-  chrome.runtime.openOptionsPage();
 });
 
 trackButton.addEventListener("click", async () => {
@@ -141,7 +108,7 @@ trackButton.addEventListener("click", async () => {
     status: "filled",
     filledCount: lastFillResult?.filled || 0,
     mappedCount: selected.length || lastPreview?.mapped || 0,
-    source: "chrome_extension",
+    source: "chrome_extension_assistant",
     createdAt: new Date().toISOString()
   };
 
@@ -151,17 +118,39 @@ trackButton.addEventListener("click", async () => {
   });
 
   if (!response?.ok) {
-    showError(response?.error || "Could not track this application.");
+    showError(response?.error || "I could not track this application.");
     return;
   }
 
-  result.textContent = "Application tracked locally.";
+  addMessage("agent", "Tracked this application locally.");
 });
 
-async function initPopup() {
-  const { candidateProfile } = await chrome.storage.local.get("candidateProfile");
+optionsButton.addEventListener("click", () => {
+  chrome.runtime.openOptionsPage();
+});
+
+async function initAssistant() {
+  const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
   const hasProfile = Boolean(candidateProfile?.email || candidateProfile?.firstName);
-  profileStatus.textContent = hasProfile ? "Profile saved" : "Needs profile";
+  const targetCountry = settings?.targetCountry || "canada";
+
+  assistantStatus.textContent = hasProfile ? "Profile loaded" : "Profile needed";
+  updateCountryButtons(targetCountry);
+  addMessage("agent", "I can help fill this application step by step. Is this role in the USA or Canada?");
+  addMessage("agent", "Choose a country first, then preview. I will stop before final submission.");
+}
+
+async function setTargetCountry(targetCountry) {
+  const { settings } = await chrome.storage.local.get("settings");
+  const nextSettings = { ...(settings || {}), targetCountry };
+  await chrome.storage.local.set({ settings: nextSettings });
+  updateCountryButtons(targetCountry);
+}
+
+function updateCountryButtons(targetCountry) {
+  countryButtons.forEach((button) => {
+    button.classList.toggle("is-active", button.dataset.country === targetCountry);
+  });
 }
 
 async function sendToActiveTab(message) {
@@ -221,10 +210,6 @@ async function sendFrameAwareMessage(tab, message) {
     return aggregatePreviewResponses(successful, tab, frames.length);
   }
 
-  if (message.type === "AUTOFILL_PAGE") {
-    return aggregateFillResponses(successful, frames.length);
-  }
-
   return successful[0]?.response || { ok: false, error: accessErrorMessage(tab.url) };
 }
 
@@ -253,6 +238,8 @@ function aggregateScanResponses(successful, frameCount) {
 function aggregatePreviewResponses(successful, tab, frameCount) {
   let scanned = 0;
   const mappings = [];
+  const unmappedFields = [];
+  const manualTasks = [];
 
   for (const { frame, response } of successful) {
     const result = response.result || {};
@@ -266,12 +253,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
         reviewId: `${frame.frameId}:${mapping.index}`
       });
     }
-  }
 
-  const unmappedFields = [];
-  const manualTasks = [];
-  for (const { frame, response } of successful) {
-    const result = response.result || {};
     for (const field of result.unmappedFields || []) {
       unmappedFields.push({
         ...field,
@@ -280,6 +262,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
         reviewId: `${frame.frameId}:question:${field.index}`
       });
     }
+
     for (const task of result.manualTasks || []) {
       manualTasks.push({
         ...task,
@@ -361,39 +344,21 @@ function aggregateFillResponses(successful, frameCount) {
   return { ok: true, result };
 }
 
-function accessErrorMessage(url = "") {
-  if (/^(chrome|edge|about|devtools|chrome-extension):/i.test(url)) {
-    return "Chrome blocks extensions on browser/internal pages. Open a normal https page.";
-  }
-
-  if (/^file:/i.test(url)) {
-    return "Enable Allow access to file URLs for this extension, then reload the page.";
-  }
-
-  return "Could not inject the autofill script. Reload the extension and refresh this page.";
-}
-
-function setBusy(message) {
-  result.textContent = message;
-}
-
-function showError(message) {
-  result.textContent = message;
-}
-
 function renderReview(preview) {
   reviewList.replaceChildren();
   fillSelectedButton.disabled = preview.mappings.length === 0;
   saveAnswersButton.disabled = !(preview.unmappedFields || []).some((field) => !field.needsManualUpload);
   trackButton.disabled = true;
+
   const frameText = preview.frameCount
     ? ` across ${preview.accessibleFrameCount}/${preview.frameCount} accessible frame(s)`
     : "";
-  result.textContent = `Scanned ${preview.scanned} fields, mapped ${preview.mapped}${frameText}. Review before filling.`;
+  addMessage("agent", `I scanned ${preview.scanned} field(s) and mapped ${preview.mapped}${frameText}. Review the checked cards, then fill selected.`);
 
+  appendReviewHeading("Ready to fill");
   for (const mapping of preview.mappings) {
     const item = document.createElement("label");
-    item.className = "review-item";
+    item.className = "assistant-card";
 
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
@@ -408,16 +373,20 @@ function renderReview(preview) {
 
     const value = document.createElement("span");
     value.className = "review-value";
-    value.textContent = `${String(mapping.value).slice(0, 120)} (${mapping.source}, ${Math.round((mapping.confidence || 0) * 100)}%)`;
+    value.textContent = `${String(mapping.value).slice(0, 140)} (${mapping.source}, ${Math.round((mapping.confidence || 0) * 100)}%)`;
 
     body.append(label, value);
     item.append(checkbox, body);
     reviewList.append(item);
   }
 
+  if (preview.manualTasks?.length) {
+    appendReviewHeading("Manual tasks");
+  }
+
   for (const task of preview.manualTasks || []) {
     const item = document.createElement("div");
-    item.className = "review-item manual-task";
+    item.className = "assistant-card manual-task";
     const body = document.createElement("span");
     body.className = "review-body";
     const label = document.createElement("strong");
@@ -425,8 +394,8 @@ function renderReview(preview) {
     const value = document.createElement("span");
     value.className = "review-value";
     value.textContent = task.resumeFileName
-      ? `Manual task: upload ${task.resumeFileName}`
-      : "Manual task: upload your resume";
+      ? `Upload ${task.resumeFileName} manually if the page still needs it.`
+      : "Upload your resume manually if the page still needs it.";
     body.append(label, value);
     item.append(body);
     reviewList.append(item);
@@ -434,15 +403,13 @@ function renderReview(preview) {
 
   const askableFields = (preview.unmappedFields || []).filter((field) => !field.needsManualUpload);
   if (askableFields.length) {
-    const heading = document.createElement("div");
-    heading.className = "review-heading";
-    heading.textContent = "Missing answers";
-    reviewList.append(heading);
+    appendReviewHeading("I need your answer");
+    addMessage("agent", "Some questions are not in your profile yet. Answer them below once and I will remember them.");
   }
 
   for (const field of askableFields) {
     const item = document.createElement("label");
-    item.className = "review-item question-item";
+    item.className = "assistant-card question-item";
     const body = document.createElement("span");
     body.className = "review-body";
 
@@ -454,6 +421,15 @@ function renderReview(preview) {
     item.append(body);
     reviewList.append(item);
   }
+
+  assistantStatus.textContent = "Preview ready";
+}
+
+function appendReviewHeading(text) {
+  const heading = document.createElement("div");
+  heading.className = "review-heading";
+  heading.textContent = text;
+  reviewList.append(heading);
 }
 
 function buildAnswerInput(field) {
@@ -476,7 +452,7 @@ function buildAnswerInput(field) {
     input.rows = 3;
   } else {
     input = document.createElement("input");
-    input.type = field.type === "checkbox" ? "text" : "text";
+    input.type = "text";
     input.placeholder = "Type answer to remember";
   }
 
@@ -515,3 +491,34 @@ function getSelectedMappings() {
     return selectedIndexes.has(reviewId);
   });
 }
+
+function addMessage(author, text) {
+  const message = document.createElement("div");
+  message.className = `chat-message ${author}`;
+  message.textContent = text;
+  chatLog.append(message);
+  chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function setBusy(message) {
+  assistantStatus.textContent = "Working";
+  addMessage("agent", message);
+}
+
+function showError(message) {
+  assistantStatus.textContent = "Needs attention";
+  addMessage("agent", message);
+}
+
+function accessErrorMessage(url = "") {
+  if (/^(chrome|edge|about|devtools|chrome-extension):/i.test(url)) {
+    return "Chrome blocks extensions on browser/internal pages. Open a normal https page.";
+  }
+
+  if (/^file:/i.test(url)) {
+    return "Enable Allow access to file URLs for this extension, then reload the page.";
+  }
+
+  return "Could not inject the autofill script. Reload the extension and refresh this page.";
+}
+

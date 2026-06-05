@@ -3,7 +3,7 @@
   "name": "Application Autofill Prototype",
   "description": "Scans job application forms and fills them from a saved candidate profile.",
   "version": "0.1.0",
-  "permissions": ["activeTab", "scripting", "storage", "webNavigation"],
+  "permissions": ["activeTab", "scripting", "storage", "webNavigation", "sidePanel"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background.js"
@@ -11,6 +11,9 @@
   "action": {
     "default_title": "Application Autofill",
     "default_popup": "src/popup.html"
+  },
+  "side_panel": {
+    "default_path": "src/assistant.html"
   },
   "options_page": "src/options.html",
   "content_scripts": [

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Application Assistant</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body class="assistant-page">
+    <main class="assistant-shell">
+      <header class="assistant-header">
+        <div>
+          <h1>Application Assistant</h1>
+          <p id="assistantStatus">Ready</p>
+        </div>
+        <button id="optionsButton" class="icon-button" title="Profile settings" aria-label="Profile settings">Settings</button>
+      </header>
+
+      <section id="chatLog" class="chat-log" aria-live="polite"></section>
+
+      <section class="assistant-controls" aria-label="Assistant controls">
+        <div class="country-control" aria-label="Role country">
+          <button id="usaButton" class="chip-button" data-country="usa">USA</button>
+          <button id="canadaButton" class="chip-button" data-country="canada">Canada</button>
+        </div>
+        <div class="tool-grid">
+          <button id="scanButton" class="secondary-button">Scan</button>
+          <button id="previewButton" class="primary-button">Preview</button>
+          <button id="fillSelectedButton" class="secondary-button" disabled>Fill selected</button>
+          <button id="saveAnswersButton" class="secondary-button" disabled>Save answers</button>
+          <button id="trackButton" class="secondary-button" disabled>Track</button>
+        </div>
+      </section>
+
+      <section id="reviewList" class="assistant-review" aria-label="Review fields"></section>
+    </main>
+
+    <script src="assistant.js"></script>
+  </body>
+</html>

@@ -36,17 +36,46 @@ textarea,
   background: var(--surface);
 }
 
+.assistant-page {
+  width: 100%;
+  min-width: 320px;
+  min-height: 100vh;
+  background: var(--bg);
+}
+
 .popup-shell {
   padding: 16px;
 }
 
+.assistant-shell {
+  display: grid;
+  grid-template-rows: auto minmax(180px, 1fr) auto minmax(0, auto);
+  min-height: 100vh;
+  max-height: 100vh;
+  background: var(--surface);
+}
+
 .popup-header,
+.assistant-header,
 .page-header,
 .form-actions {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.assistant-header {
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.assistant-header p {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
 }
 
 h1,
@@ -85,6 +114,26 @@ h2 {
   margin-top: 16px;
 }
 
+.assistant-controls {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.country-control {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.tool-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 button,
 .import-button {
   min-height: 38px;
@@ -111,6 +160,26 @@ button,
 
 .secondary-button:hover {
   background: var(--secondary-hover);
+}
+
+.chip-button,
+.icon-button {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.chip-button.is-active {
+  border-color: var(--primary);
+  background: #e4f2f8;
+  color: var(--primary);
+}
+
+.icon-button {
+  display: inline-grid;
+  min-width: 72px;
+  min-height: 38px;
+  place-items: center;
+  padding: 0 10px;
 }
 
 .import-button {
@@ -144,6 +213,47 @@ button,
   overflow: auto;
 }
 
+.chat-log {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+  padding: 14px;
+  background: #f7f9fb;
+}
+
+.chat-message {
+  max-width: 88%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 11px;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.chat-message.agent {
+  justify-self: start;
+  background: #ffffff;
+  color: var(--text);
+}
+
+.chat-message.user {
+  justify-self: end;
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.assistant-review {
+  display: grid;
+  gap: 8px;
+  max-height: 44vh;
+  overflow: auto;
+  padding: 0 12px 12px;
+  background: #ffffff;
+}
+
 .review-item {
   display: flex;
   grid-template-columns: none;
@@ -153,6 +263,24 @@ button,
   border-radius: 8px;
   padding: 9px;
   color: var(--text);
+}
+
+.assistant-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px;
+  color: var(--text);
+  background: #ffffff;
+}
+
+.assistant-card input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin-top: 2px;
 }
 
 .review-item input {
@@ -236,13 +364,18 @@ label {
 }
 
 input,
-textarea {
+textarea,
+select {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 10px;
   color: var(--text);
   background: #ffffff;
+}
+
+.assistant-card textarea {
+  min-height: 84px;
 }
 
 textarea {

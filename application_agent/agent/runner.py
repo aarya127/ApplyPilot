@@ -36,7 +36,10 @@ class ApplicationAgent:
                 break
 
             next_button.click()
-            page.wait_for_load_state("networkidle", timeout=10_000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=10_000)
+            except Exception:
+                pass
             page.wait_for_timeout(750)
         else:
             status = "max_steps_reached"

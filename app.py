@@ -68,8 +68,10 @@ def newgrad() -> str:
         errors = list(_newgrad_cache["errors"])
 
     triggered_fetch = False
-    if refresh or not jobs or expired:
+    if (refresh or not jobs or expired) and not loading:
         start_newgrad_fetch()
+        triggered_fetch = True
+    elif loading:
         triggered_fetch = True
 
     # Collect distinct category labels for the filter dropdown

@@ -9,6 +9,7 @@ This is a standalone Chrome extension prototype for job application autofill. It
 - Extracts field metadata such as label, placeholder, name, id, options, and nearby text.
 - Maps common application fields to profile values using local rules.
 - Previews mapped fields in the popup so you can review before filling.
+- Provides a right-side assistant panel that walks through country selection, preview, filling, missing answers, and tracking.
 - Shows unknown questions in the popup, lets you answer them once, and saves those answers for future applications.
 - Detects resume upload fields and highlights them as manual tasks.
 - Fills fields and dispatches `input`, `change`, and `blur` events so React-style forms usually notice the changes.
@@ -26,6 +27,21 @@ Dynamic refilling is off by default because some React/Greenhouse pages rerender
 4. Select the `autofill_extension` folder.
 5. Open the extension options page and save your profile.
 6. Visit a job application page and click **Autofill page** from the extension popup.
+
+## Assistant Side Panel
+
+The extension also includes a right-side chat-style assistant.
+
+1. Open a job application page.
+2. Click the extension icon.
+3. Click **Open assistant chat**.
+4. Choose **USA** or **Canada** so the extension uses the correct saved address and eligibility context.
+5. Click **Preview**.
+6. Review checked fields, answer any missing questions, and save answers you want remembered.
+7. Click **Fill selected**.
+8. Review the actual ATS page before submitting.
+
+The assistant uses the same scanner, mapper, saved answers, and backend as the popup. It is a more guided interface, not a separate profile store.
 
 ## Private Profile Import
 
@@ -98,6 +114,8 @@ NVIDIA_API_KEY=your-key-here
 NVIDIA_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
 PORT=8000
 ```
+
+Do not place real API keys in tracked files. Keep the key only in `env.private`, which is ignored by git.
 
 Start the backend:
 

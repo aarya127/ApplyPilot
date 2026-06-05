@@ -8,6 +8,11 @@ The app currently has three tabs:
 - **New Grad Jobs** - scrapes newgrad-jobs.com categories for early-career roles.
 - **Applied Jobs** - searches your Outlook mailbox with Microsoft Graph and groups job-related emails into applications, interviews, and rejections.
 
+This repo also now contains two standalone application-assist tools:
+
+- **Chrome autofill extension** in `autofill_extension/` for in-browser form scanning and review-first filling.
+- **Post-apply Playwright agent** in `application_agent/` for taking over after an application page opens and safely filling ATS flows.
+
 ---
 
 ## Quick Start
@@ -102,6 +107,39 @@ python extract_jobs.py "https://jobs.intuit.com/search-jobs" --limit 10
 ```
 
 The CLI prints each source, total jobs found when available, and the first matching job cards.
+
+---
+
+## Application Assist Tools
+
+The Chrome extension and Playwright completion agent are separate from the Flask dashboard.
+
+Load the extension from:
+
+```text
+autofill_extension/
+```
+
+Run the post-apply agent with:
+
+```bash
+python -m application_agent.main
+```
+
+The agent uses your ignored private extension profile at:
+
+```text
+autofill_extension/profile.private.json
+```
+
+It opens a persistent Playwright browser, waits for you to click Apply, detects Greenhouse/Lever/Ashby/Workday/generic pages, fills what it can, uploads the ignored local resume when a file input allows it, logs to ignored SQLite storage, and pauses before final submission.
+
+See:
+
+```text
+autofill_extension/README.md
+application_agent/README.md
+```
 
 ---
 
