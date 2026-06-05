@@ -22,7 +22,9 @@
     observer: null,
     lastFilledAt: 0,
     filledCount: 0,
-    scanCount: 0
+    scanCount: 0,
+    isApplying: false,
+    dynamicRunCount: 0
   };
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -62,6 +64,11 @@
   });
 
   async function autofillPage() {
+    state.dynamicRunCount = 0;
+    return runAutofillPage();
+  }
+
+  async function runAutofillPage() {
     const plan = await buildAutofillPlan();
     const result = await applyMappings(plan.mappings);
 
@@ -130,36 +137,52 @@
   }
 
   async function applyMappings(mappings) {
+    if (state.isApplying) {
+      return {
+        scanned: 0,
+        mapped: mappings.length,
+        filled: 0,
+        failures: []
+      };
+    }
+
+    state.isApplying = true;
     const { settings } = await chrome.storage.local.get("settings");
     const fields = scanFields();
     let filled = 0;
     const failures = [];
 
-    for (const mapping of mappings) {
-      const field = fields.find((item) => item.index === mapping.index);
-      const element = field?.elementRef?.deref?.();
+    try {
+      for (const mapping of mappings) {
+        const field = fields.find((item) => item.index === mapping.index);
+        const element = field?.elementRef?.deref?.();
 
-      if (!element || !isFillable(element)) {
-        continue;
-      }
-
-      try {
-        const didFill = await fillElement(element, mapping, field);
-        if (didFill) {
-          markFilled(element, mapping);
-          filled += 1;
+        if (!element || !isFillable(element)) {
+          continue;
         }
-      } catch (error) {
-        failures.push({ index: mapping.index, label: field.label, error: error.message });
+
+        try {
+          const didFill = await fillElement(element, mapping, field);
+          if (didFill) {
+            markFilled(element, mapping);
+            filled += 1;
+          }
+        } catch (error) {
+          failures.push({ index: mapping.index, label: field.label, error: error.message });
+        }
       }
+    } finally {
+      state.isApplying = false;
     }
 
     state.lastFilledAt = Date.now();
     state.filledCount = filled;
     state.scanCount = fields.length;
 
-    if (settings?.autoFillDynamicFields !== false) {
+    if (settings?.autoFillDynamicFields === true) {
       startObserver();
+    } else {
+      stopObserver();
     }
 
     return {
@@ -220,14 +243,16 @@
 
     if (explicitId) {
       const label = document.querySelector(`label[for="${cssEscape(explicitId)}"]`);
-      if (label?.innerText) {
-        pieces.push(label.innerText);
+      const text = labelTextWithoutControls(label);
+      if (text) {
+        pieces.push(text);
       }
     }
 
     const wrappingLabel = element.closest("label");
-    if (wrappingLabel?.innerText) {
-      pieces.push(wrappingLabel.innerText);
+    const wrappingLabelText = labelTextWithoutControls(wrappingLabel);
+    if (wrappingLabelText) {
+      pieces.push(wrappingLabelText);
     }
 
     if (pieces.length === 0) {
@@ -240,6 +265,16 @@
     }
 
     return compactText(unique(pieces).join(" "));
+  }
+
+  function labelTextWithoutControls(label) {
+    if (!label) {
+      return "";
+    }
+
+    const clone = label.cloneNode(true);
+    clone.querySelectorAll("input, textarea, select, button, option, [role='option']").forEach((node) => node.remove());
+    return compactText(clone.innerText || clone.textContent || "");
   }
 
   function getSurroundingText(element) {
@@ -321,6 +356,16 @@
       return workQuestionMapping;
     }
 
+    const companyQuestionMapping = mapCompanyQuestion(field, profile, primaryHaystack);
+    if (companyQuestionMapping) {
+      return companyQuestionMapping;
+    }
+
+    const workHistoryMapping = mapWorkHistoryField(field, profile, primaryHaystack);
+    if (workHistoryMapping) {
+      return workHistoryMapping;
+    }
+
     const locationMapping = mapLocationField(field, address, primaryHaystack);
     if (locationMapping) {
       return locationMapping;
@@ -389,7 +434,7 @@
     }
 
     if (settings.autoFillSensitiveFields === true) {
-      const demographicMapping = mapSensitiveField(field, profile, haystack);
+      const demographicMapping = mapSensitiveField(field, profile, primaryHaystack);
       if (demographicMapping) {
         return demographicMapping;
       }
@@ -471,6 +516,46 @@
     return null;
   }
 
+  function mapCompanyQuestion(field, profile, haystack) {
+    if (/(whatsapp|sms|text messages?|messaging).*(recruit|hiring)|recruit.*(whatsapp|sms|text messages?|messaging)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.recruitingMessages || "No", "rule", 0.9);
+    }
+
+    if (/(ever|previously|formerly).*(employed|worked).*(affiliate|subsidiary|\bby\b|\bfor\b)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.previouslyEmployedByCompany || "No", "rule", 0.9);
+    }
+
+    return null;
+  }
+
+  function mapWorkHistoryField(field, profile, haystack) {
+    if (/(current|previous|most recent).*(employer|company)|((employer|company).*(current|previous|most recent))/.test(haystack)) {
+      const employer = profile.currentOrPreviousEmployer
+        || profile.currentEmployer
+        || profile.previousEmployer
+        || profile.answers?.currentOrPreviousEmployer
+        || profile.answers?.currentEmployer
+        || profile.answers?.previousEmployer
+        || firstResumeExperienceValue(profile, ["company", "employer", "organization"]);
+
+      return hasValue(employer) ? buildMapping(field, employer, "rule", 0.87) : null;
+    }
+
+    if (/(current|previous|most recent).*(job title|title|position|role)|((job title|title|position|role).*(current|previous|most recent))/.test(haystack)) {
+      const title = profile.currentOrPreviousJobTitle
+        || profile.currentJobTitle
+        || profile.previousJobTitle
+        || profile.answers?.currentOrPreviousJobTitle
+        || profile.answers?.currentJobTitle
+        || profile.answers?.previousJobTitle
+        || firstResumeExperienceValue(profile, ["title", "role", "position"]);
+
+      return hasValue(title) ? buildMapping(field, title, "rule", 0.87) : null;
+    }
+
+    return null;
+  }
+
   function mapLocationField(field, address, haystack) {
     if (!address) {
       return null;
@@ -488,6 +573,10 @@
   }
 
   function shouldSkipField(haystack) {
+    if (/(current|previous|most recent).*(employer|company|job title|title|position|role)/.test(haystack)) {
+      return false;
+    }
+
     return [
       /\bcompany name\b/,
       /\bemployer name\b/,
@@ -569,6 +658,7 @@
   function mapSensitiveField(field, profile, haystack) {
     const demographics = profile.demographics || {};
     const rules = [
+      [/(hispanic|latino|latina|latinx)/, demographics.hispanicLatino],
       [/(race|racial)/, demographics.race],
       [/(ethnic|ethnicity)/, demographics.ethnicity],
       [/(gender identity|cisgender|transgender)/, demographics.genderIdentity || demographics.gender],
@@ -582,6 +672,32 @@
     }
 
     return null;
+  }
+
+  function firstResumeExperienceValue(profile, preferredKeys) {
+    const experience = profile.resumeFacts?.experience;
+    if (!Array.isArray(experience)) {
+      return "";
+    }
+
+    const first = experience.find((item) => item && (typeof item === "object" || typeof item === "string"));
+
+    if (!first) {
+      return "";
+    }
+
+    if (typeof first === "string") {
+      return "";
+    }
+
+    for (const key of preferredKeys) {
+      if (hasValue(first[key])) {
+        return first[key];
+      }
+    }
+
+    const values = Object.values(first).filter((value) => typeof value === "string" && value.trim());
+    return values.length === 1 ? values[0] : "";
   }
 
   function isCheckboxField(field) {
@@ -686,9 +802,12 @@
     setEditableText(element, desiredValue);
     await sleep(200);
 
-    const desired = normalize(String(desiredValue));
     const option = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option"))
-      .find((item) => normalize(item.textContent || item.getAttribute("aria-label") || "").includes(desired));
+      .find((item) => optionMatches(
+        item.textContent || item.getAttribute("aria-label") || "",
+        item.getAttribute("data-value") || "",
+        desiredValue
+      ));
 
     if (option) {
       option.click();
@@ -699,11 +818,8 @@
   }
 
   function fillSelect(select, desiredValue) {
-    const desired = normalize(String(desiredValue));
     const options = Array.from(select.options);
-    const option = options.find((item) => normalize(item.value) === desired)
-      || options.find((item) => normalize(item.textContent || "") === desired)
-      || options.find((item) => normalize(item.textContent || "").includes(desired));
+    const option = options.find((item) => optionMatches(item.textContent || "", item.value, desiredValue));
 
     if (!option) {
       return false;
@@ -715,19 +831,16 @@
   }
 
   function fillRadio(element, desiredValue, field) {
-    const desired = normalize(String(desiredValue));
     const name = element.getAttribute("name");
     const candidates = name
       ? Array.from(document.querySelectorAll(`input[type="radio"][name="${cssEscape(name)}"]`))
       : [element];
 
     const match = candidates.find((radio) => {
-      const label = normalize(getLabelText(radio));
-      const value = normalize(radio.value || radio.getAttribute("aria-label") || "");
-      return value === desired || label === desired || label.includes(desired) || desired.includes(label);
+      return optionMatches(getLabelText(radio), radio.value || radio.getAttribute("aria-label") || "", desiredValue);
     });
 
-    const fallback = field.options?.find((option) => normalize(option.label) === desired);
+    const fallback = field.options?.find((option) => optionMatches(option.label, option.value, desiredValue));
     const target = match || (fallback ? candidates.find((radio) => radio.value === fallback.value) : null);
 
     if (!target) {
@@ -738,6 +851,84 @@
     target.checked = true;
     dispatchFormEvents(target);
     return true;
+  }
+
+  function optionMatches(label, value, desiredValue) {
+    const desired = normalize(String(desiredValue));
+    const normalizedLabel = normalize(label || "");
+    const normalizedValue = normalize(value || "");
+    const aliases = answerAliases(desired);
+
+    if (!desired) {
+      return false;
+    }
+
+    if (normalizedValue === desired || normalizedLabel === desired) {
+      return true;
+    }
+
+    if (aliases.some((alias) => normalizedValue === alias || normalizedLabel === alias)) {
+      return true;
+    }
+
+    return aliases.some((alias) => alias.length > 3 && containsNormalizedPhrase(normalizedLabel, alias))
+      || (desired.length > 2 && containsNormalizedPhrase(normalizedLabel, desired));
+  }
+
+  function containsNormalizedPhrase(text, phrase) {
+    if (phrase.includes(" ")) {
+      return text.includes(phrase);
+    }
+
+    return new RegExp(`\\b${escapeRegex(phrase)}\\b`).test(text);
+  }
+
+  function escapeRegex(value) {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function answerAliases(desired) {
+    const aliases = new Set([desired]);
+
+    if (desired === "no") {
+      [
+        "no i am not",
+        "no i do not",
+        "no i have not",
+        "not a protected veteran",
+        "i am not a protected veteran",
+        "not protected veteran",
+        "not a veteran",
+        "not hispanic or latino",
+        "not hispanic",
+        "not latino"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "yes") {
+      [
+        "yes i am",
+        "yes i do",
+        "yes i have"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "asian") {
+      [
+        "asian not hispanic or latino",
+        "asian not hispanic",
+        "asian"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "male") {
+      [
+        "man",
+        "male"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    return Array.from(aliases);
   }
 
   function fillCheckbox(element, desiredValue) {
@@ -798,18 +989,32 @@
 
     let timeoutId = null;
     state.observer = new MutationObserver(() => {
+      if (state.isApplying || state.dynamicRunCount >= 1) {
+        return;
+      }
+
       window.clearTimeout(timeoutId);
       timeoutId = window.setTimeout(() => {
-        if (Date.now() - state.lastFilledAt > 800) {
-          autofillPage().catch(() => {});
+        if (!state.isApplying && Date.now() - state.lastFilledAt > 2500 && state.dynamicRunCount < 1) {
+          state.dynamicRunCount += 1;
+          runAutofillPage().catch(() => {});
         }
-      }, 350);
+      }, 1200);
     });
 
     state.observer.observe(document.body, {
       childList: true,
       subtree: true
     });
+  }
+
+  function stopObserver() {
+    if (!state.observer) {
+      return;
+    }
+
+    state.observer.disconnect();
+    state.observer = null;
   }
 
   function markFilled(element, mapping) {

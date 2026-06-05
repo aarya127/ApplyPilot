@@ -1,0 +1,90 @@
+from pathlib import Path
+
+from application_agent.agent.detector import detect_ats
+from application_agent.agent.field_mapper import map_field
+from application_agent.agent.profile_loader import normalize_profile
+from application_agent.ats.base import is_final_submit_text, option_matches
+
+
+def test_detect_ats_routes_common_platforms():
+    assert detect_ats("https://boards.greenhouse.io/acme/jobs/1") == "greenhouse"
+    assert detect_ats("https://jobs.lever.co/acme/1") == "lever"
+    assert detect_ats("https://jobs.ashbyhq.com/acme/1") == "ashby"
+    assert detect_ats("https://acme.myworkdayjobs.com/job/1") == "workday"
+    assert detect_ats("https://example.com/apply") == "generic"
+
+
+def test_normalize_profile_uses_target_address_and_resume_path(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    resume_dir = root / "autofill_extension/resumes"
+    monkeypatch.setattr(Path, "exists", lambda self: str(self).endswith("resume.pdf"))
+
+    profile = normalize_profile(
+        {
+            "firstName": "Test",
+            "lastName": "Candidate",
+            "resumeFileName": "resume.pdf",
+            "addresses": {
+                "usa": {
+                    "line1": "1 Test Way",
+                    "city": "Chicago",
+                    "state": "IL",
+                    "zipCode": "60601",
+                    "country": "United States",
+                }
+            },
+            "answers": {"sponsorship": "No"},
+        },
+        {"targetCountry": "usa"},
+    )
+
+    assert profile["first_name"] == "Test"
+    assert profile["address"]["country"] == "United States"
+    assert profile["location"] == "Chicago, IL"
+    assert profile["resume_path"] == str(resume_dir / "resume.pdf")
+
+
+def test_field_mapper_handles_greenhouse_style_questions():
+    profile = {
+        "first_name": "Test",
+        "last_name": "Candidate",
+        "email": "test@example.com",
+        "current_or_previous_employer": "Example Labs",
+        "current_or_previous_job_title": "Software Engineer",
+        "needs_sponsorship": "No",
+        "work_authorization": "Yes",
+        "veteran_status": "No",
+        "answers": {
+            "previouslyEmployedByCompany": "No",
+            "recruitingMessages": "No",
+        },
+        "demographics": {
+            "race": "Asian",
+            "hispanicLatino": "No",
+            "gender": "Male",
+        },
+        "auto_fill_sensitive_fields": True,
+    }
+
+    assert map_field({"label": "First Name"}, profile) == ("Test", "rule")
+    assert map_field({"label": "Who is your current or previous employer?"}, profile) == ("Example Labs", "rule")
+    assert map_field({"label": "What is your current or previous job title?"}, profile) == ("Software Engineer", "rule")
+    assert map_field({"label": "Have you ever been employed by Stripe or a Stripe affiliate?"}, profile) == ("No", "rule")
+    assert map_field({"label": "Do you opt-in to receive WhatsApp messages from Stripe Recruiting?"}, profile) == ("No", "rule")
+    assert map_field({"label": "Are you Hispanic/Latino?"}, profile) == ("No", "sensitive")
+    assert map_field({"label": "Race"}, profile) == ("Asian", "sensitive")
+    assert map_field({"label": "Gender"}, profile) == ("Male", "sensitive")
+
+
+def test_option_matching_handles_long_dropdown_labels_without_male_female_collision():
+    assert option_matches("I am not a protected Veteran", "", "no")
+    assert option_matches("No, I am not Hispanic or Latino", "", "no")
+    assert option_matches("Asian (Not Hispanic or Latino)", "", "asian")
+    assert option_matches("Male", "", "male")
+    assert not option_matches("Female", "", "male")
+
+
+def test_final_submit_detection_is_conservative():
+    assert is_final_submit_text("Submit Application")
+    assert is_final_submit_text("Complete Application")
+    assert not is_final_submit_text("Save and Continue")

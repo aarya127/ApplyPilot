@@ -376,17 +376,25 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         "lastName": "Candidate",
         "email": "sample@example.com",
         "phone": "5550100000",
+        "currentOrPreviousEmployer": "Example Labs",
+        "currentOrPreviousJobTitle": "Software Engineer",
         "veteranStatus": "No",
         "resumeFileName": "resume.private.pdf",
         "answers": {
-            "custom:do-you-have-experience-with-kubernetes": "Yes"
+            "custom:do-you-have-experience-with-kubernetes": "Yes",
+            "previouslyEmployedByCompany": "No",
+            "recruitingMessages": "No",
         },
         "addresses": {},
-        "demographics": {},
+        "demographics": {
+            "race": "Asian",
+            "hispanicLatino": "No",
+            "gender": "Male",
+        },
     }
     settings = {
         "autoFillDynamicFields": False,
-        "autoFillSensitiveFields": False,
+        "autoFillSensitiveFields": True,
         "requireReviewBeforeSubmit": True,
     }
 
@@ -401,7 +409,14 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
             """
             <form>
               <label>Do you have experience with Kubernetes?<input name="k8s"></label>
-              <label>Are you a protected veteran?<select name="veteran"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Who is your current or previous employer?<input name="employer"></label>
+              <label>What is your current or previous job title?<input name="jobTitle"></label>
+              <label>Have you ever been employed by Stripe or a Stripe affiliate?<select name="stripeAffiliate"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Do you opt-in to receive WhatsApp messages from Stripe Recruiting?<select name="whatsapp"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Gender<select name="gender"><option></option><option>Female</option><option>Male</option><option>I do not wish to answer</option></select></label>
+              <label>Are you Hispanic/Latino?<select name="hispanic"><option></option><option>Yes, I am Hispanic or Latino</option><option>No, I am not Hispanic or Latino</option><option>I do not wish to answer</option></select></label>
+              <label>Race<select name="race"><option></option><option>Black or African American</option><option>Asian (Not Hispanic or Latino)</option><option>I do not wish to answer</option></select></label>
+              <label>Are you a protected veteran?<select name="veteran"><option></option><option>I identify as one or more of the classifications of a protected veteran</option><option>I am not a protected Veteran</option><option>I do not wish to answer</option></select></label>
               <label>Upload Resume<input type="file" name="resume"></label>
               <label>What is your favorite database?<input name="database"></label>
             </form>
@@ -435,8 +450,22 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         assert preview["ok"] is True
         mappings = preview["result"]["mappings"]
         k8s_mapping = next(mapping for mapping in mappings if "Kubernetes" in mapping["label"])
+        employer_mapping = next(mapping for mapping in mappings if "current or previous employer" in mapping["label"])
+        title_mapping = next(mapping for mapping in mappings if "current or previous job title" in mapping["label"])
+        stripe_mapping = next(mapping for mapping in mappings if "Stripe affiliate" in mapping["label"])
+        whatsapp_mapping = next(mapping for mapping in mappings if "WhatsApp messages" in mapping["label"])
+        gender_mapping = next(mapping for mapping in mappings if mapping["label"] == "Gender")
+        hispanic_mapping = next(mapping for mapping in mappings if "Hispanic/Latino" in mapping["label"])
+        race_mapping = next(mapping for mapping in mappings if mapping["label"] == "Race")
         veteran_mapping = next(mapping for mapping in mappings if "protected veteran" in mapping["label"])
         assert k8s_mapping["value"] == "Yes"
+        assert employer_mapping["value"] == "Example Labs"
+        assert title_mapping["value"] == "Software Engineer"
+        assert stripe_mapping["value"] == "No"
+        assert whatsapp_mapping["value"] == "No"
+        assert gender_mapping["value"] == "Male"
+        assert hispanic_mapping["value"] == "No"
+        assert race_mapping["value"] == "Asian"
         assert veteran_mapping["value"] == "No"
         assert preview["result"]["manualTasks"][0]["resumeFileName"] == "resume.private.pdf"
 
@@ -451,7 +480,14 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         )
         assert fill_response["ok"] is True, fill_response
         assert page.locator("[name='k8s']").input_value() == "Yes"
-        assert page.locator("[name='veteran']").input_value() == "No"
+        assert page.locator("[name='employer']").input_value() == "Example Labs"
+        assert page.locator("[name='jobTitle']").input_value() == "Software Engineer"
+        assert page.locator("[name='stripeAffiliate']").input_value() == "No"
+        assert page.locator("[name='whatsapp']").input_value() == "No"
+        assert page.locator("[name='gender']").input_value() == "Male"
+        assert page.locator("[name='hispanic']").input_value() == "No, I am not Hispanic or Latino"
+        assert page.locator("[name='race']").input_value() == "Asian (Not Hispanic or Latino)"
+        assert page.locator("[name='veteran']").input_value() == "I am not a protected Veteran"
         assert page.locator("[name='database']").input_value() == ""
 
         browser.close()

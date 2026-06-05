@@ -36,6 +36,8 @@ chrome.runtime.onInstalled.addListener(async () => {
         school: "Sample University",
         degree: "",
         graduationDate: "",
+        currentOrPreviousEmployer: "",
+        currentOrPreviousJobTitle: "",
         workAuthorization: "Yes",
         needsSponsorship: "No",
         veteranStatus: "No",
@@ -55,6 +57,7 @@ chrome.runtime.onInstalled.addListener(async () => {
         demographics: {
           race: "",
           ethnicity: "",
+          hispanicLatino: "",
           gender: "",
           genderIdentity: ""
         },
@@ -65,6 +68,8 @@ chrome.runtime.onInstalled.addListener(async () => {
           canadianCitizen: "Yes",
           usPermanentResident: "Yes",
           subjectToAgreement: "No",
+          previouslyEmployedByCompany: "No",
+          recruitingMessages: "No",
           relocation: "Open to relocation",
           salary: "Negotiable"
         }
@@ -76,7 +81,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({
       settings: {
         backendMapperUrl: "",
-        autoFillDynamicFields: true,
+        autoFillDynamicFields: false,
         autoFillSensitiveFields: false,
         requireReviewBeforeSubmit: true,
         backendBaseUrl: "http://127.0.0.1:8000",

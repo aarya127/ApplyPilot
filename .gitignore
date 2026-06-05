@@ -26,3 +26,9 @@ autofill_extension/*.private.json
 autofill_extension/resumes/
 autofill_extension/generated/
 autofill_extension/backend/env.private
+
+# Local application completion agent data
+application_agent/browser_profile/
+application_agent/data/
+application_agent/files/
+application_agent/*.private.json

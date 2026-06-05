@@ -9,9 +9,14 @@ This is a standalone Chrome extension prototype for job application autofill. It
 - Extracts field metadata such as label, placeholder, name, id, options, and nearby text.
 - Maps common application fields to profile values using local rules.
 - Previews mapped fields in the popup so you can review before filling.
+- Shows unknown questions in the popup, lets you answer them once, and saves those answers for future applications.
+- Detects resume upload fields and highlights them as manual tasks.
 - Fills fields and dispatches `input`, `change`, and `blur` events so React-style forms usually notice the changes.
+- Handles native dropdowns and basic ARIA/listbox-style custom dropdowns.
 - Watches for dynamically added form fields with `MutationObserver`.
 - Includes a local backend for NVIDIA-hosted LLM field mapping and SQLite application tracking.
+
+Dynamic refilling is off by default because some React/Greenhouse pages rerender after each input event. Turn it on only when a page loads additional steps after the first fill.
 
 ## Load It In Chrome
 
@@ -127,10 +132,12 @@ autofill_extension/generated/applications.sqlite3
 4. Local profile storage: working via `chrome.storage.local`; backend profile sync is not built.
 5. Rule matching: working for common contact, address, links, work authorization, sponsorship, relocation, salary, agreement, and optional demographic fields.
 6. LLM mapping: implemented through the local backend; requires `NVIDIA_API_KEY`.
-7. DOM filling plus `input`/`change`/`blur` events: working for native inputs, textareas, selects, radios, checkboxes, and simple contenteditable controls.
-8. ATS-specific adapters: not built yet.
+7. DOM filling plus `input`/`change`/`blur` events: working for native inputs, textareas, selects, radios, checkboxes, simple contenteditable controls, and basic ARIA/listbox dropdowns. Dynamic refilling has a re-entry guard and is off by default.
+8. ATS-specific adapters: generic Greenhouse-style form handling is partially covered; deeper Workday/Lever/Ashby adapters are not built yet.
 9. Review UI before fill: working in the popup preview flow.
 10. Backend application tracking: working locally with SQLite; no cloud sync/auth yet.
+
+Resume uploads are detected but remain manual because browsers do not allow extensions to silently set arbitrary local files into file inputs.
 
 ## Try The Sample Form
 

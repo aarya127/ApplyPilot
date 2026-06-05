@@ -1,0 +1,2 @@
+"""ATS-specific application adapters."""
+

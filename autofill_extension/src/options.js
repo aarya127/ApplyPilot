@@ -37,6 +37,8 @@ const sampleProfile = {
   school: "Sample University",
   degree: "",
   graduationDate: "",
+  currentOrPreviousEmployer: "",
+  currentOrPreviousJobTitle: "",
   workAuthorization: "Yes",
   needsSponsorship: "No",
   veteranStatus: "No",
@@ -56,6 +58,7 @@ const sampleProfile = {
   demographics: {
     race: "",
     ethnicity: "",
+    hispanicLatino: "",
     gender: "",
     genderIdentity: ""
   },
@@ -66,6 +69,8 @@ const sampleProfile = {
     canadianCitizen: "Yes",
     usPermanentResident: "Yes",
     subjectToAgreement: "No",
+    previouslyEmployedByCompany: "No",
+    recruitingMessages: "No",
     relocation: "Open to relocation",
     salary: "Negotiable"
   }
@@ -73,7 +78,7 @@ const sampleProfile = {
 
 const sampleSettings = {
   backendMapperUrl: "",
-  autoFillDynamicFields: true,
+  autoFillDynamicFields: false,
   autoFillSensitiveFields: false,
   requireReviewBeforeSubmit: true,
   backendBaseUrl: "http://127.0.0.1:8000",
@@ -167,6 +172,7 @@ function writeForm(profile, settings) {
   setValue("usaFullAddress", usa.fullAddress);
   setValue("race", demographics.race);
   setValue("ethnicity", demographics.ethnicity);
+  setValue("hispanicLatino", demographics.hispanicLatino);
   setValue("gender", demographics.gender);
   setValue("genderIdentity", demographics.genderIdentity);
 
@@ -175,7 +181,7 @@ function writeForm(profile, settings) {
   form.elements.backendMapperUrl.value = settings.backendMapperUrl || "";
   form.elements.backendBaseUrl.value = settings.backendBaseUrl || "";
   form.elements.targetCountry.value = settings.targetCountry || "canada";
-  form.elements.autoFillDynamicFields.checked = settings.autoFillDynamicFields !== false;
+  form.elements.autoFillDynamicFields.checked = settings.autoFillDynamicFields === true;
   form.elements.autoFillSensitiveFields.checked = settings.autoFillSensitiveFields === true;
   form.elements.requireReviewBeforeSubmit.checked = settings.requireReviewBeforeSubmit !== false;
 }
@@ -229,6 +235,8 @@ function readForm() {
     school: valueOf("school"),
     degree: valueOf("degree"),
     graduationDate: valueOf("graduationDate"),
+    currentOrPreviousEmployer: valueOf("currentOrPreviousEmployer"),
+    currentOrPreviousJobTitle: valueOf("currentOrPreviousJobTitle"),
     workAuthorization: valueOf("workAuthorization"),
     needsSponsorship: valueOf("needsSponsorship"),
     veteranStatus: valueOf("veteranStatus"),
@@ -242,6 +250,7 @@ function readForm() {
     demographics: {
       race: valueOf("race"),
       ethnicity: valueOf("ethnicity"),
+      hispanicLatino: valueOf("hispanicLatino"),
       gender: valueOf("gender"),
       genderIdentity: valueOf("genderIdentity")
     },

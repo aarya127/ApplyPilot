@@ -214,11 +214,24 @@ def merge_profile(existing: dict[str, Any], parsed: dict[str, Any]) -> dict[str,
             resume_facts[preserved_key] = existing_resume_facts[preserved_key]
 
     profile["resumeFacts"] = resume_facts
+    profile.setdefault("currentOrPreviousEmployer", "")
+    profile.setdefault("currentOrPreviousJobTitle", "")
+    profile.setdefault("demographics", {})
+    profile["demographics"].setdefault("race", "")
+    profile["demographics"].setdefault("ethnicity", "")
+    profile["demographics"].setdefault("hispanicLatino", "")
+    profile["demographics"].setdefault("gender", "")
+    profile["demographics"].setdefault("genderIdentity", "")
+    profile.setdefault("answers", {})
+    profile["answers"].setdefault("previouslyEmployedByCompany", "No")
+    profile["answers"].setdefault("recruitingMessages", "No")
+    profile["answers"].setdefault("veteranStatus", profile.get("veteranStatus", "No"))
+
     settings = payload.setdefault("settings", {})
     settings.setdefault("backendBaseUrl", "http://127.0.0.1:8000")
     settings.setdefault("backendMapperUrl", "")
     settings.setdefault("targetCountry", "canada")
-    settings.setdefault("autoFillDynamicFields", True)
+    settings.setdefault("autoFillDynamicFields", False)
     settings.setdefault("autoFillSensitiveFields", False)
     settings.setdefault("requireReviewBeforeSubmit", True)
 
