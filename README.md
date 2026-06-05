@@ -1,141 +1,168 @@
-# HR System — Real-time Job Tracker
+# HR System - Job Search Dashboard
 
-Track **live job openings** at the **top 25 US companies by market cap**, filtered by posting date and stored locally for trend analysis.
+A Flask dashboard for tracking software, AI/ML, data, and cybersecurity job opportunities across company career sites, new-grad listings, and your Outlook application emails.
 
----
+The app currently has three tabs:
 
-## Companies tracked (ranked by market cap)
-
-| # | Company | # | Company |
-|---|---------|---|---------|
-| 1 | NVIDIA | 14 | Mastercard |
-| 2 | Apple | 15 | UnitedHealth |
-| 3 | Alphabet (Google) | 16 | Walmart |
-| 4 | Microsoft | 17 | Johnson & Johnson |
-| 5 | Amazon | 18 | Oracle |
-| 6 | Meta Platforms | 19 | Procter & Gamble |
-| 7 | Berkshire Hathaway | 20 | Costco |
-| 8 | Eli Lilly | 21 | Home Depot |
-| 9 | Broadcom | 22 | Chevron |
-| 10 | Tesla | 23 | Coca-Cola |
-| 11 | JPMorgan Chase | 24 | Abbott Laboratories |
-| 12 | Visa | 25 | PepsiCo |
-| 13 | Exxon Mobil | | |
+- **Job Scraper** - pulls live postings from configured company career sites, scores them for technical relevance, and filters by search text and location.
+- **New Grad Jobs** - scrapes newgrad-jobs.com categories for early-career roles.
+- **Applied Jobs** - searches your Outlook mailbox with Microsoft Graph and groups job-related emails into applications, interviews, and rejections.
 
 ---
 
-## Quick start
+## Quick Start
 
 ```bash
-# 1. Install Python dependencies
+# 1. Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 2. Scrape all 25 companies (last 7 days of postings)
-python main.py scrape
+# 3. Install the browser used by Playwright-based scrapers
+playwright install chromium
 
-# 3. See new jobs posted since a specific date
-python main.py new --since 2025-03-15
+# 4. Start the Flask app
+python app.py
+```
 
-# 4. Filter to one company
-python main.py new -c NVIDIA
+Open the dashboard at:
 
-# 5. Open the stats dashboard
-python main.py stats
+```text
+http://127.0.0.1:5003
 ```
 
 ---
 
-## Commands
+## Features
 
-| Command | Description |
-|---------|-------------|
-| `scrape` | Fetch live postings from LinkedIn, Indeed, and Google Jobs |
-| `new` | Show jobs posted **since a date** (default: last 7 days) |
-| `list` | Browse all stored jobs with optional date/company filters |
-| `stats` | Dashboard: job counts per company (total / 30d / 7d / 24h) |
-| `companies` | Print the list of 25 tracked companies |
-| `export` | Export to CSV |
+### Job Scraper
 
-### `scrape` options
+- Fetches jobs from the configured URLs in `extract_jobs.DEFAULT_URLS`.
+- Runs site extractors concurrently and keeps the last cached results visible while refreshes happen in the background.
+- Auto-refreshes the page while a fetch is running.
+- Normalizes many posted-date formats, including ISO dates, US dates, `Today`, `Yesterday`, and relative dates like `3 days ago`.
+- Scores roles for technical relevance using software engineering, data, AI/ML, infrastructure, security, and technical leadership keywords.
+- Filters out common non-technical roles such as finance, legal, retail, healthcare, hospitality, and facilities roles.
+- Supports UI filters for:
+  - Relevant jobs vs. all jobs
+  - US / Canada / Remote vs. any location
+  - Free-text search across title, location, and source
 
-```
--c / --company   Company name or rank (1-25). Omit to scrape all.
--d / --days      Look-back window in days (default: 7)
--r / --results   Max results per job board per company (default: 50)
-```
+### New Grad Jobs
 
-### `new` / `list` options
+- Scrapes newgrad-jobs.com category embeds in parallel.
+- Deduplicates jobs by canonical URL.
+- Shows title, company, location, salary, posted date, category, and link.
+- Supports category filtering and free-text search.
+- Uses a separate 30-minute cache so it does not block the main scraper.
 
-```
--s / --since     YYYY-MM-DD  lower bound on posting date
--u / --until     YYYY-MM-DD  upper bound on posting date  (list only)
--c / --company   Filter by company name or rank
--l / --limit     Max rows to display
-```
+### Applied Jobs Tracker
 
-### `export` options
+- Uses a Microsoft Graph access token from Graph Explorer to search your Outlook inbox.
+- Searches job-related subject lines from January 1, 2026 onward.
+- Classifies emails as:
+  - `Applied`
+  - `Interview`
+  - `Rejected`
+- Discards job alerts, newsletters, recruiter marketing, GitHub/OAuth noise, and calendar system messages.
+- Deduplicates email threads by normalized subject and sender domain.
+- Shows summary counts, status tabs, search, sender/company, received time, and Outlook web links.
+- Caches results per token for 5 minutes.
 
-```
--s / --since   Only export jobs posted on or after this date
--c / --company Filter by company
--o / --output  Output file path (default: jobs_export.csv)
-```
+Token note: the app does not write your Graph token to disk or logs. The token is kept in the Flask session for the current browser session and Graph Explorer tokens typically expire after about an hour.
 
 ---
 
-## Examples
+## Microsoft Graph Setup
+
+To use the **Applied Jobs** tab:
+
+1. Go to [Microsoft Graph Explorer](https://developer.microsoft.com/en-us/graph/graph-explorer).
+2. Sign in with the Outlook or university account you want to search.
+3. Make sure the token has `Mail.Read` permission.
+4. Copy the access token.
+5. Paste it into the Applied Jobs page and click **Load emails**.
+
+Use **Clear token** on the page when you want to remove the token from the session.
+
+---
+
+## Standalone Extractor CLI
+
+You can also run the scraper extractors without the Flask UI:
 
 ```bash
-# Scrape only Tesla, looking back 14 days
-python main.py scrape -c Tesla -d 14
+# Use all default configured career URLs
+python extract_jobs.py --limit 20
 
-# Scrape company #4 (Microsoft)
-python main.py scrape -c 4
-
-# Show all new jobs discovered since March 1st
-python main.py new --since 2025-03-01
-
-# Show Apple jobs from the last 3 days
-python main.py new -c Apple --since 2025-03-21
-
-# Export Amazon postings since January 1st
-python main.py export -c Amazon -s 2025-01-01 -o amazon_jobs.csv
+# Scrape a specific supported career URL
+python extract_jobs.py "https://jobs.intuit.com/search-jobs" --limit 10
 ```
+
+The CLI prints each source, total jobs found when available, and the first matching job cards.
 
 ---
 
-## Project layout
+## Supported Sources
 
-```
+The default source list includes career pages for companies such as Micron, McKesson, CME Group, Vertex, Capital One, Progressive, Interactive Brokers, Intuit, Bristol Myers Squibb, Prologis, Stryker, Dell, Corning, AppLovin, S&P Global, Palo Alto Networks, Qualcomm, Lockheed Martin, Honeywell, Uber, BlackRock, Analog Devices, Arista, Boeing, Schwab, Disney, and Salesforce.
+
+`extract_jobs.py` has dedicated extractors for several platforms and sites, including:
+
+- Workday / myworkdayjobs
+- Greenhouse
+- TalentBrew-style boards
+- Oracle HCM-style boards
+- Salesforce careers
+- newgrad-jobs.com embeds
+- Site-specific pages that require custom parsing or Playwright rendering
+
+External career sites change markup frequently, so extraction errors are captured and shown in the UI instead of crashing the dashboard.
+
+---
+
+## Project Layout
+
+```text
 hr_system/
-├── main.py           CLI entry point (click)
-├── requirements.txt
-├── data/
-│   └── jobs.db       SQLite database (auto-created on first run)
-└── src/
-    ├── companies.py  Company registry (25 entries with LinkedIn IDs)
-    ├── database.py   SQLite read/write helpers
-    ├── scraper.py    python-jobspy integration + company filtering
-    └── display.py    Rich-based terminal tables
+├── app.py                  Flask routes, caches, filters, and email classification
+├── extract_jobs.py         Career-site and new-grad scraper implementations
+├── requirements.txt        Runtime dependencies
+├── requirements-dev.txt    Test dependencies
+├── pytest.ini              Pytest configuration
+├── conftest.py             Test setup
+├── templates/
+│   ├── index.html          Main job scraper dashboard
+│   ├── newgrad.html        New-grad jobs tab
+│   └── applied.html        Outlook applied-jobs tracker
+└── tests/
+    └── test_extractors.py  Date parsing, relevance filters, and extractor tests
 ```
 
 ---
 
-## How it works
+## Testing
 
-1. **Scraping** — `python-jobspy` is used to pull postings from **LinkedIn** (via company ID where available), **Indeed**, and **Google Jobs** simultaneously.
-2. **Filtering** — results are matched against each company's `match_terms` list to discard false positives (e.g. "Apple Bank" when searching for Apple).
-3. **Deduplication** — jobs are keyed on their URL; re-running `scrape` never creates duplicates.
-4. **Date filtering** — the `new` and `list` commands let you slice the dataset by `date_posted`.
-5. **Persistence** — everything is stored in `data/jobs.db` (SQLite). Export to CSV anytime with `export`.
+```bash
+pip install -r requirements-dev.txt
+
+# Fast/unit-oriented tests
+pytest tests/ -v -m "not slow"
+
+# Full suite, including live external scraper checks
+pytest tests/ -v
+```
+
+Some integration tests call live career sites and can fail when a site is down, rate-limited, geoblocked, or changes its HTML.
 
 ---
 
-## Automating daily scrapes (optional)
+## Development Notes
 
-Add a cron job to keep the database fresh:
-
-```cron
-# Run every day at 08:00
-0 8 * * * cd /path/to/hr_system && python main.py scrape >> logs/scrape.log 2>&1
-```
+- Main dashboard cache TTL: 5 minutes.
+- New-grad cache TTL: 30 minutes.
+- Applied-email cache TTL: 5 minutes per access token.
+- Flask runs locally on `127.0.0.1:5003` in debug mode when started with `python app.py`.
+- Add new company sources by adding a URL to `DEFAULT_URLS` and either reusing an existing hostname extractor or adding a new extractor in `extract_jobs.py`.
