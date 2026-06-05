@@ -187,6 +187,7 @@ def load_json(path: Path) -> dict[str, Any]:
 def merge_profile(existing: dict[str, Any], parsed: dict[str, Any]) -> dict[str, Any]:
     payload = deepcopy(existing)
     profile = payload.setdefault("candidateProfile", {})
+    existing_resume_facts = profile.get("resumeFacts", {})
     contact = parsed["contact"]
 
     name = contact.get("name") or ""
@@ -207,7 +208,12 @@ def merge_profile(existing: dict[str, Any], parsed: dict[str, Any]) -> dict[str,
             profile[profile_key] = contact[parsed_key]
 
     profile["resumeFileName"] = parsed["resumeFacts"].get("sourceFile", "")
-    profile["resumeFacts"] = parsed["resumeFacts"]
+    resume_facts = parsed["resumeFacts"]
+    for preserved_key in ["projectLinks", "links", "notes"]:
+        if existing_resume_facts.get(preserved_key):
+            resume_facts[preserved_key] = existing_resume_facts[preserved_key]
+
+    profile["resumeFacts"] = resume_facts
     payload.setdefault("settings", {})
 
     return payload
