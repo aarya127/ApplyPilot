@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Application Autofill Prototype",
+  "description": "Scans job application forms and fills them from a saved candidate profile.",
+  "version": "0.1.0",
+  "permissions": ["activeTab", "scripting", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "action": {
+    "default_title": "Application Autofill",
+    "default_popup": "src/popup.html"
+  },
+  "options_page": "src/options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

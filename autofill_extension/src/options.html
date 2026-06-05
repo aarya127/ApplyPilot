@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Application Autofill Profile</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="options-shell">
+      <header class="page-header">
+        <h1>Autofill Profile</h1>
+        <p>Stored locally in this Chrome profile.</p>
+      </header>
+
+      <form id="profileForm" class="settings-form">
+        <section class="form-section">
+          <h2>Contact</h2>
+          <div class="field-grid">
+            <label>First name<input name="firstName" autocomplete="given-name"></label>
+            <label>Last name<input name="lastName" autocomplete="family-name"></label>
+            <label>Full name<input name="fullName" autocomplete="name"></label>
+            <label>Email<input name="email" type="email" autocomplete="email"></label>
+            <label>Phone<input name="phone" autocomplete="tel"></label>
+            <label>Location<input name="location" autocomplete="address-level2"></label>
+            <label>Resume file name<input name="resumeFileName"></label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>Addresses</h2>
+          <div class="field-grid">
+            <label>Canada address line 1<input name="canadaLine1" autocomplete="address-line1"></label>
+            <label>Canada city<input name="canadaCity" autocomplete="address-level2"></label>
+            <label>Canada province<input name="canadaProvince" autocomplete="address-level1"></label>
+            <label>Canada postal code<input name="canadaPostalCode" autocomplete="postal-code"></label>
+            <label class="full-width">Canada full address<input name="canadaFullAddress"></label>
+            <label>USA address line 1<input name="usaLine1" autocomplete="address-line1"></label>
+            <label>USA city<input name="usaCity" autocomplete="address-level2"></label>
+            <label>USA state<input name="usaState" autocomplete="address-level1"></label>
+            <label>USA zip code<input name="usaZipCode" autocomplete="postal-code"></label>
+            <label class="full-width">USA full address<input name="usaFullAddress"></label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>Links</h2>
+          <div class="field-grid">
+            <label>LinkedIn<input name="linkedin" type="url"></label>
+            <label>GitHub<input name="github" type="url"></label>
+            <label>Portfolio<input name="portfolio" type="url"></label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>Education and Work</h2>
+          <div class="field-grid">
+            <label>School<input name="school"></label>
+            <label>Degree<input name="degree"></label>
+            <label>Graduation date<input name="graduationDate"></label>
+            <label>Work authorization<input name="workAuthorization"></label>
+            <label>Needs sponsorship<input name="needsSponsorship"></label>
+            <label>Canadian citizen<input name="canadianCitizen"></label>
+            <label>US permanent resident<input name="usPermanentResident"></label>
+            <label>Subject to agreement<input name="subjectToAgreement"></label>
+            <label>Relocation<input name="relocation"></label>
+            <label>Salary<input name="salary"></label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>Sensitive Optional Fields</h2>
+          <div class="field-grid">
+            <label>Race<input name="race"></label>
+            <label>Ethnicity<input name="ethnicity"></label>
+            <label>Gender<input name="gender"></label>
+            <label>Gender identity<input name="genderIdentity"></label>
+          </div>
+        </section>
+
+        <section class="form-section">
+          <h2>Saved Answers</h2>
+          <label class="full-width">
+            Common answers JSON
+            <textarea name="answersJson" rows="8" spellcheck="false"></textarea>
+          </label>
+        </section>
+
+        <section class="form-section">
+          <h2>Resume Facts</h2>
+          <label class="full-width">
+            Parsed resume facts JSON
+            <textarea name="resumeFactsJson" rows="10" spellcheck="false"></textarea>
+          </label>
+        </section>
+
+        <section class="form-section">
+          <h2>Mapper Settings</h2>
+          <div class="field-grid">
+            <label>Backend mapper URL<input name="backendMapperUrl" type="url" placeholder="http://127.0.0.1:8000/map-fields"></label>
+            <label class="checkbox-label">
+              <input name="autoFillDynamicFields" type="checkbox">
+              Fill newly loaded fields
+            </label>
+            <label class="checkbox-label">
+              <input name="autoFillSensitiveFields" type="checkbox">
+              Fill sensitive optional fields
+            </label>
+            <label class="checkbox-label">
+              <input name="requireReviewBeforeSubmit" type="checkbox">
+              Keep submit manual
+            </label>
+          </div>
+        </section>
+
+        <footer class="form-actions">
+          <button type="submit" class="primary-button">Save profile</button>
+          <button type="button" id="resetButton" class="secondary-button">Reset sample</button>
+          <button type="button" id="exportButton" class="secondary-button">Export JSON</button>
+          <label class="import-button secondary-button">
+            Import JSON
+            <input id="importInput" type="file" accept="application/json,.json">
+          </label>
+          <span id="saveStatus" class="save-status" aria-live="polite"></span>
+        </footer>
+      </form>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

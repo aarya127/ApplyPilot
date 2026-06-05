@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Application Autofill</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body class="popup">
+    <main class="popup-shell">
+      <header class="popup-header">
+        <h1>Application Autofill</h1>
+        <span id="profileStatus" class="status-pill">Profile</span>
+      </header>
+
+      <section class="action-stack">
+        <button id="autofillButton" class="primary-button">Autofill page</button>
+        <button id="scanButton" class="secondary-button">Scan fields</button>
+        <button id="optionsButton" class="secondary-button">Profile settings</button>
+      </section>
+
+      <section id="result" class="result-box" aria-live="polite">
+        Ready on job application pages.
+      </section>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
