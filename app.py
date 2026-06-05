@@ -2,428 +2,20 @@ import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
 
 import urllib.request
 import urllib.parse
 import json
-from flask import Flask, render_template, request, session
+from flask import Flask, redirect, render_template, request, session, url_for
 
-from extract_jobs import DEFAULT_URLS, extract_jobs, extract_newgrad_jobs
+from extract_jobs import extract_newgrad_jobs
 
 app = Flask(__name__)
 app.secret_key = "hr-system-applied-tracker-key"
-CACHE_TTL = timedelta(minutes=5)
-# ---------------------------------------------------------------------------
-# Relevance scoring
-# Each pattern tuple: (compiled_regex, score_weight)
-# A job title + source text is scored; >= 3 = relevant.
-# Strong matches (exact tech role names) score +4 each hit.
-# Weak signals (e.g. standalone word "data") score +1.
-# Firm non-tech terms score -6, which overrides any weak positive.
-# ---------------------------------------------------------------------------
-_STRONG_KEYWORDS = "|".join([
-    # --- Machine Learning / AI ---
-    r"machine learning", r"deep learning", r"reinforcement learning",
-    r"artificial intelligence", r"ai/ml", r"mlops", r"llmops",
-    r"large language model", r"llm", r"generative ai", r"gen ai",
-    r"computer vision", r"natural language processing", r"nlp",
-    r"speech recognition", r"recommendation system", r"feature engineering",
-    r"model training", r"model evaluation", r"applied scientist",
-    r"research scientist", r"ml engineer", r"ai engineer", r"ai researcher",
-    r"ai infrastructure", r"foundation model", r"rag",
-    r"prompt engineer", r"fine.?tun",
-    # --- Data Science / Analytics ---
-    r"data scientist", r"data science",
-    r"data analyst", r"senior analyst",
-    r"analytics engineer", r"quantitative analyst", r"quant analyst",
-    r"business intelligence", r"bi engineer", r"bi developer",
-    r"reporting analyst", r"insights analyst",
-    r"statistical model", r"statistician",
-    r"a/b test", r"experimentation engineer",
-    # --- Data Engineering / Architecture ---
-    r"data engineer", r"data engineering",
-    r"data architect", r"data platform",
-    r"etl", r"elt", r"pipeline engineer",
-    r"lakehouse", r"data lake", r"data warehouse", r"data mesh",
-    r"streaming engineer", r"kafka engineer",
-    r"spark engineer", r"dbt", r"airflow",
-    r"database engineer", r"database administrator", r"dba",
-    # --- Software Engineering ---
-    r"software engineer", r"software developer", r"software engineering",
-    r"software architect", r"principal engineer",
-    r"full[ -]?stack", r"front[ -]?end", r"back[ -]?end",
-    r"mobile engineer", r"ios engineer", r"android engineer",
-    r"embedded engineer", r"embedded software",
-    r"firmware engineer",
-    r"api engineer", r"sdk engineer",
-    r"staff engineer", r"distinguished engineer",
-    # --- Infrastructure / Platform / DevOps ---
-    r"platform engineer", r"infrastructure engineer",
-    r"site reliability engineer", r"\bsre\b",
-    r"devops", r"devsecops", r"cloud engineer",
-    r"cloud architect", r"solutions architect",
-    r"kubernetes", r"\bk8s\b", r"docker",
-    r"ci/cd", r"build engineer", r"release engineer",
-    r"distributed systems", r"systems engineer",
-    r"storage engineer", r"network engineer", r"network architect",
-    r"gpu infrastructure", r"hpc engineer",
-    # --- Security / Compliance Engineering ---
-    r"security engineer", r"application security", r"appsec",
-    r"cybersecurity", r"cyber security", r"information security",
-    r"devsecops", r"penetration test", r"pentest",
-    r"identity engineer", r"iam engineer", r"zero trust",
-    r"threat intelligence",
-    # --- Technical Leadership / Management ---
-    r"engineering manager", r"principal scientist",
-    r"director of engineering", r"vp of engineering",
-    r"technical program manager", r"technical project manager",
-    r"it systems", r"it engineer", r"it architect",
-    # --- Product / UX Engineering ---
-    r"product engineer", r"growth engineer",
-    r"ux engineer", r"ui engineer",
-])
-
-TECH_INCLUDE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
-    (re.compile(rf"\b({_STRONG_KEYWORDS})\b", re.IGNORECASE), 4),
-    # Weaker lone-word signals — still need a strong match unless stacked
-    (re.compile(r"\b(ai|ml|data|software|platform|cloud|automation|infrastructure|python|sql|scala|spark|golang|rust|java|typescript|kubernetes|devops|analytics|modeling|algorithm)\b", re.IGNORECASE), 1),
-]
-
-TECH_EXCLUDE_PATTERN = re.compile(
-    "|".join([
-        r"\bsales associate\b", r"\bculinary\b", r"\bdishwasher\b", r"\bsteward\b",
-        r"\bpastry\b", r"\brestaurant\b", r"\bchef\b", r"\bcashier\b",
-        r"\bretail\b", r"\bstore manager\b", r"\bstore associate\b",
-        r"\bparalegal\b", r"\blegal counsel\b", r"\battorney\b", r"\bcounsel\b",
-        r"\bcorporate communications\b", r"\bpublic relations\b", r"\bpr manager\b",
-        r"\bmarketing manager\b", r"\bbrand manager\b", r"\bcontent strategist\b",
-        r"\bevent coordinator\b", r"\bworkplace experience\b",
-        r"\bfinancial analyst\b", r"\bfinancial advisor\b", r"\bportfolio manager\b",
-        r"\btax\b", r"\baccountant\b", r"\baccounting\b", r"\baudit\b", r"\bpayroll\b",
-        r"\bhuman resources\b", r"\bhr business partner\b", r"\brecruiter\b",
-        r"\btalent acquisition\b", r"\blearning.*development\b",
-        r"\bnurse\b", r"\bphysician\b", r"\bmedical assistant\b", r"\bpharmacist\b",
-        r"\bdentist\b", r"\btherapist\b", r"\bclinical\b",
-        r"\bmechanic\b", r"\bmanufacturing technician\b", r"\bproduction operator\b",
-        r"\bassembly technician\b", r"\bquality inspector\b",
-        r"\bfacilities\b", r"\bcustodian\b", r"\bjanitorial\b",
-        r"\bsecurity officer\b", r"\bsecurity guard\b",
-        r"\bsupply chain\b", r"\bprocurement\b", r"\blogistics\b",
-        r"\bbox office\b", r"\bguestroom\b", r"\bfront desk\b", r"\bconcierge\b",
-        r"\bhousekeeping\b",
-    ]),
-    re.IGNORECASE,
-)
-_cache: Dict[str, Any] = {
-    "jobs": [],
-    "errors": [],
-    "updated_at": None,
-    "urls": DEFAULT_URLS,
-}
-_cache_lock = threading.Lock()
-_cache_loading = False
-
-
-def parse_posted_date(posted: str) -> Optional[datetime]:
-    if not posted:
-        return None
-
-    text = posted.strip()
-    text = text.replace("Date Posted:", "").replace("Posted:", "").strip()
-    text = text.replace("Posted", "").replace("Date Posted", "").strip()
-
-    now = datetime.now()
-    relative_match = None
-    if "today" in text.lower():
-        return now
-    if "yesterday" in text.lower():
-        return now - timedelta(days=1)
-
-    # Handle "a day ago", "an hour ago", "a month ago" etc. by substituting "1"
-    text = re.sub(r'\ba\b(?=\s+(second|minute|hour|day|week|month|year))', '1', text, flags=re.IGNORECASE)
-    text = re.sub(r'\ban\b(?=\s+(second|minute|hour|day|week|month|year))', '1', text, flags=re.IGNORECASE)
-
-    relative_match = None
-    for pattern in [
-        (r"(\d+)\s+days?\s+ago", lambda value: now - timedelta(days=int(value))),
-        (r"(\d+)\s+hours?\s+ago", lambda value: now - timedelta(hours=int(value))),
-        (r"(\d+)\s+hrs?\s+ago", lambda value: now - timedelta(hours=int(value))),
-        (r"(\d+)\s+minutes?\s+ago", lambda value: now - timedelta(minutes=int(value))),
-        (r"(\d+)\s+weeks?\s+ago", lambda value: now - timedelta(weeks=int(value))),
-        (r"(\d+)\s+months?\s+ago", lambda value: now - timedelta(days=int(value) * 30)),
-        (r"(\d+)\s+years?\s+ago", lambda value: now - timedelta(days=int(value) * 365)),
-    ]:
-        try:
-            match = re.search(pattern[0], text, re.IGNORECASE)
-            if match:
-                return pattern[1](match.group(1))
-        except Exception:
-            continue
-
-    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y", "%m/%d/%y", "%b %d, %Y", "%B %d, %Y"]:
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-
-    return None
-
-
-def source_name(url: str) -> str:
-    hostname = urlparse(url).hostname or "unknown"
-    return hostname.replace("www.", "")
-
-
-def normalize_job_text(*parts: str) -> str:
-    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip().lower()
-
-
-def score_job_relevance(title: str, *, source: str = "", source_url: str = "") -> int:
-    text = normalize_job_text(title, source, source_url)
-    score = 0
-    for pattern, weight in TECH_INCLUDE_PATTERNS:
-        if pattern.search(text):
-            score += weight
-    if TECH_EXCLUDE_PATTERN.search(text):
-        score -= 6
-    return score
-
-
-def is_relevant_job(title: str, *, source: str = "", source_url: str = "") -> bool:
-    return score_job_relevance(title, source=source, source_url=source_url) >= 3
-
-
-_LOCATION_US = re.compile(
-    r"\b(united states|usa|us|u\.s\.a?|america|alabama|alaska|arizona|arkansas|california|colorado|"
-    r"connecticut|delaware|florida|georgia|hawaii|idaho|illinois|indiana|iowa|kansas|kentucky|"
-    r"louisiana|maine|maryland|massachusetts|michigan|minnesota|mississippi|missouri|montana|"
-    r"nebraska|nevada|new hampshire|new jersey|new mexico|new york|north carolina|north dakota|"
-    r"ohio|oklahoma|oregon|pennsylvania|rhode island|south carolina|south dakota|tennessee|texas|"
-    r"utah|vermont|virginia|washington|west virginia|wisconsin|wyoming|"
-    r"\bdc\b|district of columbia|san francisco|seattle|austin|boston|chicago|dallas|denver|"
-    r"los angeles|new york city|nyc|atlanta|miami|portland|phoenix|san diego|san jose|raleigh|"
-    r"minneapolis|detroit|charlotte|nashville|houston|philadelphia|pittsburgh|salt lake)\b",
-    re.IGNORECASE,
-)
-_LOCATION_CA = re.compile(
-    r"\b(canada|canadian|ontario|quebec|british columbia|alberta|saskatchewan|manitoba|"
-    r"nova scotia|new brunswick|newfoundland|prince edward island|northwest territories|nunavut|yukon|"
-    r"toronto|montreal|vancouver|calgary|edmonton|ottawa|winnipeg|hamilton|kitchener|waterloo|"
-    r"richmond hill|markham|mississauga)\b",
-    re.IGNORECASE,
-)
-_LOCATION_REMOTE = re.compile(r"\b(remote|work from home|wfh|distributed|anywhere)\b", re.IGNORECASE)
-_LOCATION_MULTIPLE = re.compile(r"\b(multiple|various|several)\b", re.IGNORECASE)
-
-
-def location_allowed(location: str, location_filter: str) -> bool:
-    """Return True when the job's location matches the active location filter."""
-    if location_filter == "any":
-        return True
-    loc = (location or "").strip()
-    if not loc:
-        # Unknown location — keep it so we don't accidentally hide legit remote roles
-        return True
-    if _LOCATION_MULTIPLE.search(loc):
-        return True
-    if _LOCATION_REMOTE.search(loc):
-        return True
-    if _LOCATION_US.search(loc):
-        return True
-    if _LOCATION_CA.search(loc):
-        return True
-    return False
-
-
-def job_matches_filters(
-    job: Dict[str, Any],
-    *,
-    filter_mode: str,
-    search_query: str,
-    location_filter: str = "na_remote",
-) -> bool:
-    if filter_mode == "relevant" and not job.get("is_relevant", True):
-        return False
-
-    if location_filter != "any" and not location_allowed(job.get("location", ""), location_filter):
-        return False
-
-    if search_query:
-        haystack = normalize_job_text(
-            job.get("title", ""),
-            job.get("location", ""),
-            job.get("source", ""),
-        )
-        for token in normalize_job_text(search_query).split():
-            if token not in haystack:
-                return False
-
-    return True
-
-
-def fetch_jobs(urls: List[str]) -> Dict[str, Any]:
-    jobs: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
-
-    for url in urls:
-        try:
-            data = extract_jobs(url)
-            source = source_name(url)
-            for job in data.get("jobs", []):
-                posted_text = job.get("posted", "") or ""
-                job_date = parse_posted_date(posted_text)
-                jobs.append(
-                    {
-                        "title": job.get("title", "(no title)"),
-                        "location": job.get("location", ""),
-                        "posted": posted_text,
-                        "url": job.get("url", ""),
-                        "source": source,
-                        "posted_date": job_date,
-                        "source_url": url,
-                        "relevance_score": score_job_relevance(
-                            job.get("title", ""),
-                            source=source,
-                            source_url=url,
-                        ),
-                        "is_relevant": is_relevant_job(
-                            job.get("title", ""),
-                            source=source,
-                            source_url=url,
-                        ),
-                    }
-                )
-        except Exception as exc:
-            errors.append({"url": url, "message": str(exc)})
-
-    jobs.sort(key=lambda item: (item["posted_date"] or datetime.min), reverse=True)
-    return {"jobs": jobs, "errors": errors}
-
-
-def _fetch_one(url: str) -> tuple[str, list, str | None]:
-    """Fetch jobs for a single URL. Returns (url, new_jobs, error_message)."""
-    source = source_name(url)
-    try:
-        data = extract_jobs(url)
-        new_jobs = []
-        for job in data.get("jobs", []):
-            posted_text = job.get("posted", "") or ""
-            job_date = parse_posted_date(posted_text)
-            posted_normalized = job_date.strftime("%Y-%m-%d") if job_date else posted_text
-            relevance_score = score_job_relevance(
-                job.get("title", ""),
-                source=source,
-                source_url=url,
-            )
-            new_jobs.append({
-                "title": job.get("title", "(no title)"),
-                "location": job.get("location", ""),
-                "posted": posted_normalized,
-                "url": job.get("url", ""),
-                "source": source,
-                "posted_date": job_date,
-                "source_url": url,
-                "relevance_score": relevance_score,
-                "is_relevant": relevance_score >= 3,
-            })
-        return url, new_jobs, None
-    except Exception as exc:
-        return url, [], str(exc)
-
-
-def _run_fetch() -> None:
-    global _cache_loading
-    try:
-        urls = list(_cache["urls"])
-        all_new_jobs: List[Dict[str, Any]] = []
-        all_errors: List[Dict[str, str]] = []
-
-        # Run all scrapers concurrently; old cached jobs stay visible until done
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(_fetch_one, url): url for url in urls}
-            for future in as_completed(futures):
-                url, new_jobs, error = future.result()
-                if error:
-                    all_errors.append({"url": url, "message": error})
-                else:
-                    all_new_jobs.extend(new_jobs)
-
-        all_new_jobs.sort(
-            key=lambda item: (item["posted_date"] or datetime.min),
-            reverse=True,
-        )
-
-        # Atomic swap — replaces stale data all at once
-        with _cache_lock:
-            _cache["jobs"] = all_new_jobs
-            _cache["errors"] = all_errors
-            _cache["updated_at"] = datetime.now()
-    finally:
-        with _cache_lock:
-            _cache_loading = False
-
-
-def start_fetch_jobs() -> None:
-    global _cache_loading
-    with _cache_lock:
-        if _cache_loading:
-            return
-        _cache_loading = True
-
-    thread = threading.Thread(target=_run_fetch, daemon=True)
-    thread.start()
-
-
 @app.route("/")
 def index() -> str:
-    refresh = request.args.get("refresh", "0") == "1"
-    filter_mode = request.args.get("filter", "relevant").strip().lower()
-    if filter_mode not in {"all", "relevant"}:
-        filter_mode = "relevant"
-    location_filter = request.args.get("loc", "na_remote").strip().lower()
-    if location_filter not in {"na_remote", "any"}:
-        location_filter = "na_remote"
-    search_query = request.args.get("q", "").strip()
-    now = datetime.now()
-    with _cache_lock:
-        updated_at = _cache["updated_at"]
-        expired = not updated_at or now - updated_at > CACHE_TTL
-        loading = _cache_loading
-        jobs = list(_cache["jobs"])
-        errors = list(_cache["errors"])
-        urls = list(_cache["urls"])
-
-    triggered_fetch = False
-    if refresh or not jobs or expired:
-        start_fetch_jobs()
-        triggered_fetch = True
-
-    filtered_jobs = [
-        job for job in jobs
-        if job_matches_filters(
-            job,
-            filter_mode=filter_mode,
-            search_query=search_query,
-            location_filter=location_filter,
-        )
-    ]
-
-    return render_template(
-        "index.html",
-        jobs=filtered_jobs,
-        errors=errors,
-        updated_at=updated_at,
-        urls=urls,
-        cache_ttl_minutes=int(CACHE_TTL.total_seconds() / 60),
-        loading=_cache_loading or triggered_fetch,
-        total_job_count=len(jobs),
-        relevant_job_count=sum(1 for job in jobs if job.get("is_relevant", True)),
-        filter_mode=filter_mode,
-        location_filter=location_filter,
-        search_query=search_query,
-    )
+    return redirect(url_for("applied"))
 
 
 
@@ -657,8 +249,8 @@ def _classify_email(subject: str, sender_addr: str) -> Optional[str]:
     return None
 
 
-_LOOKBACK_DAYS = (datetime.utcnow() - datetime(2026, 1, 1)).days  # from Jan 1 2026
-_CHUNK_DAYS  = 90      # each parallel date-range fetch covers 90 days
+_CHUNK_DAYS = 3  # small ranges avoid Graph page caps hiding older mailbox mail
+_MAX_GRAPH_WORKERS = 6
 
 # Targeted KQL phrases — each runs as a separate parallel $search
 _GRAPH_SEARCHES = [
@@ -673,10 +265,10 @@ _GRAPH_SEARCHES = [
 
 
 def _graph_search_messages(access_token: str, query: str) -> list[dict]:
-    """$search-based fetch — inbox only, relevance-ranked, up to 3 pages (300 results)."""
+    """$search-based fetch, mailbox-wide, relevance-ranked, up to 3 pages."""
     encoded_q = urllib.parse.quote(query)
     path: Optional[str] = (
-        f"/me/mailFolders/inbox/messages"
+        f"/me/messages"
         f"?$search={encoded_q}"
         f"&$top=100"
         f"&$select=id,subject,receivedDateTime,from,webLink"
@@ -696,13 +288,13 @@ def _graph_search_messages(access_token: str, query: str) -> list[dict]:
 
 
 def _graph_fetch_date_chunk(access_token: str, start_dt: datetime, end_dt: datetime) -> list[dict]:
-    """$filter fetch for a specific date range from inbox, up to 5 pages (500 emails)."""
+    """$filter fetch for a specific mailbox-wide date range, up to 10 pages."""
     start_str = start_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     end_str   = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     filter_val  = urllib.parse.quote(f"receivedDateTime ge {start_str} and receivedDateTime lt {end_str}")
     orderby_val = urllib.parse.quote("receivedDateTime desc")
     path: Optional[str] = (
-        f"/me/mailFolders/inbox/messages"
+        f"/me/messages"
         f"?$filter={filter_val}"
         f"&$orderby={orderby_val}"
         f"&$select=id,subject,receivedDateTime,from,webLink"
@@ -710,7 +302,7 @@ def _graph_fetch_date_chunk(access_token: str, start_dt: datetime, end_dt: datet
     )
     messages: list[dict] = []
     pages = 0
-    while path and pages < 5:
+    while path and pages < 10:
         data = _graph_request(access_token, path)
         messages.extend(data.get("value", []))
         pages += 1
@@ -722,13 +314,18 @@ def _graph_fetch_date_chunk(access_token: str, start_dt: datetime, end_dt: datet
     return messages
 
 
-def _date_chunks(lookback_days: int, chunk_days: int) -> list[tuple[datetime, datetime]]:
-    """Split the lookback window into (start, end) pairs of chunk_days each."""
-    now = datetime.utcnow()
+def _applied_start_date(now: Optional[datetime] = None) -> datetime:
+    """Return midnight UTC on Jan 1 of the current year."""
+    current = now or datetime.utcnow()
+    return datetime(current.year, 1, 1)
+
+
+def _date_chunks(start_dt: datetime, end_dt: datetime, chunk_days: int) -> list[tuple[datetime, datetime]]:
+    """Split a date window into (start, end) pairs of chunk_days each."""
     chunks = []
-    end = now
-    while end > now - timedelta(days=lookback_days):
-        start = max(end - timedelta(days=chunk_days), now - timedelta(days=lookback_days))
+    end = end_dt
+    while end > start_dt:
+        start = max(end - timedelta(days=chunk_days), start_dt)
         chunks.append((start, end))
         end = start
     return chunks
@@ -743,10 +340,8 @@ _APPLIED_CACHE_TTL = timedelta(minutes=5)
 def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
     """Search the user's mailbox for job-related emails, categorized by type.
 
-    Runs 4 targeted $search queries + 1 date-filtered recent fetch all in
-    parallel. $search covers 2 years by relevance; the recent $filter
-    guarantees nothing from the last 60 days is missed. Results are
-    cached per token for 5 minutes.
+    Runs targeted $search queries plus mailbox-wide date-filtered fetches from
+    Jan 1 of the current year. Results are cached per token for 5 minutes.
     """
     import hashlib
     token_key = hashlib.sha256(access_token.encode()).hexdigest()
@@ -758,25 +353,33 @@ def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
             return cached["results"]
 
     all_messages: list[dict] = []
-    cutoff_dt = datetime.utcnow() - timedelta(days=_LOOKBACK_DAYS)
-    chunks = _date_chunks(_LOOKBACK_DAYS, _CHUNK_DAYS)
+    now_utc = datetime.utcnow()
+    cutoff_dt = _applied_start_date(now_utc)
+    chunks = _date_chunks(cutoff_dt, now_utc, _CHUNK_DAYS)
 
-    # keyword $searches + chunked date-range $filter fetches, all in parallel
-    n_workers = len(_GRAPH_SEARCHES) + len(chunks)
+    # Run enough requests concurrently to stay responsive without making Graph
+    # throttle older chunks and leave the result set looking artificially cut off.
+    n_workers = min(_MAX_GRAPH_WORKERS, len(_GRAPH_SEARCHES) + len(chunks))
+    failed_chunks: list[tuple[datetime, datetime]] = []
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        search_futures = [
-            executor.submit(_graph_search_messages, access_token, q)
+        futures = {
+            executor.submit(_graph_search_messages, access_token, q): ("search", None)
             for q in _GRAPH_SEARCHES
-        ]
-        chunk_futures = [
-            executor.submit(_graph_fetch_date_chunk, access_token, start, end)
+        }
+        futures.update({
+            executor.submit(_graph_fetch_date_chunk, access_token, start, end): ("chunk", (start, end))
             for start, end in chunks
-        ]
-        for f in as_completed(search_futures + chunk_futures):
+        })
+        for future in as_completed(futures):
+            kind, date_range = futures[future]
             try:
-                all_messages.extend(f.result())
+                all_messages.extend(future.result())
             except RuntimeError:
-                pass
+                if kind == "chunk" and date_range is not None:
+                    failed_chunks.append(date_range)
+
+    for start, end in failed_chunks:
+        all_messages.extend(_graph_fetch_date_chunk(access_token, start, end))
 
     seen_ids: set[str] = set()
     results: list[dict[str, Any]] = []
