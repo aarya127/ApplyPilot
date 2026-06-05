@@ -3,7 +3,7 @@
   "name": "Application Autofill Prototype",
   "description": "Scans job application forms and fills them from a saved candidate profile.",
   "version": "0.1.0",
-  "permissions": ["activeTab", "scripting", "storage"],
+  "permissions": ["activeTab", "scripting", "storage", "webNavigation"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background.js"
@@ -17,7 +17,8 @@
     {
       "matches": ["<all_urls>"],
       "js": ["src/content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }

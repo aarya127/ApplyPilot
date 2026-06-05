@@ -14,14 +14,20 @@
       </header>
 
       <section class="action-stack">
-        <button id="autofillButton" class="primary-button">Autofill page</button>
+        <button id="previewButton" class="primary-button">Preview autofill</button>
+        <button id="autofillButton" class="secondary-button">Autofill page</button>
         <button id="scanButton" class="secondary-button">Scan fields</button>
+        <button id="saveAnswersButton" class="secondary-button" disabled>Save new answers</button>
+        <button id="fillSelectedButton" class="secondary-button" disabled>Fill selected</button>
+        <button id="trackButton" class="secondary-button" disabled>Track application</button>
         <button id="optionsButton" class="secondary-button">Profile settings</button>
       </section>
 
       <section id="result" class="result-box" aria-live="polite">
         Ready on job application pages.
       </section>
+
+      <section id="reviewList" class="review-list" aria-label="Autofill review"></section>
     </main>
 
     <script src="popup.js"></script>

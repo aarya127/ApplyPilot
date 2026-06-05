@@ -1,4 +1,10 @@
 (function () {
+  if (window.__applicationAutofillContentLoaded) {
+    return;
+  }
+
+  window.__applicationAutofillContentLoaded = true;
+
   const FIELD_SELECTOR = [
     "input:not([type='hidden']):not([disabled])",
     "textarea:not([disabled])",
@@ -6,6 +12,8 @@
     "[contenteditable='true']",
     "[role='textbox']",
     "[role='combobox']",
+    "button[aria-haspopup='listbox']:not([disabled])",
+    "[aria-haspopup='listbox']:not([disabled])",
     "[role='checkbox']",
     "[role='radio']"
   ].join(",");
@@ -31,6 +39,20 @@
       return true;
     }
 
+    if (message?.type === "PREVIEW_AUTOFILL") {
+      previewAutofill()
+        .then((result) => sendResponse({ ok: true, result }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
+    if (message?.type === "APPLY_AUTOFILL_MAPPINGS") {
+      applyMappings(message.mappings || [])
+        .then((result) => sendResponse({ ok: true, result }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message?.type === "GET_AUTOFILL_STATUS") {
       sendResponse({ ok: true, state });
       return false;
@@ -40,6 +62,60 @@
   });
 
   async function autofillPage() {
+    const plan = await buildAutofillPlan();
+    const result = await applyMappings(plan.mappings);
+
+    return {
+      ...result,
+      scanned: plan.fields.length,
+      mapped: plan.mappings.length
+    };
+  }
+
+  async function previewAutofill() {
+    const plan = await buildAutofillPlan();
+    const mappedIndexes = new Set(plan.mappings.map((mapping) => mapping.index));
+    const unmappedFields = plan.fields
+      .filter((field) => !mappedIndexes.has(field.index))
+      .filter(shouldAskForField)
+      .map(({ elementRef, ...field }) => ({
+        ...field,
+        label: field.label || field.name || field.id || `Field ${field.index + 1}`,
+        answerKey: answerKeyForField(field),
+        needsManualUpload: field.type === "file"
+      }));
+
+    return {
+      scanned: plan.fields.length,
+      mapped: plan.mappings.length,
+      mappings: plan.mappings.map((mapping) => {
+        const field = plan.fields.find((item) => item.index === mapping.index);
+
+        return {
+          ...mapping,
+          label: field?.label || field?.name || field?.id || `Field ${mapping.index + 1}`,
+          tag: field?.tag || "",
+          type: field?.type || "",
+          options: field?.options || []
+        };
+      }),
+      unmappedFields,
+      manualTasks: unmappedFields
+        .filter((field) => field.needsManualUpload)
+        .map((field) => ({
+          index: field.index,
+          label: field.label,
+          task: "Upload resume manually",
+          resumeFileName: plan.profile.resumeFileName || ""
+        })),
+      page: {
+        url: location.href,
+        title: document.title
+      }
+    };
+  }
+
+  async function buildAutofillPlan() {
     const { candidateProfile, settings } = await chrome.storage.local.get([
       "candidateProfile",
       "settings"
@@ -50,6 +126,12 @@
     const backendMappings = await getBackendMappings(fields, profile);
     const mappings = mergeMappings(localMappings, backendMappings);
 
+    return { fields, mappings, profile };
+  }
+
+  async function applyMappings(mappings) {
+    const { settings } = await chrome.storage.local.get("settings");
+    const fields = scanFields();
     let filled = 0;
     const failures = [];
 
@@ -62,7 +144,7 @@
       }
 
       try {
-        const didFill = fillElement(element, mapping, field);
+        const didFill = await fillElement(element, mapping, field);
         if (didFill) {
           markFilled(element, mapping);
           filled += 1;
@@ -113,6 +195,7 @@
       value: getCurrentValue(element),
       options,
       surroundingText: getSurroundingText(element),
+      answerKey: "",
       elementRef: new WeakRef(element)
     };
   }
@@ -147,11 +230,13 @@
       pieces.push(wrappingLabel.innerText);
     }
 
-    const formGroup = element.closest(
-      ".form-group, .field, .question, .application-field, [data-qa], [data-testid], li, p, div"
-    );
-    if (formGroup?.innerText) {
-      pieces.push(firstMeaningfulLine(formGroup.innerText));
+    if (pieces.length === 0) {
+      const formGroup = element.closest(
+        ".form-group, .field, .question, .application-field, [data-qa], [data-testid], li, p, div"
+      );
+      if (formGroup?.innerText) {
+        pieces.push(firstMeaningfulLine(formGroup.innerText));
+      }
     }
 
     return compactText(unique(pieces).join(" "));
@@ -193,6 +278,16 @@
   }
 
   function mapField(field, profile, settings) {
+    const primaryHaystack = normalize(
+      [
+        field.label,
+        field.placeholder,
+        field.name,
+        field.id,
+        field.ariaLabel,
+        field.autocomplete
+      ].join(" ")
+    );
     const haystack = normalize(
       [
         field.label,
@@ -205,21 +300,49 @@
       ].join(" ")
     );
 
-    const addressMapping = mapAddressField(field, profile, haystack);
-    if (addressMapping) {
-      return addressMapping;
+    if (shouldSkipField(primaryHaystack)) {
+      return null;
+    }
+
+    const savedAnswer = findSavedAnswer(field, profile);
+    if (hasValue(savedAnswer)) {
+      return buildMapping(field, savedAnswer, "saved-answer", 0.95);
+    }
+
+    const address = selectAddress(profile, settings, primaryHaystack);
+
+    const agreementMapping = mapAgreementCheckbox(field, primaryHaystack);
+    if (agreementMapping) {
+      return agreementMapping;
+    }
+
+    const workQuestionMapping = mapWorkQuestion(field, profile, primaryHaystack);
+    if (workQuestionMapping) {
+      return workQuestionMapping;
+    }
+
+    const locationMapping = mapLocationField(field, address, primaryHaystack);
+    if (locationMapping) {
+      return locationMapping;
+    }
+
+    if (/(\bmiddle\b.*\bname\b|mname)/.test(primaryHaystack)) {
+      return hasValue(profile.middleName) ? buildMapping(field, profile.middleName, "rule", 0.88) : null;
+    }
+
+    if (/(second last name|second surname|additional last name)/.test(primaryHaystack)) {
+      return hasValue(profile.secondLastName) ? buildMapping(field, profile.secondLastName, "rule", 0.88) : null;
     }
 
     const directRules = [
       [/(\bfirst\b.*\bname\b|\bgiven\b.*\bname\b|fname)/, profile.firstName],
       [/(\blast\b.*\bname\b|\bfamily\b.*\bname\b|lname|surname)/, profile.lastName],
-      [/(\bfull\b.*\bname\b|\blegal\b.*\bname\b|\bname\b)/, profile.fullName],
+      [/(\bfull\b.*\bname\b|\blegal name\b|\bname as it appears\b)/, profile.fullName],
       [/(email|e-mail)/, profile.email],
       [/(phone|mobile|cell|telephone)/, profile.phone],
-      [/(linkedin|linked in)/, profile.linkedin],
-      [/(github|git hub)/, profile.github],
-      [/(portfolio|personal website|website|url)/, profile.portfolio],
-      [/(current location|location)/, profile.location],
+      [/(linkedin profile|linkedin url|linked in profile|linked in url)/, profile.linkedin],
+      [/(github profile|github url|git hub profile|git hub url)/, profile.github],
+      [/(portfolio|personal website|website url|personal site)/, profile.portfolio],
       [/(school|university|college|institution)/, profile.school],
       [/(degree|program|major)/, profile.degree],
       [/(graduation|grad date|expected completion)/, profile.graduationDate],
@@ -230,9 +353,14 @@
     ];
 
     for (const [pattern, value] of directRules) {
-      if (pattern.test(haystack) && hasValue(value)) {
+      if (pattern.test(primaryHaystack) && hasValue(value)) {
         return buildMapping(field, value, "rule", 0.9);
       }
+    }
+
+    const addressMapping = mapAddressField(field, profile, settings, primaryHaystack);
+    if (addressMapping) {
+      return addressMapping;
     }
 
     if (/(sponsor|visa|h-?1b|work permit)/.test(haystack)) {
@@ -245,6 +373,10 @@
 
     if (/(u\.?s\.?|united states).*(green card|permanent resident|lawful permanent resident)/.test(haystack)) {
       return buildMapping(field, profile.usPermanentResident || profile.answers?.usPermanentResident || "Yes", "rule", 0.9);
+    }
+
+    if (/(veteran|protected veteran|armed forces|military service)/.test(haystack)) {
+      return buildMapping(field, profile.veteranStatus || profile.answers?.veteranStatus || "No", "rule", 0.9);
     }
 
     if (/(authorized|eligible|legally).*(work|employment)|work authorization/.test(haystack)) {
@@ -266,21 +398,143 @@
     return null;
   }
 
-  function mapAddressField(field, profile, haystack) {
-    const address = selectAddress(profile, haystack);
+  function findSavedAnswer(field, profile) {
+    const answers = profile.answers || {};
+    const keys = [
+      answerKeyForField(field),
+      normalize(field.label),
+      normalize(field.name),
+      normalize(field.id)
+    ].filter(Boolean);
+
+    for (const key of keys) {
+      if (hasValue(answers[key])) {
+        return answers[key];
+      }
+    }
+
+    return "";
+  }
+
+  function shouldAskForField(field) {
+    const haystack = normalize([
+      field.label,
+      field.placeholder,
+      field.name,
+      field.id,
+      field.ariaLabel
+    ].join(" "));
+
+    if (!haystack || shouldSkipField(haystack)) {
+      return false;
+    }
+
+    if (field.type === "file") {
+      return true;
+    }
+
+    if (field.tag === "input" || field.tag === "textarea" || field.tag === "select") {
+      return true;
+    }
+
+    return field.type === "radio"
+      || field.type === "checkbox"
+      || field.type === "combobox"
+      || field.ariaLabel
+      || field.tag === "button";
+  }
+
+  function answerKeyForField(field) {
+    const basis = field.label || field.name || field.id || field.placeholder || `field-${field.index}`;
+    return `custom:${normalize(basis).replace(/\s+/g, "-").slice(0, 80)}`;
+  }
+
+  function mapWorkQuestion(field, profile, haystack) {
+    if (/(sponsor|visa|h-?1b|work permit)/.test(haystack)) {
+      return buildMapping(field, profile.needsSponsorship || profile.answers?.sponsorship || "No", "rule", 0.9);
+    }
+
+    if (/(authorized|eligible|legally).*(work|employment)|work authorization/.test(haystack)) {
+      return buildMapping(
+        field,
+        profile.workAuthorization || profile.answers?.workAuthorization || "Yes",
+        "rule",
+        0.9
+      );
+    }
+
+    if (/(work remotely|remote location|plan to work remote)/.test(haystack)) {
+      const remoteAnswer = profile.answers?.remoteWork || profile.remoteWork;
+      return hasValue(remoteAnswer) ? buildMapping(field, remoteAnswer, "rule", 0.82) : null;
+    }
+
+    return null;
+  }
+
+  function mapLocationField(field, address, haystack) {
+    if (!address) {
+      return null;
+    }
+
+    if (/(location city|city location|current city|where.*city)/.test(haystack)) {
+      return hasValue(address.city) ? buildMapping(field, address.city, "rule", 0.9) : null;
+    }
+
+    if (/(currently reside|current residence|country.*reside|country region|country\/region|\bcountry\b)/.test(haystack)) {
+      return hasValue(address.country) ? buildMapping(field, address.country, "rule", 0.9) : null;
+    }
+
+    return null;
+  }
+
+  function shouldSkipField(haystack) {
+    return [
+      /\bcompany name\b/,
+      /\bemployer name\b/,
+      /\borganization name\b/,
+      /\bif yes\b/,
+      /\bif applicable\b/,
+      /\blast assigned\b/,
+      /\bcookie/,
+      /\btracking/,
+      /\badvertis/,
+      /\bprovider linkedin\b/,
+      /\bconsent to cookies\b/,
+      /\bmarketing consent\b/,
+      /\bprivacy preferences\b/
+    ].some((pattern) => pattern.test(haystack));
+  }
+
+  function mapAgreementCheckbox(field, haystack) {
+    if (!isCheckboxField(field)) {
+      return null;
+    }
+
+    if (/(^|\b)(i agree|agree to|acknowledge|certify|i certify|i understand)\b/.test(haystack)) {
+      return buildMapping(field, true, "rule", 0.86);
+    }
+
+    return null;
+  }
+
+  function mapAddressField(field, profile, settings, haystack) {
+    const address = selectAddress(profile, settings, haystack);
 
     if (!address) {
       return null;
     }
 
+    if (/(address line 2|address 2|apt|apartment|suite|unit)/.test(haystack)) {
+      return hasValue(address.line2) ? buildMapping(field, address.line2, "rule", 0.9) : null;
+    }
+
     const rules = [
       [/(address line 1|address 1|street address|street|mailing address)/, address.line1],
-      [/(address line 2|address 2|apt|apartment|suite|unit)/, address.line2],
       [/\bcity\b/, address.city],
-      [/(province|state|region)/, address.province || address.state],
-      [/(postal code|postcode|zip code|\bzip\b)/, address.postalCode || address.zipCode],
       [/\bcountry\b/, address.country],
-      [/\baddress\b/, address.fullAddress]
+      [/\b(province|state|region)\b/, address.province || address.state],
+      [/(postal code|postcode|zip code|\bzip\b)/, address.postalCode || address.zipCode],
+      [/(full address|mailing address|home address|residential address)/, address.fullAddress]
     ];
 
     for (const [pattern, value] of rules) {
@@ -292,13 +546,21 @@
     return null;
   }
 
-  function selectAddress(profile, haystack) {
+  function selectAddress(profile, settings, haystack) {
     if (/(\bcanada\b|\bcanadian\b|\bprovince\b|postal code|postcode)/.test(haystack)) {
       return profile.addresses?.canada;
     }
 
     if (/(\bu\.?s\.?\b|\busa\b|\bunited states\b|\bstate\b|zip code|\bzip\b)/.test(haystack)) {
       return profile.addresses?.usa;
+    }
+
+    if (settings?.targetCountry === "usa") {
+      return profile.addresses?.usa || profile.addresses?.canada || null;
+    }
+
+    if (settings?.targetCountry === "canada") {
+      return profile.addresses?.canada || profile.addresses?.usa || null;
     }
 
     return profile.addresses?.canada || profile.addresses?.usa || null;
@@ -320,6 +582,10 @@
     }
 
     return null;
+  }
+
+  function isCheckboxField(field) {
+    return field.type === "checkbox";
   }
 
   function buildMapping(field, value, source, confidence) {
@@ -378,10 +644,15 @@
     return fields.map(({ elementRef, ...field }) => field);
   }
 
-  function fillElement(element, mapping, field) {
+  async function fillElement(element, mapping, field) {
     const tag = element.tagName.toLowerCase();
     const type = (element.getAttribute("type") || "").toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
+    const hasListboxPopup = element.getAttribute("aria-haspopup") === "listbox";
+
+    if (type === "file") {
+      return false;
+    }
 
     if (tag === "select") {
       return fillSelect(element, mapping.value);
@@ -395,12 +666,34 @@
       return fillCheckbox(element, mapping.value);
     }
 
-    if (element.isContentEditable || role === "textbox" || role === "combobox") {
+    if (role === "combobox" || hasListboxPopup) {
+      return fillCombobox(element, mapping.value);
+    }
+
+    if (element.isContentEditable || role === "textbox") {
       setEditableText(element, mapping.value);
       return true;
     }
 
     setNativeValue(element, String(mapping.value));
+    dispatchFormEvents(element);
+    return true;
+  }
+
+  async function fillCombobox(element, desiredValue) {
+    element.focus();
+    element.click();
+    setEditableText(element, desiredValue);
+    await sleep(200);
+
+    const desired = normalize(String(desiredValue));
+    const option = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option"))
+      .find((item) => normalize(item.textContent || item.getAttribute("aria-label") || "").includes(desired));
+
+    if (option) {
+      option.click();
+    }
+
     dispatchFormEvents(element);
     return true;
   }
@@ -492,6 +785,10 @@
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
     element.dispatchEvent(new Event("blur", { bubbles: true }));
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   function startObserver() {

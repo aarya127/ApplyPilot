@@ -39,6 +39,7 @@ const sampleProfile = {
   graduationDate: "",
   workAuthorization: "Yes",
   needsSponsorship: "No",
+  veteranStatus: "No",
   canadianCitizen: "Yes",
   usPermanentResident: "Yes",
   subjectToAgreement: "No",
@@ -60,6 +61,7 @@ const sampleProfile = {
   },
   answers: {
     sponsorship: "No",
+    veteranStatus: "No",
     workAuthorization: "Yes",
     canadianCitizen: "Yes",
     usPermanentResident: "Yes",
@@ -73,7 +75,9 @@ const sampleSettings = {
   backendMapperUrl: "",
   autoFillDynamicFields: true,
   autoFillSensitiveFields: false,
-  requireReviewBeforeSubmit: true
+  requireReviewBeforeSubmit: true,
+  backendBaseUrl: "http://127.0.0.1:8000",
+  targetCountry: "canada"
 };
 
 loadOptions();
@@ -169,6 +173,8 @@ function writeForm(profile, settings) {
   form.elements.answersJson.value = JSON.stringify(profile.answers || {}, null, 2);
   form.elements.resumeFactsJson.value = JSON.stringify(profile.resumeFacts || {}, null, 2);
   form.elements.backendMapperUrl.value = settings.backendMapperUrl || "";
+  form.elements.backendBaseUrl.value = settings.backendBaseUrl || "";
+  form.elements.targetCountry.value = settings.targetCountry || "canada";
   form.elements.autoFillDynamicFields.checked = settings.autoFillDynamicFields !== false;
   form.elements.autoFillSensitiveFields.checked = settings.autoFillSensitiveFields === true;
   form.elements.requireReviewBeforeSubmit.checked = settings.requireReviewBeforeSubmit !== false;
@@ -225,6 +231,7 @@ function readForm() {
     graduationDate: valueOf("graduationDate"),
     workAuthorization: valueOf("workAuthorization"),
     needsSponsorship: valueOf("needsSponsorship"),
+    veteranStatus: valueOf("veteranStatus"),
     canadianCitizen: valueOf("canadianCitizen"),
     usPermanentResident: valueOf("usPermanentResident"),
     subjectToAgreement: valueOf("subjectToAgreement"),
@@ -245,7 +252,9 @@ function readForm() {
     backendMapperUrl: valueOf("backendMapperUrl"),
     autoFillDynamicFields: form.elements.autoFillDynamicFields.checked,
     autoFillSensitiveFields: form.elements.autoFillSensitiveFields.checked,
-    requireReviewBeforeSubmit: form.elements.requireReviewBeforeSubmit.checked
+    requireReviewBeforeSubmit: form.elements.requireReviewBeforeSubmit.checked,
+    backendBaseUrl: valueOf("backendBaseUrl"),
+    targetCountry: valueOf("targetCountry") || "canada"
   };
 
   return { candidateProfile, settings };

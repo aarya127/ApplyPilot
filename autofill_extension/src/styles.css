@@ -136,6 +136,67 @@ button,
   line-height: 1.45;
 }
 
+.review-list {
+  display: grid;
+  gap: 8px;
+  max-height: 260px;
+  margin-top: 12px;
+  overflow: auto;
+}
+
+.review-item {
+  display: flex;
+  grid-template-columns: none;
+  align-items: flex-start;
+  gap: 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px;
+  color: var(--text);
+}
+
+.review-item input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+.review-body {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.review-body strong,
+.review-value {
+  overflow-wrap: anywhere;
+}
+
+.review-value {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.review-heading {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  margin-top: 4px;
+  text-transform: uppercase;
+}
+
+.answer-input {
+  min-height: 34px;
+  padding: 8px;
+  font-size: 12px;
+}
+
+.manual-task {
+  border-color: #d7b56d;
+  background: #fff8e6;
+}
+
 .options-shell {
   width: min(960px, calc(100vw - 32px));
   margin: 32px auto 56px;

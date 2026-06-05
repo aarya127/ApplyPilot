@@ -60,6 +60,7 @@
             <label>Graduation date<input name="graduationDate"></label>
             <label>Work authorization<input name="workAuthorization"></label>
             <label>Needs sponsorship<input name="needsSponsorship"></label>
+            <label>Veteran status<input name="veteranStatus"></label>
             <label>Canadian citizen<input name="canadianCitizen"></label>
             <label>US permanent resident<input name="usPermanentResident"></label>
             <label>Subject to agreement<input name="subjectToAgreement"></label>
@@ -97,6 +98,14 @@
         <section class="form-section">
           <h2>Mapper Settings</h2>
           <div class="field-grid">
+            <label>
+              Target country
+              <select name="targetCountry">
+                <option value="canada">Canada</option>
+                <option value="usa">United States</option>
+              </select>
+            </label>
+            <label>Backend base URL<input name="backendBaseUrl" type="url" placeholder="http://127.0.0.1:8000"></label>
             <label>Backend mapper URL<input name="backendMapperUrl" type="url" placeholder="http://127.0.0.1:8000/map-fields"></label>
             <label class="checkbox-label">
               <input name="autoFillDynamicFields" type="checkbox">

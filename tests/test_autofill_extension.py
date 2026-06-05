@@ -1,0 +1,457 @@
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+from autofill_extension.backend import server
+from autofill_extension.tools.parse_resume import merge_profile, parse_resume
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_resume_merge_preserves_existing_contact_and_project_links():
+    parsed = {
+        "contact": {
+            "name": "Parsed Candidate",
+            "email": "parsed@example.com",
+            "phone": "555-111-2222",
+            "linkedin": "https://linkedin.example/parsed",
+            "github": "https://github.example/parsed",
+            "portfolio": "https://portfolio.example",
+        },
+        "resumeFacts": {
+            "skills": ["Python"],
+            "education": ["Sample University"],
+            "experience": ["Sample Company"],
+            "projects": ["Sample Project"],
+            "sourceFile": "resume.pdf",
+            "rawTextFile": "generated/resume.txt",
+        },
+    }
+    existing = {
+        "candidateProfile": {
+            "firstName": "Existing",
+            "email": "existing@example.com",
+            "github": "https://github.example/existing",
+            "resumeFacts": {
+                "projectLinks": {
+                    "sample": {
+                        "name": "Sample",
+                        "url": "https://github.example/existing/sample",
+                        "type": "project_repository",
+                    }
+                }
+            },
+        },
+        "settings": {},
+    }
+
+    merged = merge_profile(existing, parsed)
+    profile = merged["candidateProfile"]
+
+    assert profile["email"] == "existing@example.com"
+    assert profile["github"] == "https://github.example/existing"
+    assert profile["resumeFileName"] == "resume.pdf"
+    assert profile["resumeFacts"]["skills"] == ["Python"]
+    assert profile["resumeFacts"]["projectLinks"]["sample"]["url"] == "https://github.example/existing/sample"
+
+
+def test_parse_resume_text_extracts_sections():
+    text = """
+    Sample Candidate
+    sample@example.com
+    Skills
+    Python, SQL, Docker
+    Education
+    Sample University
+    Experience
+    Software Engineer
+    Projects
+    Useful Project
+    """
+
+    parsed = parse_resume(text, Path("resume.pdf"), "resume.txt")
+
+    assert parsed["contact"]["email"] == "sample@example.com"
+    assert "Python" in parsed["resumeFacts"]["skills"]
+    assert parsed["resumeFacts"]["education"] == ["Sample University"]
+    assert parsed["resumeFacts"]["experience"] == ["Software Engineer"]
+    assert parsed["resumeFacts"]["projects"] == ["Useful Project"]
+
+
+def test_backend_without_api_key_returns_empty_llm_mapping(monkeypatch, tmp_path):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+
+    client = server.app.test_client()
+    response = client.post("/map-fields", json={"fields": [], "profile": {}, "page": {}})
+
+    assert response.status_code == 200
+    assert response.json["mappings"] == []
+    assert "NVIDIA_API_KEY" in response.json["warning"]
+
+
+def test_backend_tracks_applications(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+
+    client = server.app.test_client()
+    response = client.post(
+        "/track-application",
+        json={
+            "url": "https://example.com/jobs/1",
+            "title": "Example Role",
+            "status": "filled",
+            "filledCount": 2,
+            "mappedCount": 3,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["tracked"] is True
+
+    response = client.get("/applications")
+    assert response.status_code == 200
+    assert response.json["applications"][0]["url"] == "https://example.com/jobs/1"
+    assert response.json["applications"][0]["filled_count"] == 2
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_previews_and_fills_sample_form():
+    from playwright.sync_api import sync_playwright
+
+    sample_path = ROOT / "autofill_extension/examples/sample_application.html"
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "fullName": "Test Candidate",
+        "email": "test@example.com",
+        "phone": "5550100000",
+        "linkedin": "https://linkedin.example/test",
+        "github": "https://github.example/test",
+        "portfolio": "https://portfolio.example",
+        "location": "Test City, TS",
+        "school": "Sample University",
+        "degree": "Sample Degree",
+        "graduationDate": "April 2026",
+        "workAuthorization": "Yes",
+        "needsSponsorship": "No",
+        "canadianCitizen": "Yes",
+        "usPermanentResident": "Yes",
+        "subjectToAgreement": "No",
+        "relocation": "Open to relocation",
+        "salary": "Negotiable",
+        "addresses": {
+            "canada": {
+                "line1": "123 Test St",
+                "city": "Toronto",
+                "province": "ON",
+                "postalCode": "A1A1A1",
+                "country": "Canada",
+                "fullAddress": "123 Test St, Toronto, ON, A1A1A1",
+            }
+        },
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "canada",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.add_init_script(
+            f"""
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            """
+        )
+        page.goto(sample_path.as_uri())
+        page.evaluate(
+            """() => {
+              const form = document.querySelector('form');
+              const section = document.createElement('section');
+              section.innerHTML = `
+                <h2>Regression Fields</h2>
+                <label>Legal Middle Name<input name="middleName"></label>
+                <label>Second Last Name<input name="secondLastName"></label>
+                <label>Address Line 2<input name="address_line_2"></label>
+                <label>Country/Region<input name="country_region"></label>
+                <label>Company Name<input name="companyName"></label>
+                <label>If Yes Which Country Were You Last Assigned to?<input name="conditionalCountry"></label>
+                <label>I agree to the Alternate Dispute Resolution statement above<input type="checkbox" name="adrAgree"></label>
+                <label>Consent to cookies from provider LinkedIn<input name="linkedinCookieConsent"></label>
+              `;
+              form.prepend(section);
+            }"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        assert preview["result"]["mapped"] >= 12
+
+        selected = preview["result"]["mappings"]
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            selected,
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert fill_response["result"]["filled"] >= 10
+        assert page.locator("[name='firstName']").input_value() == "Test"
+        assert page.locator("[name='email_address']").input_value() == "test@example.com"
+        assert page.locator("[name='address_line_1']").input_value() == "123 Test St"
+        assert page.locator("[name='work_authorization']").input_value() == "Yes"
+        assert page.locator("[name='middleName']").input_value() == ""
+        assert page.locator("[name='secondLastName']").input_value() == ""
+        assert page.locator("[name='address_line_2']").input_value() == ""
+        assert page.locator("[name='country_region']").input_value() == "Canada"
+        assert page.locator("[name='companyName']").input_value() == ""
+        assert page.locator("[name='conditionalCountry']").input_value() == ""
+        assert page.locator("[name='adrAgree']").is_checked() is True
+        assert page.locator("[name='linkedinCookieConsent']").input_value() == ""
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_uses_usa_target_country_for_stripe_style_fields():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "email": "sample@example.com",
+        "phone": "5550100000",
+        "workAuthorization": "Yes",
+        "needsSponsorship": "No",
+        "school": "Sample University",
+        "addresses": {
+            "canada": {
+                "city": "Toronto",
+                "province": "ON",
+                "postalCode": "A1A1A1",
+                "country": "Canada",
+                "line1": "123 Maple St",
+            },
+            "usa": {
+                "city": "Chicago",
+                "state": "IL",
+                "zipCode": "60601",
+                "country": "United States",
+                "line1": "456 Lake St",
+            },
+        },
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.add_init_script(
+            f"""
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            """
+        )
+        page.set_content(
+            """
+            <form>
+              <label>Country*<input name="country"></label>
+              <label>Location (City)*<input name="locationCity"></label>
+              <label>Please select the country where you currently reside. *<input name="currentlyReside"></label>
+              <label>Are you authorized to work in the location(s) you selected in your previous response?*<input name="authorized"></label>
+              <label>Will you require Stripe to sponsor you for a work permit now or in the future for the location(s) you selected in in your previous response? *<input name="sponsorship"></label>
+              <label>If this role offers the option to work from a remote location, do you plan to work remotely?*<input name="remote"></label>
+              <label>What is the most recent school you attended?<input name="school"></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='country']").input_value() == "United States"
+        assert page.locator("[name='locationCity']").input_value() == "Chicago"
+        assert page.locator("[name='currentlyReside']").input_value() == "United States"
+        assert page.locator("[name='authorized']").input_value() == "Yes"
+        assert page.locator("[name='sponsorship']").input_value() == "No"
+        assert page.locator("[name='remote']").input_value() == ""
+        assert page.locator("[name='school']").input_value() == "Sample University"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "email": "sample@example.com",
+        "phone": "5550100000",
+        "veteranStatus": "No",
+        "resumeFileName": "resume.private.pdf",
+        "answers": {
+            "custom:do-you-have-experience-with-kubernetes": "Yes"
+        },
+        "addresses": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Do you have experience with Kubernetes?<input name="k8s"></label>
+              <label>Are you a protected veteran?<select name="veteran"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Upload Resume<input type="file" name="resume"></label>
+              <label>What is your favorite database?<input name="database"></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings = preview["result"]["mappings"]
+        k8s_mapping = next(mapping for mapping in mappings if "Kubernetes" in mapping["label"])
+        veteran_mapping = next(mapping for mapping in mappings if "protected veteran" in mapping["label"])
+        assert k8s_mapping["value"] == "Yes"
+        assert veteran_mapping["value"] == "No"
+        assert preview["result"]["manualTasks"][0]["resumeFileName"] == "resume.private.pdf"
+
+        unknown_labels = [field["label"] for field in preview["result"]["unmappedFields"]]
+        assert "What is your favorite database?" in unknown_labels
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='k8s']").input_value() == "Yes"
+        assert page.locator("[name='veteran']").input_value() == "No"
+        assert page.locator("[name='database']").input_value() == ""
+
+        browser.close()

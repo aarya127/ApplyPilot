@@ -214,7 +214,13 @@ def merge_profile(existing: dict[str, Any], parsed: dict[str, Any]) -> dict[str,
             resume_facts[preserved_key] = existing_resume_facts[preserved_key]
 
     profile["resumeFacts"] = resume_facts
-    payload.setdefault("settings", {})
+    settings = payload.setdefault("settings", {})
+    settings.setdefault("backendBaseUrl", "http://127.0.0.1:8000")
+    settings.setdefault("backendMapperUrl", "")
+    settings.setdefault("targetCountry", "canada")
+    settings.setdefault("autoFillDynamicFields", True)
+    settings.setdefault("autoFillSensitiveFields", False)
+    settings.setdefault("requireReviewBeforeSubmit", True)
 
     return payload
 

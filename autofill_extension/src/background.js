@@ -38,6 +38,7 @@ chrome.runtime.onInstalled.addListener(async () => {
         graduationDate: "",
         workAuthorization: "Yes",
         needsSponsorship: "No",
+        veteranStatus: "No",
         canadianCitizen: "Yes",
         usPermanentResident: "Yes",
         subjectToAgreement: "No",
@@ -59,6 +60,7 @@ chrome.runtime.onInstalled.addListener(async () => {
         },
         answers: {
           sponsorship: "No",
+          veteranStatus: "No",
           workAuthorization: "Yes",
           canadianCitizen: "Yes",
           usPermanentResident: "Yes",
@@ -76,27 +78,38 @@ chrome.runtime.onInstalled.addListener(async () => {
         backendMapperUrl: "",
         autoFillDynamicFields: true,
         autoFillSensitiveFields: false,
-        requireReviewBeforeSubmit: true
+        requireReviewBeforeSubmit: true,
+        backendBaseUrl: "http://127.0.0.1:8000",
+        targetCountry: "canada"
       }
     });
   }
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "MAP_FIELDS_WITH_BACKEND") {
-    return false;
+  if (message?.type === "MAP_FIELDS_WITH_BACKEND") {
+    mapFieldsWithBackend(message.payload)
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+
+    return true;
   }
 
-  mapFieldsWithBackend(message.payload)
-    .then((payload) => sendResponse({ ok: true, payload }))
-    .catch((error) => sendResponse({ ok: false, error: error.message }));
+  if (message?.type === "TRACK_APPLICATION") {
+    trackApplication(message.payload)
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
 
-  return true;
+    return true;
+  }
+
+  return false;
 });
 
 async function mapFieldsWithBackend(payload) {
   const { settings } = await chrome.storage.local.get("settings");
-  const endpoint = settings?.backendMapperUrl?.trim();
+  const endpoint = settings?.backendMapperUrl?.trim()
+    || joinUrl(settings?.backendBaseUrl, "/map-fields");
 
   if (!endpoint) {
     return { mappings: [] };
@@ -113,4 +126,35 @@ async function mapFieldsWithBackend(payload) {
   }
 
   return response.json();
+}
+
+async function trackApplication(payload) {
+  const { settings } = await chrome.storage.local.get("settings");
+  const endpoint = joinUrl(settings?.backendBaseUrl, "/track-application");
+
+  if (!endpoint) {
+    return { tracked: false };
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Tracker failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+function joinUrl(baseUrl, path) {
+  const base = String(baseUrl || "").trim().replace(/\/+$/, "");
+
+  if (!base) {
+    return "";
+  }
+
+  return `${base}${path}`;
 }

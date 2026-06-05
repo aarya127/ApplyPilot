@@ -25,3 +25,4 @@ autofill_extension/profile.private.json
 autofill_extension/*.private.json
 autofill_extension/resumes/
 autofill_extension/generated/
+autofill_extension/backend/env.private
