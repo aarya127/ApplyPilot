@@ -128,10 +128,12 @@
       "settings"
     ]);
     const profile = candidateProfile || {};
+    await prepareRepeatableSections(profile);
     const fields = scanFields();
     const localMappings = fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean);
+    const repeatableMappings = mapRepeatableEmploymentFields(fields, profile);
     const backendMappings = await getBackendMappings(fields, profile);
-    const mappings = mergeMappings(localMappings, backendMappings);
+    const mappings = mergeMappings([...localMappings, ...repeatableMappings], backendMappings);
 
     return { fields, mappings, profile };
   }
@@ -595,6 +597,7 @@
       [/(salary|compensation|pay expectation)/, profile.salary || profile.answers?.salary],
       [/(relocat)/, profile.relocation || profile.answers?.relocation],
       [/(pronouns?|address you correctly)/, profile.answers?.pronouns],
+      [/(electronic signature|full name.*today|signature.*date)/, signatureValue(profile)],
       [/(non[- ]?compete|restrictive covenant|employment agreement|subject to.*agreement)/,
         profile.subjectToAgreement || profile.answers?.subjectToAgreement]
     ];
@@ -616,6 +619,18 @@
 
     if (/(within|located).*(50 miles|seattle|boston|washington dc|austin)/.test(haystack)) {
       return buildMapping(field, profile.answers?.withinListedOfficeRadius || "No", "rule", 0.86);
+    }
+
+    if (/(may we contact|contact).*(current employer)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.82);
+    }
+
+    if (/(review.*linked document|candidate privacy policy|privacy policy).*select/.test(haystack)) {
+      return buildMapping(field, profile.answers?.reviewedPrivacyPolicy || "Yes", "rule", 0.82);
+    }
+
+    if (/(relevant employment|military service).*(above|add another|employment link)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.enteredRelevantEmployment || "Yes", "rule", 0.86);
     }
 
     if (/(canadian citizen|citizen of canada|canada citizenship)/.test(haystack)) {
@@ -869,6 +884,14 @@
   }
 
   function selectAddress(profile, settings, haystack) {
+    if (settings?.targetCountry === "usa" && /(zip code|\bzip\b|postal code|postcode)/.test(haystack)) {
+      return profile.addresses?.usa || profile.addresses?.canada || null;
+    }
+
+    if (settings?.targetCountry === "canada" && /(postal code|postcode)/.test(haystack) && !/(zip code|\bzip\b)/.test(haystack)) {
+      return profile.addresses?.canada || profile.addresses?.usa || null;
+    }
+
     if (/(\bcanada\b|\bcanadian\b|\bprovince\b|postal code|postcode)/.test(haystack)) {
       return profile.addresses?.canada;
     }
@@ -928,6 +951,235 @@
     }
 
     return null;
+  }
+
+  async function prepareRepeatableSections(profile) {
+    const experiences = normalizedWorkExperience(profile);
+
+    if (experiences.length <= 1) {
+      return;
+    }
+
+    await ensureEmploymentRows(experiences.length);
+  }
+
+  async function ensureEmploymentRows(targetCount) {
+    const maxClicks = Math.min(Math.max(targetCount - countEmploymentRows(), 0), 12);
+
+    for (let index = 0; index < maxClicks; index += 1) {
+      const button = findAddAnotherEmploymentButton();
+      if (!button) {
+        return;
+      }
+
+      button.click();
+      await sleep(250);
+
+      if (countEmploymentRows() >= targetCount) {
+        return;
+      }
+    }
+  }
+
+  function findAddAnotherEmploymentButton() {
+    const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button']"));
+    return candidates.find((item) => {
+      const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
+      return /add another/.test(text) && /(employment|experience|work|job)/.test(employmentSectionText(item));
+    }) || candidates.find((item) => {
+      const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
+      return /^add another$/.test(text);
+    });
+  }
+
+  function countEmploymentRows() {
+    return Math.max(
+      countFieldsMatching(/\bcompany name\b/),
+      countFieldsMatching(/(^|\b)title\b/),
+      countFieldsMatching(/start date.*year/)
+    );
+  }
+
+  function countFieldsMatching(pattern) {
+    return scanFieldsWithoutPreparation()
+      .filter((field) => pattern.test(normalize([field.label, field.name, field.id, field.placeholder].join(" "))))
+      .length;
+  }
+
+  function scanFieldsWithoutPreparation() {
+    const elements = Array.from(document.querySelectorAll(FIELD_SELECTOR)).filter(isFillable);
+    const choiceGroups = buildChoiceGroups(elements);
+    const groupedElements = new Set(choiceGroups.flatMap((group) => group.elements));
+    const fields = [];
+    let index = 0;
+
+    for (const group of choiceGroups) {
+      fields.push(buildChoiceGroupMetadata(group, index));
+      index += 1;
+    }
+
+    for (const element of elements) {
+      if (groupedElements.has(element)) {
+        continue;
+      }
+
+      fields.push(buildFieldMetadata(element, index));
+      index += 1;
+    }
+
+    return fields;
+  }
+
+  function mapRepeatableEmploymentFields(fields, profile) {
+    const experiences = normalizedWorkExperience(profile);
+
+    if (!experiences.length) {
+      return [];
+    }
+
+    const buckets = {
+      company: [],
+      title: [],
+      startMonth: [],
+      startYear: [],
+      endMonth: [],
+      endYear: [],
+      currentRole: []
+    };
+
+    for (const field of fields) {
+      const haystack = normalize([field.label, field.name, field.id, field.placeholder].join(" "));
+
+      if (!isEmploymentField(field, haystack)) {
+        continue;
+      }
+
+      if (/\bcompany name\b|\bemployer\b/.test(haystack)) {
+        buckets.company.push(field);
+      } else if (/(^|\b)title\b|job title|position/.test(haystack)) {
+        buckets.title.push(field);
+      } else if (/start date.*month|start month/.test(haystack)) {
+        buckets.startMonth.push(field);
+      } else if (/start date.*year|start year/.test(haystack)) {
+        buckets.startYear.push(field);
+      } else if (/end date.*month|end month/.test(haystack)) {
+        buckets.endMonth.push(field);
+      } else if (/end date.*year|end year/.test(haystack)) {
+        buckets.endYear.push(field);
+      } else if (/current role|currently work|current position/.test(haystack)) {
+        buckets.currentRole.push(field);
+      }
+    }
+
+    const mappings = [];
+    experiences.forEach((experience, index) => {
+      addRepeatableMapping(mappings, buckets.company[index], experience.company);
+      addRepeatableMapping(mappings, buckets.title[index], experience.title);
+      addRepeatableMapping(mappings, buckets.startMonth[index], experience.startMonth);
+      addRepeatableMapping(mappings, buckets.startYear[index], experience.startYear);
+      addRepeatableMapping(mappings, buckets.endMonth[index], experience.currentRole ? "" : experience.endMonth);
+      addRepeatableMapping(mappings, buckets.endYear[index], experience.currentRole ? "" : experience.endYear);
+      addRepeatableMapping(mappings, buckets.currentRole[index], experience.currentRole ? true : false);
+    });
+
+    return mappings;
+  }
+
+  function addRepeatableMapping(mappings, field, value) {
+    if (!field || !hasValue(value)) {
+      return;
+    }
+
+    mappings.push(buildMapping(field, value, "experience", 0.92));
+  }
+
+  function isEmploymentField(field, haystack) {
+    if (/(school|education|degree|discipline)/.test(haystack)) {
+      return false;
+    }
+
+    return /(employment|experience|work history|company name|employer|job title|current role|start date|end date|position)/.test(
+      `${haystack} ${normalize(field.surroundingText)}`
+    );
+  }
+
+  function normalizedWorkExperience(profile) {
+    const raw = profile.workExperience || profile.resumeFacts?.workExperience || [];
+    if (Array.isArray(raw) && raw.some((item) => item && typeof item === "object")) {
+      return raw
+        .filter((item) => item && typeof item === "object")
+        .map(normalizeExperienceEntry)
+        .filter((item) => hasValue(item.company) || hasValue(item.title));
+    }
+
+    return parseExperienceLines(profile.resumeFacts?.experience || []);
+  }
+
+  function normalizeExperienceEntry(entry) {
+    return {
+      company: compactText(entry.company || entry.employer || entry.organization || ""),
+      title: compactText(entry.title || entry.role || entry.position || ""),
+      startMonth: compactText(entry.startMonth || entry.start_month || ""),
+      startYear: compactText(entry.startYear || entry.start_year || ""),
+      endMonth: compactText(entry.endMonth || entry.end_month || ""),
+      endYear: compactText(entry.endYear || entry.end_year || ""),
+      currentRole: entry.currentRole === true || entry.current === true || /present|current/i.test(String(entry.endYear || entry.end || ""))
+    };
+  }
+
+  function parseExperienceLines(lines) {
+    if (!Array.isArray(lines)) {
+      return [];
+    }
+
+    const datePattern = new RegExp(
+      "^(.*?)\\s+(January|February|March|April|May|June|July|August|September|October|November|December)\\s+(\\d{4})\\s+(?:-|–|—|to)\\s+(?:(January|February|March|April|May|June|July|August|September|October|November|December)\\s+(\\d{4})|(Present|Current))$",
+      "i"
+    );
+    const entries = [];
+
+    lines.forEach((line, index) => {
+      const match = String(line || "").match(datePattern);
+      if (!match) {
+        return;
+      }
+
+      const { title } = splitTitleLocation(lines[index + 1] || "");
+      entries.push({
+        company: compactText(match[1]).replace(/\bW aterloo\b/g, "Waterloo"),
+        title,
+        startMonth: canonicalMonth(match[2]),
+        startYear: match[3],
+        endMonth: canonicalMonth(match[4] || ""),
+        endYear: match[5] || "",
+        currentRole: Boolean(match[6])
+      });
+    });
+
+    return entries;
+  }
+
+  function splitTitleLocation(value) {
+    const text = compactText(value);
+    const match = text.match(/^(.*?)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$/);
+    return {
+      title: match ? compactText(match[1]) : text,
+      location: match ? compactText(match[2]) : ""
+    };
+  }
+
+  function canonicalMonth(value) {
+    return value ? value.slice(0, 1).toUpperCase() + value.slice(1).toLowerCase() : "";
+  }
+
+  function employmentSectionText(element) {
+    return normalize(element.closest("section, fieldset, form, div")?.innerText || "");
+  }
+
+  function signatureValue(profile) {
+    const date = new Date();
+    const formatted = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+    return [profile.fullName, formatted].filter(Boolean).join(" ");
   }
 
   function bestOptionValue(field, value) {

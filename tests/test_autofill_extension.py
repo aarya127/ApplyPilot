@@ -81,6 +81,28 @@ def test_parse_resume_text_extracts_sections():
     assert parsed["resumeFacts"]["projects"] == ["Useful Project"]
 
 
+def test_parse_resume_text_extracts_structured_work_experience():
+    text = """
+    Sample Candidate
+    sample@example.com
+    Experience
+    Example Labs September 2025 – December 2025
+    Machine Learning Engineer Chicago, IL
+    Built useful systems
+    Sample University January 2025 – April 2025
+    Research Assistant Waterloo, ON
+    """
+
+    parsed = parse_resume(text, Path("resume.pdf"), "resume.txt")
+    work = parsed["resumeFacts"]["workExperience"]
+
+    assert work[0]["company"] == "Example Labs"
+    assert work[0]["title"] == "Machine Learning Engineer"
+    assert work[0]["startMonth"] == "September"
+    assert work[0]["endYear"] == "2025"
+    assert work[1]["company"] == "Sample University"
+
+
 def test_backend_without_api_key_returns_empty_llm_mapping(monkeypatch, tmp_path):
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
@@ -651,5 +673,135 @@ def test_content_script_groups_ashby_style_choice_questions():
         assert page.locator("[name='genderIdentity'][value='Man']").is_checked()
         assert page.locator("[name='race'][value='Asian (Not Hispanic or Latino)']").is_checked()
         assert page.locator("[name='veteran'][value='I am not a protected veteran']").is_checked()
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_expands_and_fills_greenhouse_employment_history():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "fullName": "Sample Candidate",
+        "addresses": {
+            "usa": {
+                "city": "Bartlett",
+                "state": "Illinois",
+                "zipCode": "60103",
+                "country": "United States",
+            }
+        },
+        "workExperience": [
+            {
+                "company": "Example Labs",
+                "title": "Machine Learning Engineer",
+                "startMonth": "September",
+                "startYear": "2025",
+                "endMonth": "December",
+                "endYear": "2025",
+                "currentRole": False,
+            },
+            {
+                "company": "Research Group",
+                "title": "Research Assistant",
+                "startMonth": "January",
+                "startYear": "2025",
+                "endMonth": "April",
+                "endYear": "2025",
+                "currentRole": False,
+            },
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Zip / postal code<input name="zip"></label>
+              <section id="employment">
+                <h2>Employment</h2>
+                <div class="employment-row">
+                  <label>Company name<input name="company[]"></label>
+                  <label>Title<input name="title[]"></label>
+                  <label>Start date month<select name="startMonth[]"><option></option><option>January</option><option>April</option><option>September</option></select></label>
+                  <label>Start date year<input name="startYear[]"></label>
+                  <label>End date month<select name="endMonth[]"><option></option><option>April</option><option>December</option></select></label>
+                  <label>End date year<input name="endYear[]"></label>
+                  <label>Current role<input type="checkbox" name="current[]"></label>
+                </div>
+                <button id="addEmployment" type="button">Add another</button>
+              </section>
+            </form>
+            <script>
+              document.getElementById('addEmployment').addEventListener('click', () => {
+                const row = document.querySelector('.employment-row').cloneNode(true);
+                row.querySelectorAll('input').forEach((input) => {
+                  input.value = '';
+                  input.checked = false;
+                });
+                row.querySelectorAll('select').forEach((select) => { select.value = ''; });
+                document.getElementById('employment').insertBefore(row, document.getElementById('addEmployment'));
+              });
+            </script>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        assert page.locator(".employment-row").count() == 2
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='zip']").input_value() == "60103"
+        assert page.locator("[name='company[]']").nth(0).input_value() == "Example Labs"
+        assert page.locator("[name='title[]']").nth(0).input_value() == "Machine Learning Engineer"
+        assert page.locator("[name='startMonth[]']").nth(0).input_value() == "September"
+        assert page.locator("[name='endYear[]']").nth(1).input_value() == "2025"
+        assert page.locator("[name='company[]']").nth(1).input_value() == "Research Group"
 
         browser.close()

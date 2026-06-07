@@ -29,11 +29,12 @@ class BaseAdapter:
     name = "generic"
 
     def fill_current_page(self, page: Any, profile: dict[str, Any]) -> dict[str, Any]:
-        fields = scan_fields(page)
         filled = 0
         generated_review_required = 0
         skipped: list[str] = []
         uploads = self.upload_resume(page, profile)
+        employment_filled = self.fill_employment_history(page, profile)
+        fields = scan_fields(page)
 
         for field in fields:
             mapping = map_field(field, profile)
@@ -56,6 +57,7 @@ class BaseAdapter:
             "ats": self.name,
             "scanned": len(fields),
             "filled": filled,
+            "employmentFilled": employment_filled,
             "generatedReviewRequired": generated_review_required,
             "uploads": uploads,
             "unmapped": skipped[:25],
@@ -140,6 +142,48 @@ class BaseAdapter:
                 continue
 
         return uploaded
+
+    def fill_employment_history(self, page: Any, profile: dict[str, Any]) -> int:
+        experiences = profile.get("work_experience") or []
+        experiences = [item for item in experiences if isinstance(item, dict)]
+
+        if not experiences:
+            return 0
+
+        self.ensure_employment_rows(page, len(experiences))
+        filled = 0
+
+        for index, experience in enumerate(experiences):
+            filled += fill_nth_labeled_control(page, r"company name|employer", index, experience.get("company", ""))
+            filled += fill_nth_labeled_control(page, r"^title$|job title|position", index, experience.get("title", ""))
+            filled += fill_nth_labeled_control(page, r"start date month|start month", index, experience.get("startMonth", ""))
+            filled += fill_nth_labeled_control(page, r"start date year|start year", index, experience.get("startYear", ""))
+
+            if experience.get("currentRole") is True:
+                filled += set_nth_checkbox(page, r"current role|currently work|current position", index, True)
+            else:
+                filled += fill_nth_labeled_control(page, r"end date month|end month", index, experience.get("endMonth", ""))
+                filled += fill_nth_labeled_control(page, r"end date year|end year", index, experience.get("endYear", ""))
+
+        return filled
+
+    def ensure_employment_rows(self, page: Any, target_count: int) -> None:
+        current_count = max(
+            page.get_by_label(re.compile(r"company name|employer", re.I)).count(),
+            page.get_by_label(re.compile(r"^title$|job title|position", re.I)).count(),
+        )
+        clicks_needed = max(target_count - max(current_count, 1), 0)
+
+        for _ in range(min(clicks_needed, 12)):
+            button = page.locator("button:has-text('Add another'), a:has-text('Add another')")
+            if button.count() == 0:
+                return
+
+            try:
+                button.last.click(timeout=2_000)
+                page.wait_for_timeout(300)
+            except Exception:
+                return
 
     def find_safe_next_button(self, page: Any) -> Any | None:
         buttons = page.locator("button, input[type='button'], input[type='submit'], a")
@@ -235,3 +279,56 @@ def contains_phrase(text: str, phrase: str) -> bool:
         return phrase in text
 
     return re.search(rf"\b{re.escape(phrase)}\b", text) is not None
+
+
+def fill_nth_labeled_control(page: Any, label_pattern: str, index: int, value: Any) -> int:
+    if value is None or str(value).strip() == "":
+        return 0
+
+    locator = page.get_by_label(re.compile(label_pattern, re.I))
+    if locator.count() <= index:
+        return 0
+
+    field = locator.nth(index)
+    text = str(value).strip()
+
+    try:
+        tag_name = field.evaluate("element => element.tagName.toLowerCase()")
+        if tag_name == "select":
+            return 1 if select_by_label_or_value(field, text) else 0
+
+        field.fill(text, timeout=2_000)
+        return 1
+    except Exception:
+        return 0
+
+
+def select_by_label_or_value(locator: Any, value: str) -> bool:
+    desired = normalize(value)
+    options = locator.evaluate(
+        """
+        element => Array.from(element.options || []).map(option => ({
+          value: option.value,
+          label: (option.textContent || '').replace(/\\s+/g, ' ').trim()
+        }))
+        """
+    )
+
+    for option in options:
+        if option_matches(option.get("label", ""), option.get("value", ""), desired):
+            locator.select_option(option.get("value", ""), timeout=2_000)
+            return True
+
+    return False
+
+
+def set_nth_checkbox(page: Any, label_pattern: str, index: int, checked: bool) -> int:
+    locator = page.get_by_label(re.compile(label_pattern, re.I))
+    if locator.count() <= index:
+        return 0
+
+    try:
+        locator.nth(index).set_checked(checked, timeout=2_000)
+        return 1
+    except Exception:
+        return 0

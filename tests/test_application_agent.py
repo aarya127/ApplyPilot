@@ -24,6 +24,16 @@ def test_normalize_profile_uses_target_address_and_resume_path(tmp_path, monkeyp
             "firstName": "Test",
             "lastName": "Candidate",
             "resumeFileName": "resume.pdf",
+            "workExperience": [
+                {
+                    "company": "Example Labs",
+                    "title": "Software Engineer",
+                    "startMonth": "January",
+                    "startYear": "2025",
+                    "endMonth": "April",
+                    "endYear": "2025",
+                }
+            ],
             "addresses": {
                 "usa": {
                     "line1": "1 Test Way",
@@ -42,6 +52,7 @@ def test_normalize_profile_uses_target_address_and_resume_path(tmp_path, monkeyp
     assert profile["address"]["country"] == "United States"
     assert profile["location"] == "Chicago, IL"
     assert profile["resume_path"] == str(resume_dir / "resume.pdf")
+    assert profile["work_experience"][0]["company"] == "Example Labs"
 
 
 def test_field_mapper_handles_greenhouse_style_questions():

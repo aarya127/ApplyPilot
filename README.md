@@ -1,6 +1,6 @@
-# HR System - Job Search Dashboard
+# ApplyPilot
 
-A Flask dashboard for tracking software, AI/ML, data, and cybersecurity job opportunities across company career sites, new-grad listings, and your Outlook application emails.
+An application-assist system for tracking software, AI/ML, data, and cybersecurity job opportunities, then helping complete job applications through a Chrome extension and post-apply agent.
 
 The app currently has three tabs:
 

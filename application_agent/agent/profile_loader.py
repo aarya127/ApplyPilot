@@ -49,6 +49,7 @@ def normalize_profile(profile: dict[str, Any], settings: dict[str, Any] | None =
         "address": address,
         "location": profile.get("location") or format_location(address),
         "resume_path": resume_path(profile),
+        "work_experience": profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience", []),
         "answers": answers,
         "demographics": demographics,
         "auto_fill_sensitive_fields": settings.get("autoFillSensitiveFields") is True,
