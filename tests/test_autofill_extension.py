@@ -90,7 +90,7 @@ def test_parse_resume_text_extracts_structured_work_experience():
     Machine Learning Engineer Chicago, IL
     Built useful systems
     Sample University January 2025 – April 2025
-    Research Assistant Waterloo, ON
+    Research Assistant Sample City, ST
     """
 
     parsed = parse_resume(text, Path("resume.pdf"), "resume.txt")
@@ -688,9 +688,9 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         "fullName": "Sample Candidate",
         "addresses": {
             "usa": {
-                "city": "Bartlett",
-                "state": "Illinois",
-                "zipCode": "60103",
+                "city": "Sample City",
+                "state": "ST",
+                "zipCode": "60601",
                 "country": "United States",
             }
         },
@@ -797,7 +797,7 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
             preview["result"]["mappings"],
         )
         assert fill_response["ok"] is True, fill_response
-        assert page.locator("[name='zip']").input_value() == "60103"
+        assert page.locator("[name='zip']").input_value() == "60601"
         assert page.locator("[name='company[]']").nth(0).input_value() == "Example Labs"
         assert page.locator("[name='title[]']").nth(0).input_value() == "Machine Learning Engineer"
         assert page.locator("[name='startMonth[]']").nth(0).input_value() == "September"

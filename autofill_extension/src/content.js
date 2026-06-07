@@ -1098,7 +1098,7 @@
       return false;
     }
 
-    return /(employment|experience|work history|company name|employer|job title|current role|start date|end date|position)/.test(
+    return /(employment|experience|work history|company name|employer|\btitle\b|job title|current role|start date|end date|position)/.test(
       `${haystack} ${normalize(field.surroundingText)}`
     );
   }
@@ -1161,7 +1161,7 @@
 
   function splitTitleLocation(value) {
     const text = compactText(value);
-    const match = text.match(/^(.*?)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$/);
+    const match = text.match(/^(.+)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$/);
     return {
       title: match ? compactText(match[1]) : text,
       location: match ? compactText(match[2]) : ""
