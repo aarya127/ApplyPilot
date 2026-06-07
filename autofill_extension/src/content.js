@@ -194,9 +194,27 @@
   }
 
   function scanFields() {
-    return Array.from(document.querySelectorAll(FIELD_SELECTOR))
-      .filter(isFillable)
-      .map((element, index) => buildFieldMetadata(element, index));
+    const elements = Array.from(document.querySelectorAll(FIELD_SELECTOR)).filter(isFillable);
+    const choiceGroups = buildChoiceGroups(elements);
+    const groupedElements = new Set(choiceGroups.flatMap((group) => group.elements));
+    const fields = [];
+    let index = 0;
+
+    for (const group of choiceGroups) {
+      fields.push(buildChoiceGroupMetadata(group, index));
+      index += 1;
+    }
+
+    for (const element of elements) {
+      if (groupedElements.has(element)) {
+        continue;
+      }
+
+      fields.push(buildFieldMetadata(element, index));
+      index += 1;
+    }
+
+    return fields;
   }
 
   function buildFieldMetadata(element, index) {
@@ -221,6 +239,184 @@
       answerKey: "",
       elementRef: new WeakRef(element)
     };
+  }
+
+  function buildChoiceGroups(elements) {
+    const groups = new Map();
+
+    for (const element of elements) {
+      const type = (element.getAttribute("type") || "").toLowerCase();
+      const role = (element.getAttribute("role") || "").toLowerCase();
+
+      if (!isChoiceControl(element)) {
+        continue;
+      }
+
+      if (type === "checkbox" && isStandaloneCheckbox(element)) {
+        continue;
+      }
+
+      const group = choiceGroupFor(element);
+      if (!group) {
+        continue;
+      }
+
+      const existing = groups.get(group.key) || {
+        key: group.key,
+        container: group.container,
+        elements: [],
+        mode: type === "checkbox" || role === "checkbox" ? "checkbox" : "radio"
+      };
+      existing.elements.push(element);
+      groups.set(group.key, existing);
+    }
+
+    return Array.from(groups.values()).filter((group) => group.elements.length > 1);
+  }
+
+  function buildChoiceGroupMetadata(group, index) {
+    const first = group.elements[0];
+    const options = group.elements.map((element) => ({
+      label: choiceLabel(element),
+      value: choiceValue(element)
+    }));
+    const label = choiceGroupLabel(group.container, options) || getSurroundingText(first) || getLabelText(first);
+
+    return {
+      index,
+      tag: "choice-group",
+      type: group.mode,
+      name: first.getAttribute("name") || "",
+      id: first.id || "",
+      label,
+      placeholder: "",
+      ariaLabel: group.container?.getAttribute?.("aria-label") || first.getAttribute("aria-label") || "",
+      autocomplete: "",
+      value: "",
+      options,
+      surroundingText: compactText(group.container?.innerText || ""),
+      answerKey: "",
+      elementRef: new WeakRef(first),
+      choiceRefs: group.elements.map((element) => new WeakRef(element))
+    };
+  }
+
+  function isChoiceControl(element) {
+    const type = (element.getAttribute("type") || "").toLowerCase();
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    return type === "radio" || type === "checkbox" || role === "radio" || role === "checkbox";
+  }
+
+  function isStandaloneCheckbox(element) {
+    const haystack = normalize([getLabelText(element), getSurroundingText(element)].join(" "));
+    return /(^|\b)(i agree|agree to|acknowledge|certify|i certify|i understand)\b/.test(haystack);
+  }
+
+  function choiceGroupFor(element) {
+    const type = (element.getAttribute("type") || "").toLowerCase();
+    const name = element.getAttribute("name");
+
+    if (type === "radio" && name) {
+      const radios = Array.from(document.querySelectorAll(`input[type="radio"][name="${cssEscape(name)}"]`))
+        .filter(isFillable);
+      const container = commonChoiceContainer(radios) || element.closest("fieldset, [role='radiogroup'], [role='group']");
+      return { key: `radio:${name}`, container: container || element.parentElement };
+    }
+
+    const explicit = element.closest("fieldset, [role='radiogroup'], [role='group']");
+    if (explicit) {
+      return { key: elementGroupKey(explicit), container: explicit };
+    }
+
+    const container = nearestChoiceContainer(element);
+    return container ? { key: elementGroupKey(container), container } : null;
+  }
+
+  function nearestChoiceContainer(element) {
+    let current = element.parentElement;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 7) {
+      const choices = Array.from(current.querySelectorAll("input[type='radio'], input[type='checkbox'], [role='radio'], [role='checkbox']"))
+        .filter(isFillable);
+
+      if (choices.length > 1 && choices.length <= 20) {
+        return current;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  }
+
+  function commonChoiceContainer(elements) {
+    if (!elements.length) {
+      return null;
+    }
+
+    let current = elements[0].parentElement;
+    while (current && current !== document.body) {
+      if (elements.every((element) => current.contains(element))) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+
+    return null;
+  }
+
+  function elementGroupKey(element) {
+    if (!element.dataset.applicationAutofillGroupId) {
+      element.dataset.applicationAutofillGroupId = `group-${Math.random().toString(36).slice(2)}`;
+    }
+
+    return element.dataset.applicationAutofillGroupId;
+  }
+
+  function choiceLabel(element) {
+    return compactText(
+      getLabelText(element)
+      || element.getAttribute("aria-label")
+      || element.innerText
+      || element.textContent
+      || element.value
+      || ""
+    );
+  }
+
+  function choiceValue(element) {
+    return compactText(
+      element.value
+      || element.getAttribute("data-value")
+      || element.getAttribute("aria-label")
+      || element.innerText
+      || element.textContent
+      || ""
+    );
+  }
+
+  function choiceGroupLabel(container, options) {
+    if (!container) {
+      return "";
+    }
+
+    const clone = container.cloneNode(true);
+    clone.querySelectorAll("label").forEach((label) => {
+      if (label.querySelector("input, [role='radio'], [role='checkbox']")) {
+        label.remove();
+      }
+    });
+    clone.querySelectorAll("input, textarea, select, button, option, [role='radio'], [role='checkbox']").forEach((node) => node.remove());
+    const optionLabels = new Set(options.map((option) => normalize(option.label)).filter(Boolean));
+    const lines = (clone.innerText || clone.textContent || "")
+      .split(/\n+/)
+      .map((line) => compactText(line))
+      .filter((line) => line.length > 1)
+      .filter((line) => !optionLabels.has(normalize(line)));
+
+    return lines[0] || "";
   }
 
   function getLabelText(element) {
@@ -356,6 +552,11 @@
       return workQuestionMapping;
     }
 
+    const knownCustomMapping = mapKnownCustomQuestion(field, profile, primaryHaystack);
+    if (knownCustomMapping) {
+      return knownCustomMapping;
+    }
+
     const companyQuestionMapping = mapCompanyQuestion(field, profile, primaryHaystack);
     if (companyQuestionMapping) {
       return companyQuestionMapping;
@@ -380,9 +581,9 @@
     }
 
     const directRules = [
+      [/(\bfull\b.*\bname\b|\blegal name\b|\bname as it appears\b|^name$|first and last name)/, profile.fullName],
       [/(\bfirst\b.*\bname\b|\bgiven\b.*\bname\b|fname)/, profile.firstName],
       [/(\blast\b.*\bname\b|\bfamily\b.*\bname\b|lname|surname)/, profile.lastName],
-      [/(\bfull\b.*\bname\b|\blegal name\b|\bname as it appears\b)/, profile.fullName],
       [/(email|e-mail)/, profile.email],
       [/(phone|mobile|cell|telephone)/, profile.phone],
       [/(linkedin profile|linkedin url|linked in profile|linked in url)/, profile.linkedin],
@@ -393,6 +594,7 @@
       [/(graduation|grad date|expected completion)/, profile.graduationDate],
       [/(salary|compensation|pay expectation)/, profile.salary || profile.answers?.salary],
       [/(relocat)/, profile.relocation || profile.answers?.relocation],
+      [/(pronouns?|address you correctly)/, profile.answers?.pronouns],
       [/(non[- ]?compete|restrictive covenant|employment agreement|subject to.*agreement)/,
         profile.subjectToAgreement || profile.answers?.subjectToAgreement]
     ];
@@ -412,6 +614,10 @@
       return buildMapping(field, profile.needsSponsorship || profile.answers?.sponsorship || "No", "rule", 0.88);
     }
 
+    if (/(within|located).*(50 miles|seattle|boston|washington dc|austin)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.withinListedOfficeRadius || "No", "rule", 0.86);
+    }
+
     if (/(canadian citizen|citizen of canada|canada citizenship)/.test(haystack)) {
       return buildMapping(field, profile.canadianCitizen || profile.answers?.canadianCitizen || "Yes", "rule", 0.9);
     }
@@ -424,7 +630,7 @@
       return buildMapping(field, profile.veteranStatus || profile.answers?.veteranStatus || "No", "rule", 0.9);
     }
 
-    if (/(authorized|eligible|legally).*(work|employment)|work authorization/.test(haystack)) {
+    if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
       return buildMapping(
         field,
         profile.workAuthorization || profile.answers?.workAuthorization || "Yes",
@@ -437,6 +643,11 @@
       const demographicMapping = mapSensitiveField(field, profile, primaryHaystack);
       if (demographicMapping) {
         return demographicMapping;
+      }
+
+      const voluntaryFallback = mapVoluntarySensitiveFallback(field, primaryHaystack);
+      if (voluntaryFallback) {
+        return voluntaryFallback;
       }
     }
 
@@ -499,7 +710,7 @@
       return buildMapping(field, profile.needsSponsorship || profile.answers?.sponsorship || "No", "rule", 0.9);
     }
 
-    if (/(authorized|eligible|legally).*(work|employment)|work authorization/.test(haystack)) {
+    if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
       return buildMapping(
         field,
         profile.workAuthorization || profile.answers?.workAuthorization || "Yes",
@@ -511,6 +722,18 @@
     if (/(work remotely|remote location|plan to work remote)/.test(haystack)) {
       const remoteAnswer = profile.answers?.remoteWork || profile.remoteWork;
       return hasValue(remoteAnswer) ? buildMapping(field, remoteAnswer, "rule", 0.82) : null;
+    }
+
+    return null;
+  }
+
+  function mapKnownCustomQuestion(field, profile, haystack) {
+    if (/(ai projects?|machine learning projects?|built).*?(spare time|outside of work|personal)/.test(haystack)) {
+      const saved = profile.answers?.aiProjectsOutsideWork;
+      const generated = summarizeProjectFacts(profile);
+      return hasValue(saved || generated)
+        ? buildMapping(field, saved || generated, "profile-summary", 0.82)
+        : null;
     }
 
     return null;
@@ -561,8 +784,18 @@
       return null;
     }
 
+    if (/(work remotely|remote location|plan to work remote)/.test(haystack)) {
+      return null;
+    }
+
     if (/(location city|city location|current city|where.*city)/.test(haystack)) {
       return hasValue(address.city) ? buildMapping(field, address.city, "rule", 0.9) : null;
+    }
+
+    if (/(location|required.*city.*(state|region|country)|city.*(state|region).*(country))/.test(haystack)) {
+      const region = address.state || address.province || "";
+      const location = [address.city, region, address.country].filter(Boolean).join(", ");
+      return hasValue(location) ? buildMapping(field, location, "rule", 0.9) : null;
     }
 
     if (/(currently reside|current residence|country.*reside|country region|country\/region|\bcountry\b)/.test(haystack)) {
@@ -657,11 +890,17 @@
 
   function mapSensitiveField(field, profile, haystack) {
     const demographics = profile.demographics || {};
+
+    if (/transgender/.test(haystack)) {
+      const answer = /cisgender/.test(normalize(demographics.genderIdentity || "")) ? "No" : demographics.transgender;
+      return hasValue(answer) ? buildMapping(field, answer, "sensitive-rule", 0.82) : null;
+    }
+
     const rules = [
       [/(hispanic|latino|latina|latinx)/, demographics.hispanicLatino],
       [/(race|racial)/, demographics.race],
-      [/(ethnic|ethnicity)/, demographics.ethnicity],
-      [/(gender identity|cisgender|transgender)/, demographics.genderIdentity || demographics.gender],
+      [/(ethnic|ethnicity)/, demographics.ethnicity || demographics.race],
+      [/(gender identity|cisgender)/, bestOptionValue(field, demographics.genderIdentity || demographics.gender) || demographics.gender || demographics.genderIdentity],
       [/\bgender\b/, demographics.gender || demographics.genderIdentity]
     ];
 
@@ -672,6 +911,50 @@
     }
 
     return null;
+  }
+
+  function mapVoluntarySensitiveFallback(field, haystack) {
+    const options = field.options || [];
+
+    if (!options.length) {
+      return null;
+    }
+
+    if (/(age|sexual orientation|disability|communities|transgender)/.test(haystack)) {
+      const preferred = options.find((option) => /prefer not|do not want|decline/i.test(option.label || option.value || ""));
+      return preferred
+        ? buildMapping(field, preferred.label || preferred.value, "voluntary-fallback", 0.7)
+        : null;
+    }
+
+    return null;
+  }
+
+  function bestOptionValue(field, value) {
+    if (!hasValue(value) || !field.options?.length) {
+      return "";
+    }
+
+    const match = field.options.find((option) => optionMatches(option.label, option.value, value));
+    return match ? (match.label || match.value) : "";
+  }
+
+  function summarizeProjectFacts(profile) {
+    const facts = profile.resumeFacts || {};
+    const projects = Array.isArray(facts.projects) ? facts.projects.slice(0, 3) : [];
+    const projectLinks = facts.projectLinks && typeof facts.projectLinks === "object"
+      ? Object.values(facts.projectLinks).slice(0, 3).map((item) => [item.name, item.url].filter(Boolean).join(": "))
+      : [];
+    const skills = Array.isArray(facts.skills) ? facts.skills.slice(0, 12).join(", ") : "";
+    const items = [...projects, ...projectLinks].filter(Boolean);
+
+    if (!items.length && !skills) {
+      return "";
+    }
+
+    const projectText = items.length ? `In my spare time, I have built AI projects including ${items.join("; ")}.` : "I have built AI and machine learning projects outside of work.";
+    const skillsText = skills ? ` These projects use skills such as ${skills}.` : "";
+    return `${projectText}${skillsText}`.slice(0, 700);
   }
 
   function firstResumeExperienceValue(profile, preferredKeys) {
@@ -757,7 +1040,7 @@
   }
 
   function serializeFields(fields) {
-    return fields.map(({ elementRef, ...field }) => field);
+    return fields.map(({ elementRef, choiceRefs, ...field }) => field);
   }
 
   async function fillElement(element, mapping, field) {
@@ -765,6 +1048,14 @@
     const type = (element.getAttribute("type") || "").toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
     const hasListboxPopup = element.getAttribute("aria-haspopup") === "listbox";
+
+    if (field.type === "radio" && field.choiceRefs?.length) {
+      return fillChoiceGroup(field, mapping.value, false);
+    }
+
+    if (field.type === "checkbox" && field.choiceRefs?.length) {
+      return fillChoiceGroup(field, mapping.value, true);
+    }
 
     if (type === "file") {
       return false;
@@ -794,6 +1085,50 @@
     setNativeValue(element, String(mapping.value));
     dispatchFormEvents(element);
     return true;
+  }
+
+  function fillChoiceGroup(field, desiredValue, allowMultiple) {
+    const values = Array.isArray(desiredValue)
+      ? desiredValue
+      : String(desiredValue).split(/\s*[;,]\s*/).filter(Boolean);
+    const choices = field.choiceRefs.map((ref) => ref.deref()).filter(Boolean);
+    let clicked = 0;
+
+    for (const choice of choices) {
+      const label = choiceLabel(choice);
+      const value = choiceValue(choice);
+      const shouldChoose = values.some((item) => optionMatches(label, value, item));
+
+      if (!shouldChoose) {
+        continue;
+      }
+
+      if (choice.getAttribute("role") === "checkbox") {
+        const current = choice.getAttribute("aria-checked") === "true";
+        if (!current) {
+          choice.click();
+        }
+      } else if (choice.getAttribute("role") === "radio") {
+        choice.click();
+      } else if (choice.type === "checkbox") {
+        if (!choice.checked) {
+          choice.click();
+        }
+        choice.checked = true;
+      } else if (choice.type === "radio") {
+        choice.click();
+        choice.checked = true;
+      }
+
+      dispatchFormEvents(choice);
+      clicked += 1;
+
+      if (!allowMultiple) {
+        break;
+      }
+    }
+
+    return clicked > 0;
   }
 
   async function fillCombobox(element, desiredValue) {
@@ -922,6 +1257,13 @@
     }
 
     if (desired === "male") {
+      [
+        "man",
+        "male"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "cisgender man") {
       [
         "man",
         "male"

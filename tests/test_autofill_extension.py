@@ -491,3 +491,165 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         assert page.locator("[name='database']").input_value() == ""
 
         browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_groups_ashby_style_choice_questions():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "fullName": "Sample Candidate",
+        "email": "sample@example.com",
+        "phone": "5550100000",
+        "linkedin": "https://linkedin.example/sample",
+        "workAuthorization": "Yes",
+        "needsSponsorship": "No",
+        "veteranStatus": "No",
+        "answers": {
+            "pronouns": "He/Him",
+            "withinListedOfficeRadius": "No",
+        },
+        "resumeFacts": {
+            "projects": ["Built an inference optimization project for AI serving"],
+            "skills": ["Python", "PyTorch", "AWS"],
+        },
+        "addresses": {
+            "usa": {
+                "city": "Chicago",
+                "state": "IL",
+                "zipCode": "60601",
+                "country": "United States",
+            }
+        },
+        "demographics": {
+            "race": "Asian",
+            "hispanicLatino": "No",
+            "gender": "Male",
+            "genderIdentity": "Man",
+        },
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Name<input name="name" placeholder="Please enter your first and last name"></label>
+              <label>What AI projects have you built in your spare time outside of work?<textarea name="aiProjects"></textarea></label>
+              <fieldset>
+                <legend>Are you located within ~50 miles of Seattle, WA; Boston, MA; Washington DC; or Austin, TX?</legend>
+                <label><input type="radio" name="nearOffice" value="Yes">Yes</label>
+                <label><input type="radio" name="nearOffice" value="No">No</label>
+              </fieldset>
+              <label>Location <input name="location" placeholder="REQUIRED: Enter your city, region/state, and country"></label>
+              <label>Zip Code / Postal Code<input name="zip"></label>
+              <fieldset>
+                <legend>Pronouns</legend>
+                <label><input type="radio" name="pronouns" value="He/Him">He/Him</label>
+                <label><input type="radio" name="pronouns" value="She/Her">She/Her</label>
+                <label><input type="radio" name="pronouns" value="They/Them">They/Them</label>
+              </fieldset>
+              <fieldset>
+                <legend>Can you provide proof of authorization to work in the country for which job you are applying for?</legend>
+                <label><input type="radio" name="authorized" value="Yes">Yes</label>
+                <label><input type="radio" name="authorized" value="No">No</label>
+              </fieldset>
+              <fieldset>
+                <legend>Will you now or in the future require employer sponsorship to work in the country for which job you are applying for?</legend>
+                <label><input type="radio" name="sponsor" value="Yes">Yes</label>
+                <label><input type="radio" name="sponsor" value="No">No</label>
+              </fieldset>
+              <fieldset>
+                <legend>What is your current age?</legend>
+                <label><input type="radio" name="age" value="Under 30">Under 30</label>
+                <label><input type="radio" name="age" value="I prefer not to answer">I prefer not to answer</label>
+              </fieldset>
+              <fieldset>
+                <legend>What is your gender identity?</legend>
+                <label><input type="radio" name="genderIdentity" value="Man">Man</label>
+                <label><input type="radio" name="genderIdentity" value="Woman">Woman</label>
+                <label><input type="radio" name="genderIdentity" value="Another Gender Identity">Another Gender Identity</label>
+              </fieldset>
+              <fieldset>
+                <legend>Race</legend>
+                <label><input type="radio" name="race" value="Hispanic or Latino">Hispanic or Latino</label>
+                <label><input type="radio" name="race" value="White (Not Hispanic or Latino)">White (Not Hispanic or Latino)</label>
+                <label><input type="radio" name="race" value="Asian (Not Hispanic or Latino)">Asian (Not Hispanic or Latino)</label>
+                <label><input type="radio" name="race" value="Decline to self-identify">Decline to self-identify</label>
+              </fieldset>
+              <fieldset>
+                <legend>Veteran Status</legend>
+                <label><input type="radio" name="veteran" value="I identify as one or more of the classifications of protected veteran listed above">I identify as one or more of the classifications of protected veteran listed above</label>
+                <label><input type="radio" name="veteran" value="I am not a protected veteran">I am not a protected veteran</label>
+                <label><input type="radio" name="veteran" value="I decline to self-identify for protected veteran status">I decline to self-identify for protected veteran status</label>
+              </fieldset>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        labels = [mapping["label"] for mapping in preview["result"]["mappings"]]
+        assert labels.count("Race") == 1
+        assert not any(label == "White (Not Hispanic or Latino)" for label in labels)
+        assert any(mapping["label"] == "Name" and mapping["value"] == "Sample Candidate" for mapping in preview["result"]["mappings"])
+        assert any("AI projects" in mapping["label"] and "inference optimization" in mapping["value"] for mapping in preview["result"]["mappings"])
+        assert any(mapping["label"] == "Race" and mapping["value"] == "Asian" for mapping in preview["result"]["mappings"])
+        assert any(mapping["label"] == "Veteran Status" and mapping["value"] == "No" for mapping in preview["result"]["mappings"])
+        assert any(mapping["label"] == "What is your current age?" and mapping["value"] == "I prefer not to answer" for mapping in preview["result"]["mappings"])
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='name']").input_value() == "Sample Candidate"
+        assert page.locator("[name='nearOffice'][value='No']").is_checked()
+        assert page.locator("[name='pronouns'][value='He/Him']").is_checked()
+        assert page.locator("[name='authorized'][value='Yes']").is_checked()
+        assert page.locator("[name='sponsor'][value='No']").is_checked()
+        assert page.locator("[name='age'][value='I prefer not to answer']").is_checked()
+        assert page.locator("[name='genderIdentity'][value='Man']").is_checked()
+        assert page.locator("[name='race'][value='Asian (Not Hispanic or Latino)']").is_checked()
+        assert page.locator("[name='veteran'][value='I am not a protected veteran']").is_checked()
+
+        browser.close()

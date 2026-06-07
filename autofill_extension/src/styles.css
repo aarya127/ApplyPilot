@@ -49,7 +49,7 @@ textarea,
 
 .assistant-shell {
   display: grid;
-  grid-template-rows: auto minmax(180px, 1fr) auto minmax(0, auto);
+  grid-template-rows: auto minmax(140px, 1fr) auto auto minmax(0, auto);
   min-height: 100vh;
   max-height: 100vh;
   background: var(--surface);
@@ -122,6 +122,19 @@ h2 {
   background: #ffffff;
 }
 
+.chat-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  background: #ffffff;
+}
+
+.chat-form input {
+  min-height: 38px;
+}
+
 .country-control {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -132,6 +145,10 @@ h2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+#fillSelectedButton {
+  grid-column: 1 / -1;
 }
 
 button,
@@ -156,6 +173,12 @@ button,
 .secondary-button {
   background: var(--surface);
   color: var(--text);
+}
+
+.secondary-button.is-primary-action {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #ffffff;
 }
 
 .secondary-button:hover {

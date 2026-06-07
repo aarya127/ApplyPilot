@@ -1,4 +1,6 @@
 const chatLog = document.getElementById("chatLog");
+const chatForm = document.getElementById("chatForm");
+const chatInput = document.getElementById("chatInput");
 const reviewList = document.getElementById("reviewList");
 const assistantStatus = document.getElementById("assistantStatus");
 const scanButton = document.getElementById("scanButton");
@@ -13,6 +15,19 @@ let lastPreview = null;
 let lastFillResult = null;
 
 initAssistant();
+
+chatForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const text = chatInput.value.trim();
+
+  if (!text) {
+    return;
+  }
+
+  chatInput.value = "";
+  addMessage("user", text);
+  await handleChat(text);
+});
 
 countryButtons.forEach((button) => {
   button.addEventListener("click", async () => {
@@ -40,6 +55,73 @@ scanButton.addEventListener("click", async () => {
 });
 
 previewButton.addEventListener("click", async () => {
+  await previewCurrentPage();
+});
+
+fillSelectedButton.addEventListener("click", async () => {
+  await fillSelectedMappings();
+});
+
+saveAnswersButton.addEventListener("click", async () => {
+  await saveNewAnswersFromReview();
+});
+
+trackButton.addEventListener("click", async () => {
+  await trackApplication();
+});
+
+optionsButton.addEventListener("click", () => {
+  chrome.runtime.openOptionsPage();
+});
+
+async function handleChat(text) {
+  const normalized = text.toLowerCase();
+
+  if (/\b(usa|u\.s\.|united states|american)\b/.test(normalized)) {
+    await setTargetCountry("usa");
+    addMessage("agent", "Set this application to USA.");
+    return;
+  }
+
+  if (/\b(canada|canadian)\b/.test(normalized)) {
+    await setTargetCountry("canada");
+    addMessage("agent", "Set this application to Canada.");
+    return;
+  }
+
+  if (/\bscan\b/.test(normalized)) {
+    scanButton.click();
+    return;
+  }
+
+  if (/\bpreview\b/.test(normalized)) {
+    await previewCurrentPage();
+    return;
+  }
+
+  if (/\bfill\b/.test(normalized)) {
+    await fillSelectedMappings();
+    return;
+  }
+
+  if (/\bsave\b/.test(normalized)) {
+    await saveNewAnswersFromReview();
+    return;
+  }
+
+  if (/\btrack\b/.test(normalized)) {
+    await trackApplication();
+    return;
+  }
+
+  if (await saveAnswerFromChat(text)) {
+    return;
+  }
+
+  addMessage("agent", "I can scan, preview, fill selected fields, save missing answers, track the application, or switch USA/Canada. For a missing answer, type something like `question text: answer`.");
+}
+
+async function previewCurrentPage() {
   setBusy("Building a review plan...");
   const response = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
 
@@ -51,9 +133,9 @@ previewButton.addEventListener("click", async () => {
   lastPreview = response.result;
   lastFillResult = null;
   renderReview(response.result);
-});
+}
 
-fillSelectedButton.addEventListener("click", async () => {
+async function fillSelectedMappings() {
   const selected = getSelectedMappings();
 
   if (!selected.length) {
@@ -76,9 +158,9 @@ fillSelectedButton.addEventListener("click", async () => {
   trackButton.disabled = false;
   addMessage("agent", `Filled ${response.result.filled} selected field(s). Please review the page before submitting.`);
   assistantStatus.textContent = "Filled";
-});
+}
 
-saveAnswersButton.addEventListener("click", async () => {
+async function saveNewAnswersFromReview() {
   const answers = collectNewAnswers();
 
   if (!Object.keys(answers).length) {
@@ -97,9 +179,9 @@ saveAnswersButton.addEventListener("click", async () => {
     lastPreview = response.result;
     renderReview(response.result);
   }
-});
+}
 
-trackButton.addEventListener("click", async () => {
+async function trackApplication() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const selected = getSelectedMappings();
   const payload = {
@@ -123,11 +205,38 @@ trackButton.addEventListener("click", async () => {
   }
 
   addMessage("agent", "Tracked this application locally.");
-});
+}
 
-optionsButton.addEventListener("click", () => {
-  chrome.runtime.openOptionsPage();
-});
+async function saveAnswerFromChat(text) {
+  if (!lastPreview?.unmappedFields?.length) {
+    return false;
+  }
+
+  const [questionPart, ...answerParts] = text.split(":");
+  const answer = answerParts.join(":").trim();
+  const askable = lastPreview.unmappedFields.filter((field) => !field.needsManualUpload);
+  let field = null;
+
+  if (answer) {
+    const question = questionPart.trim().toLowerCase();
+    field = askable.find((item) => item.label.toLowerCase().includes(question) || question.includes(item.label.toLowerCase()));
+  } else if (askable.length === 1) {
+    field = askable[0];
+  }
+
+  const value = answer || text.trim();
+  if (!field || !value) {
+    return false;
+  }
+
+  const { candidateProfile } = await chrome.storage.local.get("candidateProfile");
+  const profile = candidateProfile || {};
+  profile.answers = { ...(profile.answers || {}), [field.answerKey]: value };
+  await chrome.storage.local.set({ candidateProfile: profile });
+  addMessage("agent", `Saved an answer for "${field.label}". Previewing again.`);
+  await previewCurrentPage();
+  return true;
+}
 
 async function initAssistant() {
   const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
@@ -347,6 +456,7 @@ function aggregateFillResponses(successful, frameCount) {
 function renderReview(preview) {
   reviewList.replaceChildren();
   fillSelectedButton.disabled = preview.mappings.length === 0;
+  fillSelectedButton.classList.toggle("is-primary-action", preview.mappings.length > 0);
   saveAnswersButton.disabled = !(preview.unmappedFields || []).some((field) => !field.needsManualUpload);
   trackButton.disabled = true;
 
@@ -521,4 +631,3 @@ function accessErrorMessage(url = "") {
 
   return "Could not inject the autofill script. Reload the extension and refresh this page.";
 }
-

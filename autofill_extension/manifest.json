@@ -9,8 +9,7 @@
     "service_worker": "src/background.js"
   },
   "action": {
-    "default_title": "Application Autofill",
-    "default_popup": "src/popup.html"
+    "default_title": "Application Assistant"
   },
   "side_panel": {
     "default_path": "src/assistant.html"

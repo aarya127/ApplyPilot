@@ -1,4 +1,6 @@
 chrome.runtime.onInstalled.addListener(async () => {
+  await configureSidePanel();
+
   const existing = await chrome.storage.local.get(["candidateProfile", "settings"]);
 
   if (!existing.candidateProfile) {
@@ -91,6 +93,18 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
+chrome.runtime.onStartup.addListener(() => {
+  configureSidePanel();
+});
+
+chrome.action.onClicked.addListener(async (tab) => {
+  if (!chrome.sidePanel?.open || !tab?.id) {
+    return;
+  }
+
+  await chrome.sidePanel.open({ tabId: tab.id });
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "MAP_FIELDS_WITH_BACKEND") {
     mapFieldsWithBackend(message.payload)
@@ -110,6 +124,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   return false;
 });
+
+async function configureSidePanel() {
+  if (!chrome.sidePanel?.setPanelBehavior) {
+    return;
+  }
+
+  try {
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  } catch (error) {
+    // Chrome may reject this on older side-panel implementations.
+  }
+}
 
 async function mapFieldsWithBackend(payload) {
   const { settings } = await chrome.storage.local.get("settings");
