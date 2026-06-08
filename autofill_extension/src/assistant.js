@@ -5,6 +5,7 @@ const reviewList = document.getElementById("reviewList");
 const assistantStatus = document.getElementById("assistantStatus");
 const scanButton = document.getElementById("scanButton");
 const previewButton = document.getElementById("previewButton");
+const askAiButton = document.getElementById("askAiButton");
 const fillSelectedButton = document.getElementById("fillSelectedButton");
 const saveAnswersButton = document.getElementById("saveAnswersButton");
 const trackButton = document.getElementById("trackButton");
@@ -58,6 +59,10 @@ previewButton.addEventListener("click", async () => {
   await previewCurrentPage();
 });
 
+askAiButton.addEventListener("click", async () => {
+  await askAiForMissingAnswers();
+});
+
 fillSelectedButton.addEventListener("click", async () => {
   await fillSelectedMappings();
 });
@@ -96,6 +101,11 @@ async function handleChat(text) {
 
   if (/\bpreview\b/.test(normalized)) {
     await previewCurrentPage();
+    return;
+  }
+
+  if (/\b(ai|answer missing|missing answers|ask)\b/.test(normalized)) {
+    await askAiForMissingAnswers();
     return;
   }
 
@@ -179,6 +189,72 @@ async function saveNewAnswersFromReview() {
     lastPreview = response.result;
     renderReview(response.result);
   }
+}
+
+async function askAiForMissingAnswers() {
+  if (!lastPreview) {
+    await previewCurrentPage();
+  }
+
+  const missingFields = (lastPreview?.unmappedFields || [])
+    .filter((field) => !field.needsManualUpload)
+    .filter((field) => field.answerKey);
+
+  if (!missingFields.length) {
+    addMessage("agent", "I do not see any unanswered fields for AI to handle.");
+    return;
+  }
+
+  const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
+  const profile = candidateProfile || {};
+  const fieldsForModel = missingFields.map((field, index) => ({
+    ...field,
+    index,
+    originalIndex: field.index,
+    frameId: field.frameId
+  }));
+
+  setBusy(`Asking AI for ${missingFields.length} missing answer(s) in one structured request...`);
+  const response = await chrome.runtime.sendMessage({
+    type: "MAP_FIELDS_WITH_BACKEND",
+    payload: {
+      fields: fieldsForModel,
+      profile,
+      page: {
+        ...(lastPreview?.page || {}),
+        targetCountry: settings?.targetCountry || ""
+      }
+    }
+  });
+
+  if (!response?.ok) {
+    showError(response?.error || "The AI answer request failed.");
+    return;
+  }
+
+  const mappings = response.payload?.mappings || [];
+  const answers = {};
+
+  for (const mapping of mappings) {
+    const field = fieldsForModel.find((item) => item.index === mapping.index);
+    const value = String(mapping.value ?? "").trim();
+
+    if (field?.answerKey && value) {
+      answers[field.answerKey] = value;
+    }
+  }
+
+  if (!Object.keys(answers).length) {
+    const warning = response.payload?.warning ? ` ${response.payload.warning}.` : "";
+    showError(`AI did not return safe answers for the missing fields.${warning}`);
+    return;
+  }
+
+  profile.answers = { ...(profile.answers || {}), ...answers };
+  await chrome.storage.local.set({ candidateProfile: profile });
+
+  addMessage("agent", `Saved ${Object.keys(answers).length} AI answer(s). Previewing again so you can review before filling.`);
+  await previewCurrentPage();
 }
 
 async function trackApplication() {
@@ -457,7 +533,9 @@ function renderReview(preview) {
   reviewList.replaceChildren();
   fillSelectedButton.disabled = preview.mappings.length === 0;
   fillSelectedButton.classList.toggle("is-primary-action", preview.mappings.length > 0);
-  saveAnswersButton.disabled = !(preview.unmappedFields || []).some((field) => !field.needsManualUpload);
+  const hasAskableFields = (preview.unmappedFields || []).some((field) => !field.needsManualUpload);
+  askAiButton.disabled = !hasAskableFields;
+  saveAnswersButton.disabled = !hasAskableFields;
   trackButton.disabled = true;
 
   const frameText = preview.frameCount
@@ -514,7 +592,7 @@ function renderReview(preview) {
   const askableFields = (preview.unmappedFields || []).filter((field) => !field.needsManualUpload);
   if (askableFields.length) {
     appendReviewHeading("I need your answer");
-    addMessage("agent", "Some questions are not in your profile yet. Answer them below once and I will remember them.");
+    addMessage("agent", "Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request.");
   }
 
   for (const field of askableFields) {

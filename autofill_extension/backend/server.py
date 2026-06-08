@@ -172,6 +172,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
 
 
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
+    addresses = profile.get("addresses", {})
     minimized_profile = {
         "contact": {
             "firstName": profile.get("firstName"),
@@ -183,6 +184,10 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "github": profile.get("github"),
             "portfolio": profile.get("portfolio"),
         },
+        "addresses": {
+            "canada": safe_location(addresses.get("canada", {}), ["city", "province", "postalCode", "country"]),
+            "usa": safe_location(addresses.get("usa", {}), ["city", "state", "zipCode", "country"]),
+        },
         "workEligibility": {
             "workAuthorization": profile.get("workAuthorization"),
             "needsSponsorship": profile.get("needsSponsorship"),
@@ -190,6 +195,23 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "usPermanentResident": profile.get("usPermanentResident"),
             "subjectToAgreement": profile.get("subjectToAgreement"),
         },
+        "employment": {
+            "currentOrPreviousEmployer": profile.get("currentOrPreviousEmployer"),
+            "currentOrPreviousJobTitle": profile.get("currentOrPreviousJobTitle"),
+            "workExperience": profile.get("workExperience", []),
+        },
+        "education": {
+            "school": profile.get("school"),
+            "degree": profile.get("degree"),
+            "graduationDate": profile.get("graduationDate"),
+        },
+        "preferences": {
+            "relocation": profile.get("relocation"),
+            "salary": profile.get("salary"),
+            "targetCountry": page.get("targetCountry"),
+        },
+        "demographics": profile.get("demographics", {}),
+        "veteranStatus": profile.get("veteranStatus"),
         "resumeFacts": profile.get("resumeFacts", {}),
         "savedAnswers": profile.get("answers", {}),
     }
@@ -213,7 +235,12 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "Return JSON in this shape: "
                 "{\"mappings\":[{\"index\":0,\"value\":\"answer\",\"confidence\":0.0,\"source\":\"llm\"}]}. "
                 "Use exact option labels when a field has options. "
-                "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts."
+                "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
+                "Prefer savedAnswers and explicit profile facts over inference. "
+                "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
+                "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
+                "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts. "
+                "Skip fields that cannot be answered safely."
             ),
             "page": page,
             "profile": minimized_profile,
@@ -221,6 +248,13 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
         },
         ensure_ascii=False,
     )
+
+
+def safe_location(location: Any, keys: list[str]) -> dict[str, Any]:
+    if not isinstance(location, dict):
+        return {}
+
+    return {key: location.get(key) for key in keys if location.get(key)}
 
 
 def parse_json_object(content: str) -> dict[str, Any]:

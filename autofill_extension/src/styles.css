@@ -147,6 +147,7 @@ h2 {
   gap: 8px;
 }
 
+#askAiButton,
 #fillSelectedButton {
   grid-column: 1 / -1;
 }

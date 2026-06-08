@@ -87,7 +87,7 @@ def test_parse_resume_text_extracts_structured_work_experience():
     sample@example.com
     Experience
     Example Labs September 2025 – December 2025
-    Machine Learning Engineer Chicago, IL
+    Machine Learning Engineer Santa Barbara, CA
     Built useful systems
     Sample University January 2025 – April 2025
     Research Assistant Sample City, ST
@@ -98,6 +98,7 @@ def test_parse_resume_text_extracts_structured_work_experience():
 
     assert work[0]["company"] == "Example Labs"
     assert work[0]["title"] == "Machine Learning Engineer"
+    assert work[0]["location"] == "Santa Barbara, CA"
     assert work[0]["startMonth"] == "September"
     assert work[0]["endYear"] == "2025"
     assert work[1]["company"] == "Sample University"
@@ -178,6 +179,7 @@ def test_content_script_previews_and_fills_sample_form():
             }
         },
         "answers": {},
+        "relocation": "Open to relocation",
         "demographics": {},
     }
     settings = {
@@ -735,6 +737,8 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
             """
             <form>
               <label>Zip / postal code<input name="zip"></label>
+              <label>May we contact your current employer?<select name="contactEmployer"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>This position is based in the United States. Do you currently reside in commutable proximity to a Lyft Office located in San Francisco or are you open to relocating?<input name="commutable"></label>
               <section id="employment">
                 <h2>Employment</h2>
                 <div class="employment-row">
@@ -798,6 +802,8 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         )
         assert fill_response["ok"] is True, fill_response
         assert page.locator("[name='zip']").input_value() == "60601"
+        assert page.locator("[name='contactEmployer']").input_value() == "No"
+        assert page.locator("[name='commutable']").input_value() == "Open to relocation"
         assert page.locator("[name='company[]']").nth(0).input_value() == "Example Labs"
         assert page.locator("[name='title[]']").nth(0).input_value() == "Machine Learning Engineer"
         assert page.locator("[name='startMonth[]']").nth(0).input_value() == "September"

@@ -178,7 +178,11 @@ def split_title_location(line: str) -> tuple[str, str]:
     if not line:
         return "", ""
 
-    match = re.match(r"^(?P<title>.+)\s+(?P<location>[A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$", line)
+    match = re.match(
+        r"^(?P<title>.*?\b(?:Engineer|Assistant|Scientist|Developer|Analyst|Intern|Manager|Architect|Consultant|Specialist)\b)\s+"
+        r"(?P<location>[A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$",
+        line,
+    ) or re.match(r"^(?P<title>.+)\s+(?P<location>[A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$", line)
     if not match:
         return line, ""
 

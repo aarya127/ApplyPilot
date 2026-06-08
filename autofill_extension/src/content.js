@@ -132,7 +132,9 @@
     const fields = scanFields();
     const localMappings = fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean);
     const repeatableMappings = mapRepeatableEmploymentFields(fields, profile);
-    const backendMappings = await getBackendMappings(fields, profile);
+    const backendMappings = settings?.autoMapAmbiguousFields === true
+      ? await getBackendMappings(fields, profile)
+      : [];
     const mappings = mergeMappings([...localMappings, ...repeatableMappings], backendMappings);
 
     return { fields, mappings, profile };
@@ -554,6 +556,14 @@
       return workQuestionMapping;
     }
 
+    if (/(essential functions|reasonable accommodation)/.test(primaryHaystack) && !/describe|need for|documentation/.test(primaryHaystack)) {
+      return buildMapping(field, profile.answers?.canPerformEssentialFunctions || "Yes", "rule", 0.84);
+    }
+
+    if (/(commutable proximity|lyft office|open to relocating|open to relocate|san francisco)/.test(primaryHaystack)) {
+      return buildMapping(field, profile.relocation || profile.answers?.relocation || "Open to relocation", "rule", 0.84);
+    }
+
     const knownCustomMapping = mapKnownCustomQuestion(field, profile, primaryHaystack);
     if (knownCustomMapping) {
       return knownCustomMapping;
@@ -562,6 +572,10 @@
     const companyQuestionMapping = mapCompanyQuestion(field, profile, primaryHaystack);
     if (companyQuestionMapping) {
       return companyQuestionMapping;
+    }
+
+    if (/(may we contact|contact).*(current employer)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.82);
     }
 
     const workHistoryMapping = mapWorkHistoryField(field, profile, primaryHaystack);
@@ -621,11 +635,7 @@
       return buildMapping(field, profile.answers?.withinListedOfficeRadius || "No", "rule", 0.86);
     }
 
-    if (/(may we contact|contact).*(current employer)/.test(haystack)) {
-      return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.82);
-    }
-
-    if (/(review.*linked document|candidate privacy policy|privacy policy).*select/.test(haystack)) {
+    if (/(review.*linked document|candidate privacy policy|privacy policy|linked document)/.test(haystack)) {
       return buildMapping(field, profile.answers?.reviewedPrivacyPolicy || "Yes", "rule", 0.82);
     }
 
@@ -1056,7 +1066,7 @@
 
       if (/\bcompany name\b|\bemployer\b/.test(haystack)) {
         buckets.company.push(field);
-      } else if (/(^|\b)title\b|job title|position/.test(haystack)) {
+      } else if (/(^|\b)title\b|job title/.test(haystack) || (/\bposition\b/.test(haystack) && /employment|experience|work history/.test(normalize(field.surroundingText)))) {
         buckets.title.push(field);
       } else if (/start date.*month|start month/.test(haystack)) {
         buckets.startMonth.push(field);
@@ -1095,6 +1105,14 @@
 
   function isEmploymentField(field, haystack) {
     if (/(school|education|degree|discipline)/.test(haystack)) {
+      return false;
+    }
+
+    if (/(may we contact|contact).*(current employer)/.test(haystack)) {
+      return false;
+    }
+
+    if (/(this position is based|commutable|relocat|lyft office|san francisco)/.test(haystack)) {
       return false;
     }
 
@@ -1161,7 +1179,8 @@
 
   function splitTitleLocation(value) {
     const text = compactText(value);
-    const match = text.match(/^(.+)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$/);
+    const match = text.match(/^(.*?\b(?:Engineer|Assistant|Scientist|Developer|Analyst|Intern|Manager|Architect|Consultant|Specialist)\b)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$/)
+      || text.match(/^(.+)\s+([A-Z][A-Za-z .'-]+,\s*[A-Z]{2})$/);
     return {
       title: match ? compactText(match[1]) : text,
       location: match ? compactText(match[2]) : ""
