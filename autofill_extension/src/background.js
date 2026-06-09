@@ -146,7 +146,7 @@ async function mapFieldsWithBackend(payload) {
     return { mappings: [] };
   }
 
-  const response = await fetch(endpoint, {
+  const response = await fetchWithLocalhostFallback(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -167,7 +167,7 @@ async function trackApplication(payload) {
     return { tracked: false };
   }
 
-  const response = await fetch(endpoint, {
+  const response = await fetchWithLocalhostFallback(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -178,6 +178,29 @@ async function trackApplication(payload) {
   }
 
   return response.json();
+}
+
+async function fetchWithLocalhostFallback(endpoint, options) {
+  const candidates = [endpoint];
+
+  if (/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(endpoint)) {
+    candidates.push(endpoint.replace("http://127.0.0.1", "http://localhost"));
+  }
+
+  let lastError = null;
+
+  for (const candidate of candidates) {
+    try {
+      return await fetch(candidate, options);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw new Error(
+    `Could not reach the local ApplyPilot backend at ${endpoint}. Start it with: python autofill_extension/backend/server.py`
+      + (lastError?.message ? ` (${lastError.message})` : "")
+  );
 }
 
 function joinUrl(baseUrl, path) {

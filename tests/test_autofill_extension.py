@@ -488,9 +488,9 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         assert stripe_mapping["value"] == "No"
         assert whatsapp_mapping["value"] == "No"
         assert gender_mapping["value"] == "Male"
-        assert hispanic_mapping["value"] == "No"
-        assert race_mapping["value"] == "Asian"
-        assert veteran_mapping["value"] == "No"
+        assert hispanic_mapping["value"] == "No, I am not Hispanic or Latino"
+        assert race_mapping["value"] == "Asian (Not Hispanic or Latino)"
+        assert veteran_mapping["value"] == "I am not a protected Veteran"
         assert preview["result"]["manualTasks"][0]["resumeFileName"] == "resume.private.pdf"
 
         unknown_labels = [field["label"] for field in preview["result"]["unmappedFields"]]
@@ -716,7 +716,11 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
                 "currentRole": False,
             },
         ],
-        "answers": {},
+        "currentOrPreviousJobTitle": "Staff Data Engineer",
+        "answers": {
+            "custom:may-we-contact-your-current-employer": "Old Bad Answer",
+            "contactCurrentEmployer": "No",
+        },
         "demographics": {},
     }
     settings = {
@@ -739,6 +743,7 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
               <label>Zip / postal code<input name="zip"></label>
               <label>May we contact your current employer?<select name="contactEmployer"><option></option><option>Yes</option><option>No</option></select></label>
               <label>This position is based in the United States. Do you currently reside in commutable proximity to a Lyft Office located in San Francisco or are you open to relocating?<input name="commutable"></label>
+              <label>What is your current or previous job title?<input name="jobTitle"></label>
               <section id="employment">
                 <h2>Employment</h2>
                 <div class="employment-row">
@@ -804,10 +809,103 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         assert page.locator("[name='zip']").input_value() == "60601"
         assert page.locator("[name='contactEmployer']").input_value() == "No"
         assert page.locator("[name='commutable']").input_value() == "Open to relocation"
+        assert page.locator("[name='jobTitle']").input_value() == "Staff Data Engineer"
         assert page.locator("[name='company[]']").nth(0).input_value() == "Example Labs"
         assert page.locator("[name='title[]']").nth(0).input_value() == "Machine Learning Engineer"
         assert page.locator("[name='startMonth[]']").nth(0).input_value() == "September"
         assert page.locator("[name='endYear[]']").nth(1).input_value() == "2025"
         assert page.locator("[name='company[]']").nth(1).input_value() == "Research Group"
+
+        browser.close()
+
+
+def test_content_script_discovers_custom_dropdown_options_before_mapping():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "veteranStatus": "No",
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label id="veteran-label">Veteran Status</label>
+              <button id="veteran" type="button" aria-labelledby="veteran-label" aria-haspopup="listbox" aria-controls="veteran-options">Select...</button>
+              <div id="veteran-options" role="listbox" hidden>
+                <div role="option">I identify as one or more of the classifications of protected veteran listed above</div>
+                <div role="option">I am not a protected veteran</div>
+                <div role="option">I decline to self-identify for protected veteran status</div>
+              </div>
+            </form>
+            <script>
+              const button = document.getElementById('veteran');
+              const list = document.getElementById('veteran-options');
+              button.addEventListener('click', () => { list.hidden = !list.hidden; });
+              button.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape') list.hidden = true;
+              });
+              list.querySelectorAll('[role="option"]').forEach((option) => {
+                option.addEventListener('click', () => {
+                  button.textContent = option.textContent;
+                  button.setAttribute('data-selected', option.textContent);
+                  list.hidden = true;
+                });
+              });
+            </script>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Veteran Status")
+        assert mapping["value"] == "I am not a protected veteran"
+        assert "I am not a protected veteran" in [option["label"] for option in mapping["options"]]
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True
+        assert page.locator("#veteran").get_attribute("data-selected") == "I am not a protected veteran"
 
         browser.close()

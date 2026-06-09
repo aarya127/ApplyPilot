@@ -130,12 +130,13 @@
     const profile = candidateProfile || {};
     await prepareRepeatableSections(profile);
     const fields = scanFields();
+    await enrichDynamicDropdownOptions(fields);
     const localMappings = fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean);
     const repeatableMappings = mapRepeatableEmploymentFields(fields, profile);
     const backendMappings = settings?.autoMapAmbiguousFields === true
       ? await getBackendMappings(fields, profile)
       : [];
-    const mappings = mergeMappings([...localMappings, ...repeatableMappings], backendMappings);
+    const mappings = mergeMappings([...localMappings, ...repeatableMappings], backendMappings, fields);
 
     return { fields, mappings, profile };
   }
@@ -168,6 +169,7 @@
         try {
           const didFill = await fillElement(element, mapping, field);
           if (didFill) {
+            confirmFilledElement(element);
             markFilled(element, mapping);
             filled += 1;
           }
@@ -512,6 +514,112 @@
     return [];
   }
 
+  async function enrichDynamicDropdownOptions(fields) {
+    for (const field of fields) {
+      if (field.options?.length || !isDynamicDropdownField(field)) {
+        continue;
+      }
+
+      const element = field.elementRef?.deref?.();
+      if (!element || !isFillable(element)) {
+        continue;
+      }
+
+      const options = await discoverDynamicDropdownOptions(element);
+      if (options.length && options.length <= 40) {
+        field.options = options;
+      }
+    }
+  }
+
+  function isDynamicDropdownField(field) {
+    return field.type === "combobox"
+      || field.tag === "button"
+      || field.ariaLabel
+      || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "));
+  }
+
+  async function discoverDynamicDropdownOptions(element) {
+    if (!isListboxTrigger(element)) {
+      return [];
+    }
+
+    const active = document.activeElement;
+
+    try {
+      element.focus();
+      element.click();
+      await sleep(180);
+
+      const options = collectVisibleDropdownOptions(element);
+      closeDynamicDropdown(element);
+
+      if (active && active !== element && typeof active.focus === "function") {
+        active.focus();
+      }
+
+      return uniqueOptions(options);
+    } catch (error) {
+      closeDynamicDropdown(element);
+      return [];
+    }
+  }
+
+  function isListboxTrigger(element) {
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    const popup = (element.getAttribute("aria-haspopup") || "").toLowerCase();
+    return role === "combobox" || popup === "listbox" || popup === "true";
+  }
+
+  function collectVisibleDropdownOptions(trigger) {
+    const containers = [];
+    const controls = trigger.getAttribute("aria-controls");
+    const owns = trigger.getAttribute("aria-owns");
+
+    for (const id of [controls, owns].filter(Boolean)) {
+      const container = document.getElementById(id);
+      if (container) {
+        containers.push(container);
+      }
+    }
+
+    containers.push(document);
+
+    const optionNodes = containers.flatMap((container) => (
+      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio']"))
+    ));
+
+    return optionNodes
+      .filter(isVisibleElement)
+      .map((option) => ({
+        label: compactText(option.innerText || option.textContent || option.getAttribute("aria-label") || ""),
+        value: compactText(option.getAttribute("data-value") || option.getAttribute("value") || option.getAttribute("aria-label") || option.innerText || option.textContent || "")
+      }))
+      .filter((option) => option.label || option.value);
+  }
+
+  function closeDynamicDropdown(element) {
+    dispatchEnterOrEscape(element, "Escape");
+    element.blur?.();
+  }
+
+  function uniqueOptions(options) {
+    const seen = new Set();
+    const result = [];
+
+    for (const option of options) {
+      const key = normalize([option.label, option.value].join(" "));
+      if (!key || seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      result.push(option);
+    }
+
+    return result;
+  }
+
   function mapField(field, profile, settings) {
     const primaryHaystack = normalize(
       [
@@ -539,11 +647,6 @@
       return null;
     }
 
-    const savedAnswer = findSavedAnswer(field, profile);
-    if (hasValue(savedAnswer)) {
-      return buildMapping(field, savedAnswer, "saved-answer", 0.95);
-    }
-
     const address = selectAddress(profile, settings, primaryHaystack);
 
     const agreementMapping = mapAgreementCheckbox(field, primaryHaystack);
@@ -554,6 +657,20 @@
     const workQuestionMapping = mapWorkQuestion(field, profile, primaryHaystack);
     if (workQuestionMapping) {
       return workQuestionMapping;
+    }
+
+    if (/(may we contact|contact).*(current employer)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.9);
+    }
+
+    const companyQuestionMapping = mapCompanyQuestion(field, profile, primaryHaystack);
+    if (companyQuestionMapping) {
+      return companyQuestionMapping;
+    }
+
+    const savedAnswer = findSavedAnswer(field, profile);
+    if (hasValue(savedAnswer)) {
+      return buildMapping(field, savedAnswer, "saved-answer", 0.95);
     }
 
     if (/(essential functions|reasonable accommodation)/.test(primaryHaystack) && !/describe|need for|documentation/.test(primaryHaystack)) {
@@ -567,15 +684,6 @@
     const knownCustomMapping = mapKnownCustomQuestion(field, profile, primaryHaystack);
     if (knownCustomMapping) {
       return knownCustomMapping;
-    }
-
-    const companyQuestionMapping = mapCompanyQuestion(field, profile, primaryHaystack);
-    if (companyQuestionMapping) {
-      return companyQuestionMapping;
-    }
-
-    if (/(may we contact|contact).*(current employer)/.test(haystack)) {
-      return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.82);
     }
 
     const workHistoryMapping = mapWorkHistoryField(field, profile, primaryHaystack);
@@ -665,6 +773,13 @@
     }
 
     if (settings.autoFillSensitiveFields === true) {
+      if (/(disability status|have a disability|had one in the past|self-identification of disability)/.test(primaryHaystack)) {
+        const disabilityAnswer = profile.answers?.disabilityStatus || profile.disabilityStatus;
+        if (hasValue(disabilityAnswer)) {
+          return buildMapping(field, disabilityAnswer, "sensitive-rule", 0.82);
+        }
+      }
+
       const demographicMapping = mapSensitiveField(field, profile, primaryHaystack);
       if (demographicMapping) {
         return demographicMapping;
@@ -690,6 +805,10 @@
 
     for (const key of keys) {
       if (hasValue(answers[key])) {
+        if (field.options?.length && !bestOptionValue(field, answers[key])) {
+          continue;
+        }
+
         return answers[key];
       }
     }
@@ -1012,7 +1131,10 @@
 
   function countFieldsMatching(pattern) {
     return scanFieldsWithoutPreparation()
-      .filter((field) => pattern.test(normalize([field.label, field.name, field.id, field.placeholder].join(" "))))
+      .filter((field) => {
+        const haystack = normalize([field.label, field.name, field.id, field.placeholder].join(" "));
+        return pattern.test(haystack) && isEmploymentField(field, haystack);
+      })
       .length;
   }
 
@@ -1109,6 +1231,10 @@
     }
 
     if (/(may we contact|contact).*(current employer)/.test(haystack)) {
+      return false;
+    }
+
+    if (/(current|previous|most recent).*(employer|company|job title|title)|((employer|company|job title|title).*(current|previous|most recent))/.test(haystack)) {
       return false;
     }
 
@@ -1261,10 +1387,15 @@
   function buildMapping(field, value, source, confidence) {
     return {
       index: field.index,
-      value,
+      value: normalizedMappingValue(field, value),
       source,
       confidence
     };
+  }
+
+  function normalizedMappingValue(field, value) {
+    const exactOption = bestOptionValue(field, value);
+    return exactOption || value;
   }
 
   async function getBackendMappings(fields, profile) {
@@ -1293,21 +1424,34 @@
     }
   }
 
-  function mergeMappings(localMappings, backendMappings) {
+  function mergeMappings(localMappings, backendMappings, fields = []) {
     const byIndex = new Map();
 
     for (const mapping of localMappings) {
-      byIndex.set(mapping.index, mapping);
+      byIndex.set(mapping.index, normalizeMappingForField(mapping, fields));
     }
 
     for (const mapping of backendMappings) {
       const existing = byIndex.get(mapping.index);
       if (!existing || Number(mapping.confidence || 0) >= Number(existing.confidence || 0)) {
-        byIndex.set(mapping.index, mapping);
+        byIndex.set(mapping.index, normalizeMappingForField(mapping, fields));
       }
     }
 
     return Array.from(byIndex.values());
+  }
+
+  function normalizeMappingForField(mapping, fields) {
+    const field = fields.find((item) => item.index === mapping.index);
+
+    if (!field) {
+      return mapping;
+    }
+
+    return {
+      ...mapping,
+      value: normalizedMappingValue(field, mapping.value)
+    };
   }
 
   function serializeFields(fields) {
@@ -1500,7 +1644,10 @@
       [
         "no i am not",
         "no i do not",
+        "no i don t",
         "no i have not",
+        "no i do not have",
+        "no i don t have",
         "not a protected veteran",
         "i am not a protected veteran",
         "not protected veteran",
@@ -1508,6 +1655,34 @@
         "not hispanic or latino",
         "not hispanic",
         "not latino"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "open to relocation" || desired === "open to relocate") {
+      [
+        "willing to relocate",
+        "i am willing to relocate",
+        "i am willing to relocate before starting employment",
+        "open to relocating",
+        "open to relocate"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "no disability" || desired === "no disabilities") {
+      [
+        "no",
+        "no i do not have a disability",
+        "no i don t have a disability",
+        "no i do not have a disability and have not had one in the past",
+        "no i don t have a disability and have not had one in the past"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "not a protected veteran" || desired === "i am not a protected veteran") {
+      [
+        "no",
+        "not protected veteran",
+        "i am not a protected veteran"
       ].forEach((alias) => aliases.add(alias));
     }
 
@@ -1589,6 +1764,26 @@
     element.dispatchEvent(new Event("input", { bubbles: true }));
     element.dispatchEvent(new Event("change", { bubbles: true }));
     element.dispatchEvent(new Event("blur", { bubbles: true }));
+  }
+
+  function confirmFilledElement(element) {
+    dispatchEnterOrEscape(element, "Enter");
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+    element.blur?.();
+  }
+
+  function dispatchEnterOrEscape(element, key) {
+    const keyCode = key === "Enter" ? 13 : 27;
+    for (const type of ["keydown", "keypress", "keyup"]) {
+      element.dispatchEvent(new KeyboardEvent(type, {
+        key,
+        code: key,
+        keyCode,
+        which: keyCode,
+        bubbles: true,
+        cancelable: true
+      }));
+    }
   }
 
   function sleep(ms) {
