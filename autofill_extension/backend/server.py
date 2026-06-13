@@ -86,7 +86,7 @@ def map_fields():
         mappings = call_nvidia_mapper(fields, profile, page)
     except Exception as exc:
         app.logger.exception("Mapper request failed")
-        return jsonify({"mappings": [], "warning": f"Mapper request failed: {exc}"}), 200
+        return jsonify({"mappings": policy_mappings(fields, profile), "warning": f"Mapper request failed: {exc}"}), 200
 
     return jsonify({"mappings": mappings})
 
@@ -153,15 +153,18 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
                 {
                     "role": "system",
                     "content": (
-                        "You map job application form fields to candidate answers. "
-                        "Return only strict JSON. Do not invent experience. "
-                        "Use resumeFacts and resumeTranscript for custom questions. Skip unknown fields."
+                        "You are ApplyPilot acting for Aarya Shah on job application forms. "
+                        "Return only strict JSON with no markdown or reasoning. "
+                        "Choose answers from supplied dropdown, radio, checkbox, and combobox options exactly. "
+                        "Use the profile, resume facts, saved answers, and default policies. "
+                        "Do not invent experience. Skip unknown fields."
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.1,
-            "max_tokens": 1600,
+            "max_tokens": 3200,
+            "response_format": {"type": "json_object"},
         },
         timeout=45,
     )
@@ -171,10 +174,12 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
     mappings = data.get("mappings", [])
 
     if not isinstance(mappings, list):
-        return []
+        mappings = []
 
     valid_mappings = [mapping for mapping in mappings if valid_mapping(mapping)]
-    return enforce_option_values(valid_mappings, fields)
+    enforced_mappings = enforce_option_values(valid_mappings, fields)
+    fallback_mappings = policy_mappings(fields, profile)
+    return merge_backend_mappings(enforced_mappings, fallback_mappings)
 
 
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
@@ -216,10 +221,12 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "salary": profile.get("salary"),
             "targetCountry": page.get("targetCountry"),
         },
+        "defaultPolicies": default_answer_policies(profile),
         "demographics": profile.get("demographics", {}),
         "veteranStatus": profile.get("veteranStatus"),
         "resumeFacts": profile.get("resumeFacts", {}),
         "resumeTranscript": resume_transcript(profile),
+        "candidateContext": candidate_context(profile),
         "savedAnswers": profile.get("answers", {}),
     }
     serializable_fields = [
@@ -231,6 +238,11 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "name": field.get("name"),
             "id": field.get("id"),
             "placeholder": field.get("placeholder"),
+            "ariaLabel": field.get("ariaLabel"),
+            "questionText": field.get("questionText"),
+            "surroundingText": field.get("surroundingText"),
+            "nearbyText": field.get("nearbyText"),
+            "currentValue": field.get("value"),
             "options": field.get("options", []),
         }
         for field in fields
@@ -243,8 +255,13 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "{\"mappings\":[{\"index\":0,\"value\":\"answer\",\"confidence\":0.0,\"source\":\"llm\"}]}. "
                 "Use exact option labels when a field has options. "
                 "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
-                "Prefer savedAnswers and explicit profile facts over inference. "
+                "If the best semantic answer is not an exact option, choose the closest supplied option label. "
+                "Prefer explicit profile facts and resume facts over inference. "
+                "Use savedAnswers only when they clearly match the same current question; ignore generic or low-information saved answers for policy questions. "
+                "Act as Aarya; answer eligibility/default-policy questions according to defaultPolicies. "
                 "Use resumeTranscript to decide whether the candidate has worked at a named company; if the named company is absent from the transcript and savedAnswers do not say otherwise, answer No. "
+                "Use candidateContext as the full compact source of truth for profile facts, work history, education, links, preferences, eligibility, and saved answers. "
+                "For relatives, family, spouse, domestic partner, contractors, dealers, affiliates, or company-specific conflict questions, answer No by default unless savedAnswers or resumeTranscript explicitly says Yes. "
                 "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
                 "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
                 "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts. "
@@ -265,12 +282,80 @@ def safe_location(location: Any, keys: list[str]) -> dict[str, Any]:
     return {key: location.get(key) for key in keys if location.get(key)}
 
 
+def candidate_context(profile: dict[str, Any]) -> dict[str, Any]:
+    """Small enough for every request, but pruned of local file paths/noisy blobs."""
+    allowed_keys = [
+        "firstName",
+        "lastName",
+        "fullName",
+        "email",
+        "phone",
+        "linkedin",
+        "github",
+        "portfolio",
+        "addresses",
+        "school",
+        "degree",
+        "graduationDate",
+        "workAuthorization",
+        "needsSponsorship",
+        "canadianCitizen",
+        "usPermanentResident",
+        "subjectToAgreement",
+        "relocation",
+        "salary",
+        "veteranStatus",
+        "militaryService",
+        "demographics",
+        "answers",
+        "workExperience",
+        "education",
+        "links",
+        "resumeFacts",
+    ]
+    context = {key: profile.get(key) for key in allowed_keys if profile.get(key) not in (None, "", [], {})}
+
+    facts = context.get("resumeFacts")
+    if isinstance(facts, dict):
+        context["resumeFacts"] = {
+            key: value
+            for key, value in facts.items()
+            if key not in {"sourceFile", "rawTextFile", "localPath", "resumeFile"}
+        }
+
+    return prune_large_values(context, max_text=1600, max_items=30)
+
+
+def prune_large_values(value: Any, max_text: int, max_items: int) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): prune_large_values(item, max_text, max_items)
+            for key, item in list(value.items())[:max_items]
+        }
+
+    if isinstance(value, list):
+        return [prune_large_values(item, max_text, max_items) for item in value[:max_items]]
+
+    if isinstance(value, str):
+        return value[:max_text]
+
+    return value
+
+
 def resume_transcript(profile: dict[str, Any]) -> str:
     facts = profile.get("resumeFacts", {})
     if not isinstance(facts, dict):
         return ""
 
     sections = []
+    work_experience = profile.get("workExperience") or facts.get("workExperience")
+    if isinstance(work_experience, list) and work_experience:
+        sections.append("Structured Work Experience:\n" + "\n".join(json.dumps(item, ensure_ascii=False) for item in work_experience if item))
+
+    education = profile.get("education") or facts.get("education")
+    if isinstance(education, list) and education:
+        sections.append("Structured Education:\n" + "\n".join(json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else str(item) for item in education if item))
+
     for label, key in [
         ("Education", "education"),
         ("Experience", "experience"),
@@ -283,6 +368,262 @@ def resume_transcript(profile: dict[str, Any]) -> str:
             sections.append(f"{label}:\n" + "\n".join(str(item) for item in values if str(item).strip()))
 
     return "\n\n".join(sections)[:12000]
+
+
+def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "identity": "Answer as Aarya Shah using only the supplied profile and resume facts.",
+        "minimumAge": profile.get("answers", {}).get("meetsMinimumAge", "Yes"),
+        "usWorkAuthorization": (
+            "Aarya is a U.S. permanent resident/green card holder and is authorized to work "
+            "in the United States for any employer."
+        ),
+        "canadaWorkAuthorization": "Aarya is a Canadian citizen and is authorized to work in Canada.",
+        "needsSponsorship": profile.get("needsSponsorship") or profile.get("answers", {}).get("sponsorship") or "No",
+        "subjectToAgreement": profile.get("subjectToAgreement") or profile.get("answers", {}).get("subjectToAgreement") or "No",
+        "relativesAtCompany": profile.get("answers", {}).get("relativesAtCompany", "No"),
+        "familyAtCompany": profile.get("answers", {}).get("familyAtCompany", "No"),
+        "previousCompanyEmployment": "No unless the named company appears in workExperience or resumeTranscript.",
+        "contractorDealerAffiliate": "No unless savedAnswers or resumeTranscript explicitly says otherwise.",
+        "militaryService": profile.get("militaryService") or profile.get("answers", {}).get("militaryService") or "No",
+        "spouseMilitaryService": profile.get("answers", {}).get("spouseMilitaryService", "No"),
+        "veteranStatus": profile.get("veteranStatus") or profile.get("answers", {}).get("veteranStatus") or "No",
+        "recruitingMessages": profile.get("answers", {}).get("recruitingMessages", "No"),
+        "relocation": profile.get("relocation") or profile.get("answers", {}).get("relocation") or "Anywhere",
+    }
+
+
+def policy_mappings(fields: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
+    mappings = []
+    transcript = resume_transcript(profile).lower()
+    companies = [
+        str(item.get("company", "")).lower()
+        for item in (profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience") or [])
+        if isinstance(item, dict)
+    ]
+
+    for field in fields:
+        if not isinstance(field, dict) or not isinstance(field.get("index"), int):
+            continue
+
+        haystack = field_policy_haystack(field)
+        answer = policy_answer_for_field(haystack, field, profile, transcript, companies)
+        if answer is None:
+            continue
+
+        mappings.append(
+            {
+                "index": field["index"],
+                "value": answer,
+                "confidence": 0.78,
+                "source": "policy",
+            }
+        )
+
+    return enforce_option_values(mappings, fields)
+
+
+def policy_answer_for_field(
+    haystack: str,
+    field: dict[str, Any],
+    profile: dict[str, Any],
+    transcript: str,
+    companies: list[str],
+) -> str | None:
+    options = normalized_options(field)
+    policies = default_answer_policies(profile)
+
+    if any(term in haystack for term in ["18 years of age", "at least 18", "proof of age", "minimum age"]):
+        return best_available_option("Yes", options) or "Yes"
+
+    if any(term in haystack for term in ["sponsor", "sponsorship", "visa", "h 1b", "f 1 opt", "cpt", "tn", "ead"]):
+        return best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
+
+    if (
+        ("authorized" in haystack or "authorization" in haystack or "legally" in haystack)
+        and ("work" in haystack or "employment" in haystack)
+    ):
+        return best_authorization_option(options) or best_available_option("Yes", options) or "Yes"
+
+    if "relocat" in haystack:
+        return best_relocation_option(options, policies["relocation"]) or policies["relocation"]
+
+    if ("spouse" in haystack or "domestic partner" in haystack) and ("military" in haystack or "armed forces" in haystack):
+        return best_available_option(policies["spouseMilitaryService"], options) or policies["spouseMilitaryService"]
+
+    if "military" in haystack or "armed forces" in haystack or "served" in haystack:
+        return best_available_option(policies["militaryService"], options) or policies["militaryService"]
+
+    if "veteran" in haystack:
+        return best_available_option(policies["veteranStatus"], options) or policies["veteranStatus"]
+
+    if any(term in haystack for term in ["relative", "family member", "spouse", "domestic partner"]):
+        return best_available_option("No", options) or "No"
+
+    if any(term in haystack for term in ["authorized dealer", "dealer", "contractor", "affiliate", "subsidiary"]):
+        return best_available_option("No", options) or "No"
+
+    if is_previous_company_question(haystack):
+        question_companies = named_companies_from_question(haystack)
+        worked_there = any(
+            company and company_in_question(company, haystack, question_companies)
+            for company in companies
+        )
+        return best_available_option("Yes" if worked_there else "No", options) or ("Yes" if worked_there else "No")
+
+    if any(term in haystack for term in ["whatsapp", "sms", "text message", "messaging"]):
+        return best_available_option(policies["recruitingMessages"], options) or policies["recruitingMessages"]
+
+    return None
+
+
+def is_previous_company_question(haystack: str) -> bool:
+    return (
+        any(term in haystack for term in ["previously employed", "currently employed", "directly employed", "worked for"])
+        or (
+            any(term in haystack for term in ["previously", "currently", "directly", "ever"])
+            and any(term in haystack for term in ["employed", "worked", "paycheck", "w 2"])
+        )
+    )
+
+
+def field_policy_haystack(field: dict[str, Any]) -> str:
+    label = str(field.get("label") or "")
+    pieces = [
+        label,
+        str(field.get("name") or ""),
+        str(field.get("id") or ""),
+        str(field.get("placeholder") or ""),
+        str(field.get("ariaLabel") or ""),
+    ]
+
+    if is_low_information_label(label):
+        pieces.append(str(field.get("questionText") or ""))
+        pieces.append(str(field.get("surroundingText") or ""))
+        pieces.append(str(field.get("nearbyText") or ""))
+
+    return normalize_for_option(" ".join(pieces))
+
+
+def is_low_information_label(value: Any) -> bool:
+    return normalize_for_option(value) in {
+        "yes",
+        "required yes",
+        "yes required",
+        "no",
+        "required no",
+        "no required",
+        "yes no",
+        "no yes",
+        "select one",
+        "required select one",
+        "select one required",
+        "required",
+        "true false",
+        "false true",
+    }
+
+
+def named_companies_from_question(haystack: str) -> list[str]:
+    stop_words = {
+        "have",
+        "previously",
+        "currently",
+        "directly",
+        "employed",
+        "worked",
+        "work",
+        "with",
+        "for",
+        "or",
+        "and",
+        "the",
+        "company",
+        "subsidiaries",
+        "affiliates",
+        "received",
+        "paycheck",
+        "w",
+    }
+    return [
+        token
+        for token in haystack.split()
+        if len(token) > 3 and token not in stop_words
+    ]
+
+
+def company_in_question(company: str, haystack: str, question_companies: list[str]) -> bool:
+    if not company or len(company) < 3:
+        return False
+
+    if exact_phrase_in_text(company, haystack):
+        return True
+
+    company_tokens = [token for token in company.split() if len(token) > 2]
+    if not company_tokens:
+        return False
+
+    question_token_set = set(question_companies)
+    return all(token in question_token_set for token in company_tokens)
+
+
+def exact_phrase_in_text(phrase: str, text: str) -> bool:
+    return f" {phrase} " in f" {text} "
+
+
+def best_available_option(answer: str, options: list[dict[str, str]]) -> str | None:
+    if not options:
+        return None
+
+    return match_option_value(answer, options)
+
+
+def best_authorization_option(options: list[dict[str, str]]) -> str | None:
+    for option in options:
+        label = option.get("label") or option.get("value") or ""
+        text = normalize_for_option(label)
+        if (
+            "authorized" in text
+            and "work" in text
+            and ("united states" in text or "u s" in text or "us" in text)
+            and ("any employer" in text or "for any" in text or "without sponsorship" in text)
+        ):
+            return label
+
+    for option in options:
+        label = option.get("label") or option.get("value") or ""
+        text = normalize_for_option(label)
+        if "authorized" in text and "work" in text and "not authorized" not in text and "require sponsorship" not in text:
+            return label
+
+    return None
+
+
+def best_relocation_option(options: list[dict[str, str]], preferred: str) -> str | None:
+    for answer in [preferred, "Anywhere", "Nationwide", "Open to relocation", "Yes"]:
+        match = match_option_value(answer, options)
+        if match:
+            return match
+
+    return None
+
+
+def merge_backend_mappings(primary: list[dict[str, Any]], fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_index = {
+        mapping.get("index"): mapping
+        for mapping in primary
+        if isinstance(mapping.get("index"), int)
+    }
+
+    for mapping in fallback:
+        index = mapping.get("index")
+        if not isinstance(index, int):
+            continue
+
+        if index not in by_index or mapping.get("source") == "policy":
+            by_index[index] = mapping
+
+    return list(by_index.values())
 
 
 def enforce_option_values(mappings: list[dict[str, Any]], fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -375,9 +716,19 @@ def option_aliases(value: str) -> set[str]:
                 "no i do not",
                 "no i don t",
                 "no i have not",
+                "no i have never",
                 "no i do not have",
+                "no i don t have",
+                "no i have never served",
+                "i have never served",
+                "have never served",
+                "have not served",
+                "never served",
+                "not served",
                 "not a protected veteran",
                 "i am not a protected veteran",
+                "not protected veteran",
+                "not a veteran",
                 "not hispanic or latino",
                 "not hispanic",
                 "not latino",
@@ -386,6 +737,33 @@ def option_aliases(value: str) -> set[str]:
 
     if value == "yes":
         aliases.update({"yes i am", "yes i do", "yes i have"})
+
+    if "authorized" in value and "work" in value:
+        aliases.update(
+            {
+                "i am authorized to work in the united states for any employer",
+                "authorized to work in the united states for any employer",
+                "legally authorized to work in the united states",
+                "authorized to work for any employer",
+                "authorized to work",
+            }
+        )
+
+    if (
+        "do not require sponsorship" in value
+        or "not require sponsorship" in value
+        or "no sponsorship" in value
+    ):
+        aliases.update(
+            {
+                "no",
+                "i do not require sponsorship",
+                "do not require sponsorship",
+                "i will not require sponsorship",
+                "will not require sponsorship",
+                "no sponsorship",
+            }
+        )
 
     if value in {"united states", "united states of america", "usa", "u s", "u s a", "us"}:
         aliases.update({"united states", "united states of america", "usa", "u s", "u s a", "us"})
@@ -481,6 +859,12 @@ def normalize_for_option(value: Any) -> str:
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+
+    if isinstance(content, list):
+        return {"mappings": content}
+
     if not isinstance(content, str) or not content.strip():
         return {}
 

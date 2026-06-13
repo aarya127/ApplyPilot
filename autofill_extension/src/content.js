@@ -87,7 +87,7 @@
     const plan = await buildAutofillPlan();
     const mappedIndexes = new Set(plan.mappings.map((mapping) => mapping.index));
     const unmappedFields = plan.fields
-      .filter((field) => !mappedIndexes.has(field.index))
+      .filter((field) => !mappedIndexes.has(field.index) || isAiOnlyField(field))
       .filter(shouldAskForField)
       .map(({ elementRef, ...field }) => ({
         ...field,
@@ -111,6 +111,7 @@
         };
       }),
       unmappedFields,
+      debugFields: plan.fields.map(debugFieldForPreview),
       manualTasks: unmappedFields
         .filter((field) => field.needsManualUpload)
         .map((field) => ({
@@ -123,6 +124,27 @@
         url: location.href,
         title: document.title
       }
+    };
+  }
+
+  function debugFieldForPreview(field) {
+    return {
+      index: field.index,
+      tag: field.tag,
+      type: field.type,
+      label: displayLabelForField(field),
+      rawLabel: field.label || "",
+      value: field.value || "",
+      name: field.name || "",
+      id: field.id || "",
+      ariaLabel: field.ariaLabel || "",
+      questionText: field.questionText || "",
+      surroundingText: field.surroundingText || "",
+      nearbyText: field.nearbyText || "",
+      options: field.options || [],
+      haystack: fieldHaystack(field),
+      isPolicy: isAiOnlyField(field),
+      shouldAsk: shouldAskForField(field)
     };
   }
 
@@ -143,7 +165,7 @@
       ...mapRepeatableWebsiteFields(fields, profile)
     ];
     const backendMappings = settings?.autoMapAmbiguousFields === true
-      ? await getBackendMappings(fields, profile)
+      ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field)), profile)
       : [];
     const mappings = mergeMappings([...localMappings, ...repeatableMappings], backendMappings, fields);
 
@@ -257,8 +279,13 @@
   function buildFieldMetadata(element, index) {
     const tag = element.tagName.toLowerCase();
     const type = (element.getAttribute("type") || element.getAttribute("role") || tag).toLowerCase();
-    const label = getLabelText(element);
     const options = getOptions(element);
+    const rawLabel = getLabelText(element);
+    const nearbyText = nearbyTextForField(element, options);
+    const questionText = policyQuestionTextForField(element, options);
+    const recoveredLabel = isLowInformationText(rawLabel)
+      ? parentQuestionLabel(element, options) || precedingQuestionLabel(element, options) || questionText || firstPolicyQuestionLine(nearbyText) || rawLabel
+      : rawLabel;
 
     return {
       index,
@@ -266,7 +293,7 @@
       type,
       name: element.getAttribute("name") || "",
       id: element.id || "",
-      label,
+      label: recoveredLabel,
       placeholder: element.getAttribute("placeholder") || "",
       ariaLabel: element.getAttribute("aria-label") || "",
       autocomplete: element.getAttribute("autocomplete") || "",
@@ -274,6 +301,8 @@
       value: getCurrentValue(element),
       options,
       surroundingText: getSurroundingText(element),
+      questionText,
+      nearbyText,
       answerKey: "",
       elementRef: new WeakRef(element)
     };
@@ -318,9 +347,11 @@
       label: choiceLabel(element),
       value: choiceValue(element)
     }));
+    const nearbyText = nearbyTextForField(first, options);
+    const questionText = policyQuestionTextForField(first, options);
     const initialLabel = choiceGroupLabel(group.container, options) || getSurroundingText(first) || getLabelText(first);
     const label = isLowInformationText(initialLabel)
-      ? parentQuestionLabel(first, options) || initialLabel
+      ? parentQuestionLabel(first, options) || precedingQuestionLabel(first, options) || questionText || firstPolicyQuestionLine(nearbyText) || initialLabel
       : initialLabel;
 
     return {
@@ -336,6 +367,8 @@
       value: "",
       options,
       surroundingText: compactText(group.container?.innerText || ""),
+      questionText,
+      nearbyText,
       answerKey: "",
       elementRef: new WeakRef(first),
       choiceRefs: group.elements.map((element) => new WeakRef(element))
@@ -474,7 +507,7 @@
         .filter((line) => line.length > 1)
         .filter((line) => !optionLabels.has(normalize(line)))
         .filter((line) => !/^\*?\s*(required|select one)\s*$/i.test(line));
-      const question = lines.find((line) => /[?]|\b(now|previously|ever|worked|employed|subsidiar|affiliate|authorize|sponsor|require)\b/i.test(line));
+      const question = lines.find((line) => /[?]|\b(now|previously|ever|worked|employed|subsidiar|affiliate|authorize|authorization|sponsor|sponsorship|require|visa|military|served|spouse|domestic partner|relative|dealer|contractor|relocat|age|proof of age)\b/i.test(line));
 
       if (question) {
         return question;
@@ -485,6 +518,119 @@
     }
 
     return "";
+  }
+
+  function precedingQuestionLabel(element, options) {
+    const targetRect = element.getBoundingClientRect();
+    const optionLabels = new Set(options.map((option) => normalize(option.label)).filter(Boolean));
+    const candidates = Array.from(document.querySelectorAll("label, legend, h1, h2, h3, h4, p, div, span, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel']"))
+      .filter(isVisibleElement)
+      .filter((node) => node !== element && followsNode(node, element))
+      .flatMap((node) => questionCandidatesNear(node, targetRect, optionLabels))
+      .filter((candidate) => candidate.distance >= -16 && candidate.distance <= 520)
+      .sort((left, right) => left.distance - right.distance);
+
+    return candidates[0]?.text || "";
+  }
+
+  function questionCandidatesNear(node, targetRect, optionLabels) {
+    const rect = node.getBoundingClientRect();
+    const text = compactText(node.innerText || node.textContent || "");
+    const controlCount = node.querySelectorAll?.("input, textarea, select, button, [role='radio'], [role='checkbox'], [role='combobox']").length || 0;
+
+    if (!text || text.length > 1200 || controlCount > 14 || rect.bottom < targetRect.top - 560 || rect.top > targetRect.bottom + 48) {
+      return [];
+    }
+
+    return text
+      .split(/\n+/)
+      .map((line) => compactText(line))
+      .filter((line) => isPolicyQuestionLine(line, optionLabels))
+      .map((line) => ({
+        text: line,
+        distance: Math.max(0, targetRect.top - rect.bottom)
+      }));
+  }
+
+  function isPolicyQuestionLine(line, optionLabels = new Set()) {
+    const normalized = normalize(line);
+    return line.length > 3
+      && line.length <= 360
+      && !optionLabels.has(normalized)
+      && !isLowInformationText(line)
+      && !/^\*?\s*(required|select one|yes|no)\s*$/i.test(line)
+      && isAiOnlyQuestion(normalized);
+  }
+
+  function nearbyTextForField(element, options = []) {
+    const targetRect = element.getBoundingClientRect();
+    const optionLabels = new Set(options.map((option) => normalize(option.label)).filter(Boolean));
+    const candidates = Array.from(document.querySelectorAll("label, legend, h1, h2, h3, h4, p, li, div, span, [role='heading'], [data-automation-id='formLabel'], [data-automation-id='formFieldLabel']"))
+      .filter(isVisibleElement)
+      .filter((node) => node !== element)
+      .flatMap((node) => nearbyTextCandidates(node, targetRect, optionLabels))
+      .sort((left, right) => left.score - right.score);
+
+    return unique(candidates.map((candidate) => candidate.text)).slice(0, 14).join(" ");
+  }
+
+  function policyQuestionTextForField(element, options = []) {
+    const targetRect = element.getBoundingClientRect();
+    const optionLabels = new Set(options.map((option) => normalize(option.label)).filter(Boolean));
+    const candidates = Array.from(document.querySelectorAll("label, legend, h1, h2, h3, h4, p, li, div, span, [role='heading'], [data-automation-id='formLabel'], [data-automation-id='formFieldLabel']"))
+      .filter(isVisibleElement)
+      .filter((node) => node !== element)
+      .flatMap((node) => nearbyTextCandidates(node, targetRect, optionLabels))
+      .filter((candidate) => isAiOnlyQuestion(normalize(candidate.text)))
+      .sort((left, right) => left.score - right.score);
+
+    return candidates[0]?.text || "";
+  }
+
+  function nearbyTextCandidates(node, targetRect, optionLabels) {
+    const rect = node.getBoundingClientRect();
+    const text = compactText(node.innerText || node.textContent || "");
+    const controlCount = node.querySelectorAll?.("input, textarea, select, button, [role='radio'], [role='checkbox'], [role='combobox']").length || 0;
+
+    if (!text || text.length > 1400 || controlCount > 20 || rect.bottom < targetRect.top - 720 || rect.top > targetRect.bottom + 260) {
+      return [];
+    }
+
+    const distance = rect.bottom <= targetRect.top
+      ? targetRect.top - rect.bottom
+      : rect.top >= targetRect.bottom
+        ? rect.top - targetRect.bottom + 80
+        : 20;
+
+    return text
+      .split(/\n+/)
+      .map((line) => compactText(line))
+      .filter((line) => isUsefulNearbyLine(line, optionLabels))
+      .map((line) => ({
+        text: line,
+        score: distance + (isAiOnlyQuestion(normalize(line)) ? -120 : 0)
+      }));
+  }
+
+  function isUsefulNearbyLine(line, optionLabels) {
+    const normalized = normalize(line);
+    return line.length > 2
+      && line.length <= 360
+      && !optionLabels.has(normalized)
+      && !isLowInformationText(line)
+      && !/^(english|settings|search for jobs|candidate home|job alerts|back|save and continue|submit)$/i.test(line)
+      && (
+        /[?]/.test(line)
+        || isAiOnlyQuestion(normalized)
+        || /(select one|required|\*)/i.test(line)
+      );
+  }
+
+  function firstPolicyQuestionLine(text) {
+    return String(text || "")
+      .split(/\s{2,}|\n+/)
+      .map((line) => compactText(line))
+      .find((line) => isAiOnlyQuestion(normalize(line))) || "";
   }
 
   function getLabelText(element) {
@@ -745,17 +891,8 @@
         field.autocomplete
       ].join(" ")
     );
-    const haystack = normalize(
-      [
-        field.label,
-        field.placeholder,
-        field.name,
-        field.id,
-        field.ariaLabel,
-        field.autocomplete,
-        field.surroundingText
-      ].join(" ")
-    );
+    const haystack = fieldHaystack(field);
+    const fullHaystack = fullFieldHaystack(field);
 
     if (shouldSkipField(primaryHaystack)) {
       return null;
@@ -782,7 +919,7 @@
       return agreementMapping;
     }
 
-    const workQuestionMapping = mapWorkQuestion(field, profile, primaryHaystack);
+    const workQuestionMapping = mapWorkQuestion(field, profile, haystack);
     if (workQuestionMapping) {
       return workQuestionMapping;
     }
@@ -790,6 +927,10 @@
     const commonQuestionMapping = mapCommonAtsQuestion(field, profile, haystack);
     if (commonQuestionMapping) {
       return commonQuestionMapping;
+    }
+
+    if (isAiOnlyQuestion(haystack)) {
+      return null;
     }
 
     if (/(may we contact|contact).*(current employer)/.test(haystack)) {
@@ -803,6 +944,11 @@
     const companyQuestionMapping = mapCompanyQuestion(field, profile, haystack);
     if (companyQuestionMapping) {
       return companyQuestionMapping;
+    }
+
+    const governmentFormMapping = mapGovernmentSelfIdField(field, profile, primaryHaystack, fullHaystack);
+    if (governmentFormMapping) {
+      return governmentFormMapping;
     }
 
     const savedAnswer = findSavedAnswer(field, profile);
@@ -944,16 +1090,9 @@
   }
 
   function findSavedAnswer(field, profile) {
-    const haystack = normalize([
-      field.label,
-      field.placeholder,
-      field.name,
-      field.id,
-      field.ariaLabel,
-      field.surroundingText
-    ].join(" "));
+    const haystack = fieldHaystack(field);
 
-    if (isLowInformationChoiceLabel(field) || isCompanyHistoryQuestion(haystack)) {
+    if (isLowInformationChoiceLabel(field) || isAiOnlyQuestion(haystack) || isCompanyHistoryQuestion(haystack)) {
       return "";
     }
 
@@ -984,20 +1123,55 @@
 
   function isLowInformationText(value) {
     const label = normalize(value || "");
-    return /^(yes\s*no|no\s*yes|select one|required|true false|false true)$/.test(label);
+    return /^(yes|required yes|yes required|no|required no|no required|yes\s*no|no\s*yes|select one|required select one|select one required|required|true false|false true)$/.test(label);
   }
 
-  function shouldAskForField(field) {
-    const haystack = normalize([
-      field.label,
+  function isAiOnlyField(field) {
+    return isAiOnlyQuestion(fieldHaystack(field));
+  }
+
+  function fieldHaystack(field) {
+    const label = field.label || "";
+    const includeSurroundingText = !compactText(label) || isLowInformationText(label);
+
+    return normalize([
+      label,
       field.placeholder,
       field.name,
       field.id,
       field.ariaLabel,
-      field.surroundingText
+      field.autocomplete,
+      includeSurroundingText ? field.questionText : "",
+      includeSurroundingText ? field.surroundingText : "",
+      includeSurroundingText ? field.nearbyText : ""
     ].join(" "));
+  }
 
-    if (!haystack || shouldSkipField(haystack)) {
+  function isAiOnlyQuestion(haystack) {
+    return [
+      /(18 years of age|at least 18|proof of age|minimum age)/,
+      /(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/,
+      /(sponsor|sponsorship|visa|h-?1b|f-?1|opt|cpt|tn|ead|work permit)/,
+      /(now|ever|previously|formerly|current|directly).*(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2)/,
+      /(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2).*(now|ever|previously|formerly|current|directly)/,
+      /(relatives?|family member|spouse|domestic partner).*(employed|work|working|military|armed forces|served|service)/,
+      /(military|armed forces|served|service|veteran)/,
+      /(interested in relocating|relocation|relocating)/
+    ].some((pattern) => pattern.test(haystack));
+  }
+
+  function shouldAskForField(field) {
+    const haystack = fieldHaystack(field);
+
+    if (!haystack) {
+      return false;
+    }
+
+    if (isAiOnlyQuestion(haystack)) {
+      return true;
+    }
+
+    if (shouldSkipField(haystack)) {
       return false;
     }
 
@@ -1057,7 +1231,7 @@
 
   function mapWorkQuestion(field, profile, haystack) {
     if (/(sponsor|visa|h-?1b|work permit)/.test(haystack)) {
-      return buildMapping(field, profile.needsSponsorship || profile.answers?.sponsorship || "No", "rule", 0.9);
+      return buildMapping(field, sponsorshipAnswer(field, profile), "rule", 0.9);
     }
 
     if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
@@ -1077,6 +1251,22 @@
     return null;
   }
 
+  function sponsorshipAnswer(field, profile) {
+    const explicit = profile.needsSponsorship || profile.answers?.sponsorship;
+    const desired = explicit || "No";
+    const options = field.options || [];
+    const preferredOption = options.find((option) => {
+      const text = normalize([option.label, option.value].join(" "));
+      return /(do not|don t|no).*(require|need).*(sponsor|visa)|not require sponsorship|no sponsorship/.test(text);
+    }) || options.find((option) => optionMatches(option.label, option.value, desired));
+
+    if (preferredOption) {
+      return preferredOption.label || preferredOption.value;
+    }
+
+    return desired === "No" ? "I do not require sponsorship" : desired;
+  }
+
   function workAuthorizationAnswer(field, profile) {
     const explicit = profile.workAuthorization || profile.answers?.workAuthorization;
     const options = field.options || [];
@@ -1094,7 +1284,7 @@
       return preferredOption.label || preferredOption.value;
     }
 
-    return explicit || "Yes";
+    return explicit || "I am authorized to work in the United States for any employer";
   }
 
   function mapKnownCustomQuestion(field, profile, haystack) {
@@ -1122,19 +1312,19 @@
       return buildMapping(field, profile.answers?.spouseMilitaryService || "No", "rule", 0.88);
     }
 
-    if (/(relatives?|family member).*(employed|work).*(t mobile|subsidiar|affiliate)/.test(haystack)) {
+    if (/(relatives?|family member|spouse|domestic partner).*(employed|work|working)|((employed|work|working).*(relatives?|family member|spouse|domestic partner))/.test(haystack)) {
       return buildMapping(field, profile.answers?.relativesAtCompany || "No", "rule", 0.88);
     }
 
-    if (/(authorized dealer).*(t mobile|metro)|metro by t mobile/.test(haystack)) {
+    if (/(authorized dealer|dealer).*(employed|work|working)|((employed|work|working).*(authorized dealer|dealer))/.test(haystack)) {
       return buildMapping(field, profile.answers?.workedForAuthorizedDealer || "No", "rule", 0.88);
     }
 
-    if (/(contractor).*(t mobile)|working as a contractor/.test(haystack)) {
+    if (/(contractor).*(employed|work|working)|working as a contractor|currently working as a contractor/.test(haystack)) {
       return buildMapping(field, profile.answers?.workedAsContractorForCompany || "No", "rule", 0.88);
     }
 
-    if (/(deutsche telekom|softbank|directly employed|received a paycheck|w-2)/.test(haystack)) {
+    if (/(previously|currently|directly).*(employed|worked|work)|received a paycheck|w-2/.test(haystack)) {
       return buildMapping(field, previousCompanyAnswer(profile, haystack), "rule", 0.88);
     }
 
@@ -1150,7 +1340,23 @@
       .map((item) => normalize(item.company))
       .filter(Boolean);
 
-    return companies.some((company) => company && haystack.includes(company)) ? "Yes" : "No";
+    if (mentionsKnownCompanyHistoryQuestion(haystack) && !companies.some((company) => company && haystack.includes(company))) {
+      return "No";
+    }
+
+    return companies.some((company) => company && exactCompanyMention(company, haystack)) ? "Yes" : "No";
+  }
+
+  function mentionsKnownCompanyHistoryQuestion(haystack) {
+    return /(deutsche telekom|softbank|t mobile|metro by t mobile)/.test(haystack);
+  }
+
+  function exactCompanyMention(company, haystack) {
+    if (!company || company.length < 3) {
+      return false;
+    }
+
+    return new RegExp(`(^|\\s)${escapeRegex(company)}(\\s|$)`).test(haystack);
   }
 
   function relocationAnswer(field, profile) {
@@ -2543,6 +2749,13 @@
       return fillCombobox(element, mapping.value);
     }
 
+    if (field.options?.length && dropdownTrigger(element)) {
+      const filled = await fillCombobox(element, mapping.value);
+      if (filled) {
+        return true;
+      }
+    }
+
     if (element.isContentEditable || role === "textbox") {
       if (valueMatches(getCurrentValue(element), mapping.value)) {
         return false;
@@ -2933,8 +3146,15 @@
         "no i do not",
         "no i don t",
         "no i have not",
+        "no i have never",
         "no i do not have",
         "no i don t have",
+        "no i have never served",
+        "i have never served",
+        "have never served",
+        "have not served",
+        "never served",
+        "not served",
         "not a protected veteran",
         "i am not a protected veteran",
         "not protected veteran",
@@ -2978,6 +3198,27 @@
         "yes i am",
         "yes i do",
         "yes i have"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (/authorized.*work/.test(desired)) {
+      [
+        "i am authorized to work in the united states for any employer",
+        "authorized to work in the united states for any employer",
+        "legally authorized to work in the united states",
+        "authorized to work for any employer",
+        "authorized to work"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (/do not require sponsorship|not require sponsorship|no sponsorship/.test(desired)) {
+      [
+        "no",
+        "i do not require sponsorship",
+        "do not require sponsorship",
+        "i will not require sponsorship",
+        "will not require sponsorship",
+        "no sponsorship"
       ].forEach((alias) => aliases.add(alias));
     }
 

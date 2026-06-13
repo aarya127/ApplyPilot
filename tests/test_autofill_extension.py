@@ -127,11 +127,192 @@ def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "call_nvidia_mapper", lambda fields, profile, page: (_ for _ in ()).throw(RuntimeError("boom")))
 
     client = server.app.test_client()
-    response = client.post("/map-fields", json={"fields": [{"index": 0}], "profile": {}, "page": {}})
+    response = client.post(
+        "/map-fields",
+        json={
+            "fields": [
+                {
+                    "index": 0,
+                    "label": "Are you legally authorized to work in the United States?",
+                    "options": [
+                        {"label": "I am authorized to work in the United States for any employer"},
+                        {"label": "I require sponsorship"},
+                    ],
+                }
+            ],
+            "profile": {},
+            "page": {},
+        },
+    )
 
     assert response.status_code == 200
-    assert response.json["mappings"] == []
+    assert response.json["mappings"] == [
+        {
+            "index": 0,
+            "value": "I am authorized to work in the United States for any employer",
+            "confidence": 0.78,
+            "source": "policy",
+        }
+    ]
     assert "Mapper request failed" in response.json["warning"]
+
+
+def test_backend_policy_mapper_answers_general_eligibility_dropdowns():
+    fields = [
+        {
+            "index": 0,
+            "label": "Can you meet the requirement that you are at least 18 years of age?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Do you now or will you in the future require sponsorship of a visa?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 2,
+            "label": "Do you have any relatives employed by this company?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 3,
+            "label": "Are you interested in relocating? If so, where?",
+            "options": [{"label": "Local"}, {"label": "Nationwide"}, {"label": "Anywhere"}],
+        },
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {"index": 0, "value": "Yes", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 2, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 3, "value": "Anywhere", "confidence": 0.78, "source": "policy"},
+    ]
+
+
+def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
+    fields = [
+        {
+            "index": 0,
+            "label": (
+                "Do you now or will you in the future require sponsorship of a visa "
+                "for employment authorization in the United States?"
+            ),
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Are you legally authorized to work in the United States?",
+            "options": [
+                {"label": "I am authorized to work in the United States for any employer"},
+                {"label": "I require sponsorship"},
+            ],
+        },
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {"index": 0, "value": "No", "confidence": 0.78, "source": "policy"},
+        {
+            "index": 1,
+            "value": "I am authorized to work in the United States for any employer",
+            "confidence": 0.78,
+            "source": "policy",
+        },
+    ]
+
+
+def test_backend_policy_matches_long_no_dropdown_options():
+    fields = [
+        {
+            "index": 0,
+            "label": "Do you currently or have you ever served in the U.S. Military?",
+            "options": [
+                {"label": "Yes, I am currently serving or have served in the Armed Forces of the United States"},
+                {"label": "No, I have never served in the Armed Forces of the United States"},
+            ],
+        },
+        {
+            "index": 1,
+            "label": "Do you now or will you in the future require sponsorship of a visa?",
+            "options": [
+                {"label": "Yes, I require sponsorship"},
+                {"label": "No, I do not require sponsorship"},
+            ],
+        },
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {
+            "index": 0,
+            "value": "No, I have never served in the Armed Forces of the United States",
+            "confidence": 0.78,
+            "source": "policy",
+        },
+        {
+            "index": 1,
+            "value": "No, I do not require sponsorship",
+            "confidence": 0.78,
+            "source": "policy",
+        },
+    ]
+
+
+def test_backend_policy_uses_surrounding_text_only_for_low_information_labels():
+    profile = {
+        "workExperience": [
+            {"company": "Example Labs", "title": "Engineer"},
+        ]
+    }
+    fields = [
+        {
+            "index": 0,
+            "label": "Yes",
+            "surroundingText": (
+                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "Yes No"
+            ),
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank?",
+            "surroundingText": "Resume context Example Labs Engineer",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 2,
+            "label": (
+                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "(i.e. have you received a paycheck or W-2 directly from one of these companies?)."
+            ),
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 3,
+            "label": "Yes",
+            "questionText": (
+                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "(i.e. have you received a paycheck or W-2 directly from one of these companies?)."
+            ),
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 4,
+            "label": "Yes Required",
+            "questionText": (
+                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "(i.e. have you received a paycheck or W-2 directly from one of these companies?)."
+            ),
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+    ]
+
+    assert server.policy_mappings(fields, profile) == [
+        {"index": 0, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 2, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 3, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 4, "value": "No", "confidence": 0.78, "source": "policy"},
+    ]
 
 
 def test_backend_enforces_ai_answers_are_dropdown_options():
@@ -175,12 +356,13 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
 
 def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
     profile = {
+        "workExperience": [{"company": "Example Labs", "title": "Machine Learning Engineer"}],
+        "answers": {"relativesAtCompany": "No"},
         "resumeFacts": {
             "experience": ["Example Labs May 2025 - August 2025", "Built ML pipelines"],
             "projects": ["Personal AI agent project"],
             "skills": ["Python", "LLMs"],
         },
-        "answers": {},
     }
 
     prompt = server.build_mapper_prompt(
@@ -190,6 +372,9 @@ def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
     )
 
     assert "resumeTranscript" in prompt
+    assert "candidateContext" in prompt
+    assert "Machine Learning Engineer" in prompt
+    assert "relativesAtCompany" in prompt
     assert "Example Labs May 2025 - August 2025" in prompt
     assert "Personal AI agent project" in prompt
 

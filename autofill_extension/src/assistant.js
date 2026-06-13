@@ -109,6 +109,11 @@ async function handleChat(text) {
     return;
   }
 
+  if (/\bdebug\b/.test(normalized)) {
+    await showDebugFields();
+    return;
+  }
+
   if (/\bfill\b/.test(normalized)) {
     await fillSelectedMappings();
     return;
@@ -284,6 +289,62 @@ async function askAiForMissingAnswers() {
   }
 }
 
+async function showDebugFields() {
+  if (!lastPreview) {
+    await previewCurrentPage();
+  }
+
+  const fields = (lastPreview?.debugFields || []).filter(isDebugRelevantField).slice(0, 16);
+
+  if (!fields.length) {
+    addMessage("agent", "Debug: I do not see policy-like fields in the current preview.");
+    return;
+  }
+
+  for (const field of fields) {
+    addMessage("agent", debugFieldSummary(field));
+  }
+}
+
+function isDebugRelevantField(field) {
+  const haystack = [
+    field.label,
+    field.rawLabel,
+    field.value,
+    field.questionText,
+    field.surroundingText,
+    field.nearbyText,
+    field.haystack
+  ].map((item) => String(item || "").toLowerCase()).join(" ");
+
+  return field.isPolicy
+    || /(deutsche|telekom|softbank|t-mobile|t mobile|sponsor|visa|authorized|military|relative|contractor|dealer|relocat|select one|\byes\b|\bno\b)/.test(haystack);
+}
+
+function debugFieldSummary(field) {
+  const options = (field.options || [])
+    .map((option) => option.label || option.value)
+    .filter(Boolean)
+    .slice(0, 8)
+    .join(" | ");
+
+  return [
+    `Debug field #${field.index}`,
+    `tag/type: ${truncateDebug([field.tag, field.type].filter(Boolean).join("/"))}`,
+    `label: ${truncateDebug(field.label || field.rawLabel || "")}`,
+    `value: ${truncateDebug(field.value || "")}`,
+    `question: ${truncateDebug(field.questionText || "")}`,
+    `nearby: ${truncateDebug(field.nearbyText || "")}`,
+    `options: ${truncateDebug(options)}`,
+    `policy=${Boolean(field.isPolicy)} ask=${Boolean(field.shouldAsk)}`
+  ].join("\n");
+}
+
+function truncateDebug(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  return text.length > 260 ? `${text.slice(0, 257)}...` : text;
+}
+
 function isAiAskableField(field) {
   if (!field?.answerKey || field.needsManualUpload) {
     return false;
@@ -294,20 +355,18 @@ function isAiAskableField(field) {
     return false;
   }
 
-  const haystack = [
-    field.label,
-    field.name,
-    field.id,
-    field.placeholder,
-    field.ariaLabel,
-    field.surroundingText
-  ].map((item) => String(item || "").toLowerCase()).join(" ");
+  const haystack = aiFieldHaystack(field);
+
+  const value = String(field.value || "").trim();
+
+  if (isAiPolicyQuestion(haystack)) {
+    return true;
+  }
 
   if (isStructuredAutofillField(haystack)) {
     return false;
   }
 
-  const value = String(field.value || "").trim();
   if (!value) {
     return true;
   }
@@ -315,10 +374,42 @@ function isAiAskableField(field) {
   return /^(select one|select|choose|none selected|no selection)$/i.test(value);
 }
 
+function aiFieldHaystack(field) {
+  const label = String(field.label || "").trim();
+  const includeSurroundingText = !label || isLowInformationText(label);
+  return [
+    label,
+    field.name,
+    field.id,
+    field.placeholder,
+    field.ariaLabel,
+    includeSurroundingText ? field.questionText : "",
+    includeSurroundingText ? field.surroundingText : "",
+    includeSurroundingText ? field.nearbyText : ""
+  ].map((item) => String(item || "").toLowerCase()).join(" ");
+}
+
+function isLowInformationText(value) {
+  return /^(yes|required yes|yes required|no|required no|no required|yes\s*no|no\s*yes|select one|required select one|select one required|required|true false|false true)$/i.test(String(value || "").trim());
+}
+
+function isAiPolicyQuestion(haystack) {
+  return [
+    /(18 years of age|at least 18|proof of age|minimum age)/,
+    /(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/,
+    /(sponsor|sponsorship|visa|h-?1b|f-?1|opt|cpt|tn|ead|work permit)/,
+    /(now|ever|previously|formerly|current|directly).*(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2)/,
+    /(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2).*(now|ever|previously|formerly|current|directly)/,
+    /(relatives?|family member|spouse|domestic partner).*(employed|work|working|military|armed forces|served|service)/,
+    /(military|armed forces|served|service|veteran)/,
+    /(interested in relocating|relocation|relocating)/
+  ].some((pattern) => pattern.test(haystack));
+}
+
 function isStructuredAutofillField(haystack) {
   return [
     /\bwork experience\b/,
-    /\bemployment\b/,
+    /\bemployment\s+(history|section|row)\b/,
     /\beducation\b/,
     /\bschool\b/,
     /\bdegree\b/,
@@ -330,11 +421,11 @@ function isStructuredAutofillField(haystack) {
     /\blinkedin\b/,
     /\bfacebook\b/,
     /\btwitter\b/,
-    /\bcompany\b/,
+    /\bcompany name\b/,
     /\bjob title\b/,
-    /\blocation\b/,
-    /\bfrom\b/,
-    /\bto\b/,
+    /\bwork location\b/,
+    /^from\b/,
+    /^to\b/,
     /\bcurrent value is\b/,
     /\bmm\s*\/?\s*yyyy\b/,
     /\brole description\b/,
@@ -535,6 +626,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
   const mappings = [];
   const unmappedFields = [];
   const manualTasks = [];
+  const debugFields = [];
 
   for (const { frame, response } of successful) {
     const result = response.result || {};
@@ -558,6 +650,14 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
       });
     }
 
+    for (const field of result.debugFields || []) {
+      debugFields.push({
+        ...field,
+        frameId: frame.frameId,
+        frameUrl: frame.url || ""
+      });
+    }
+
     for (const task of result.manualTasks || []) {
       manualTasks.push({
         ...task,
@@ -576,6 +676,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
       accessibleFrameCount: successful.length,
       mappings,
       unmappedFields,
+      debugFields,
       manualTasks,
       page: {
         url: tab.url || "",
