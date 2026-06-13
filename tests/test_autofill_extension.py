@@ -120,6 +120,20 @@ def test_backend_without_api_key_returns_empty_llm_mapping(monkeypatch, tmp_path
     assert "NVIDIA_API_KEY" in response.json["warning"]
 
 
+def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "call_nvidia_mapper", lambda fields, profile, page: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    client = server.app.test_client()
+    response = client.post("/map-fields", json={"fields": [{"index": 0}], "profile": {}, "page": {}})
+
+    assert response.status_code == 200
+    assert response.json["mappings"] == []
+    assert "Mapper request failed" in response.json["warning"]
+
+
 def test_backend_enforces_ai_answers_are_dropdown_options():
     fields = [
         {

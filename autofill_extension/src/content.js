@@ -137,7 +137,11 @@
     await enrichDynamicDropdownOptions(fields);
     state.lastPreviewFields = fields.map(({ elementRef, choiceRefs, ...field }) => field);
     const localMappings = fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean);
-    const repeatableMappings = mapRepeatableEmploymentFields(fields, profile);
+    const repeatableMappings = [
+      ...mapRepeatableEmploymentFields(fields, profile),
+      ...mapRepeatableEducationFields(fields, profile),
+      ...mapRepeatableWebsiteFields(fields, profile)
+    ];
     const backendMappings = settings?.autoMapAmbiguousFields === true
       ? await getBackendMappings(fields, profile)
       : [];
@@ -201,6 +205,8 @@
           failures.push({ index: mapping.index, label: field.label, error: error.message });
         }
       }
+
+      filled += await fillWorkdayExperienceDateFallback(profile);
     } finally {
       state.isApplying = false;
     }
@@ -835,7 +841,7 @@
       [/(\blast\b.*\bname\b|\bfamily\b.*\bname\b|lname|surname)/, profile.lastName],
       [/(email|e-mail)/, profile.email],
       [/(phone|mobile|cell|telephone)/, profile.phone],
-      [/(linkedin profile|linkedin url|linked in profile|linked in url)/, profile.linkedin],
+      [/(linkedin profile|linkedin url|linked in profile|linked in url|^linkedin$)/, profile.linkedin],
       [/(github profile|github url|git hub profile|git hub url)/, profile.github],
       [/(portfolio|personal website|website url|personal site)/, profile.portfolio],
       [/(school|university|college|institution)/, profile.school],
@@ -1296,12 +1302,20 @@
 
   async function prepareRepeatableSections(profile) {
     const experiences = normalizedWorkExperience(profile);
+    const education = normalizedEducation(profile);
+    const links = normalizedProfileLinks(profile);
 
-    if (experiences.length <= 1) {
-      return;
+    if (experiences.length > 1) {
+      await ensureEmploymentRows(experiences.length);
     }
 
-    await ensureEmploymentRows(experiences.length);
+    if (education.length) {
+      await ensureEducationRows(education.length);
+    }
+
+    if (links.length) {
+      await ensureWebsiteRows(links.length);
+    }
   }
 
   async function ensureEmploymentRows(targetCount) {
@@ -1335,10 +1349,61 @@
 
   function countEmploymentRows() {
     return Math.max(
-      countFieldsMatching(/\bcompany name\b/),
-      countFieldsMatching(/(^|\b)title\b/),
-      countFieldsMatching(/start date.*year/)
+      countFieldsMatching(/\bcompany\b|\bcompany name\b/),
+      countFieldsMatching(/(^|\b)title\b|job title/),
+      countFieldsMatching(/start date.*year|^from\b|\bfrom\b/)
     );
+  }
+
+  async function ensureEducationRows(targetCount) {
+    await ensureRowsForSection(targetCount, countEducationRows, () => findAddButtonForSection(/education|school|university/));
+  }
+
+  async function ensureWebsiteRows(targetCount) {
+    await ensureRowsForSection(targetCount, countWebsiteRows, () => findAddButtonForSection(/websites?|urls?|links?/));
+  }
+
+  async function ensureRowsForSection(targetCount, countRows, findButton) {
+    const maxClicks = Math.min(Math.max(targetCount - countRows(), 0), 12);
+
+    for (let index = 0; index < maxClicks; index += 1) {
+      const button = findButton();
+      if (!button) {
+        return;
+      }
+
+      button.click();
+      await sleep(250);
+
+      if (countRows() >= targetCount) {
+        return;
+      }
+    }
+  }
+
+  function findAddButtonForSection(sectionPattern) {
+    const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button']"));
+    return candidates.find((item) => {
+      const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
+      return /^(add|add another)$/.test(text) && sectionPattern.test(sectionTextAround(item));
+    });
+  }
+
+  function countEducationRows() {
+    return countFieldsMatchingInSection(/school|university/, isEducationField);
+  }
+
+  function countWebsiteRows() {
+    return countFieldsMatchingInSection(/\burl\b|website|link/, isWebsiteField);
+  }
+
+  function countFieldsMatchingInSection(pattern, predicate) {
+    return scanFieldsWithoutPreparation()
+      .filter((field) => {
+        const haystack = normalize([field.label, field.name, field.id, field.placeholder, field.surroundingText].join(" "));
+        return pattern.test(haystack) && predicate(field, haystack);
+      })
+      .length;
   }
 
   function countFieldsMatching(pattern) {
@@ -1445,6 +1510,74 @@
     return mappings;
   }
 
+  function mapRepeatableEducationFields(fields, profile) {
+    const education = normalizedEducation(profile);
+
+    if (!education.length) {
+      return [];
+    }
+
+    const buckets = {
+      school: [],
+      degree: [],
+      field: [],
+      startYear: [],
+      endYear: []
+    };
+
+    for (const field of fields) {
+      const primaryHaystack = normalize([field.label, field.name, field.id, field.placeholder].join(" "));
+      const haystack = normalize([field.label, field.name, field.id, field.placeholder, field.surroundingText].join(" "));
+
+      if (!isEducationField(field, haystack)) {
+        continue;
+      }
+
+      if (/school|university|institution/.test(primaryHaystack)) {
+        buckets.school.push(field);
+      } else if (/degree|qualification/.test(primaryHaystack)) {
+        buckets.degree.push(field);
+      } else if (/field of study|discipline|major|program/.test(primaryHaystack)) {
+        buckets.field.push(field);
+      } else if (/^from\b|start|begin/.test(primaryHaystack)) {
+        buckets.startYear.push(field);
+      } else if (/^to\b|actual or expected|expected|end|graduation/.test(primaryHaystack)) {
+        buckets.endYear.push(field);
+      }
+    }
+
+    const mappings = [];
+    education.forEach((item, index) => {
+      addRepeatableMapping(mappings, buckets.school[index], item.school);
+      addRepeatableMapping(mappings, buckets.degree[index], item.degree);
+      addRepeatableMapping(mappings, buckets.field[index], item.fieldOfStudy);
+      addRepeatableMapping(mappings, buckets.startYear[index], item.startYear);
+      addRepeatableMapping(mappings, buckets.endYear[index], item.endYear);
+    });
+
+    return mappings;
+  }
+
+  function mapRepeatableWebsiteFields(fields, profile) {
+    const links = normalizedProfileLinks(profile);
+
+    if (!links.length) {
+      return [];
+    }
+
+    const urlFields = fields.filter((field) => {
+      const haystack = normalize([field.label, field.name, field.id, field.placeholder, field.surroundingText].join(" "));
+      return isWebsiteField(field, haystack);
+    });
+
+    const mappings = [];
+    links.forEach((url, index) => {
+      addRepeatableMapping(mappings, urlFields[index], url);
+    });
+
+    return mappings;
+  }
+
   function addRepeatableMapping(mappings, field, value) {
     if (!field || !hasValue(value)) {
       return;
@@ -1475,6 +1608,25 @@
     );
   }
 
+  function isEducationField(field, haystack) {
+    if (/work experience|employment|company|job title|role description|resume|websites?|social network/.test(haystack)) {
+      return false;
+    }
+
+    return /(education|school|university|degree|field of study|discipline|major|qualification|actual or expected)/.test(
+      `${haystack} ${normalize(field.surroundingText)}`
+    );
+  }
+
+  function isWebsiteField(field, haystack) {
+    if (/social network|^linkedin$|facebook|twitter/.test(haystack)) {
+      return false;
+    }
+
+    return /(websites?|urls?|links?|\burl\b)/.test(`${haystack} ${normalize(field.surroundingText)}`)
+      && !/(linkedin profile|social network|^linkedin$)/.test(haystack);
+  }
+
   function normalizedWorkExperience(profile) {
     const raw = profile.workExperience || profile.resumeFacts?.workExperience || [];
     const parsedFromResumeLines = parseExperienceLines(profile.resumeFacts?.experience || []);
@@ -1487,6 +1639,140 @@
     }
 
     return parsedFromResumeLines;
+  }
+
+  function normalizedEducation(profile) {
+    const raw = Array.isArray(profile.education) ? profile.education : [];
+    const parsedResumeEducation = parseResumeEducation(profile);
+    const items = raw
+      .map((item) => mergeEducationEntry(normalizeEducationEntry(item, profile), parsedResumeEducation))
+      .filter((item) => hasValue(item.school) || hasValue(item.degree));
+
+    if (items.length) {
+      return items;
+    }
+
+    const resumeEducation = Array.isArray(profile.resumeFacts?.education) ? profile.resumeFacts.education : [];
+    const school = compactText(profile.school || resumeEducation[0] || "");
+    const fallback = normalizeEducationEntry({}, profile);
+    fallback.school = fallback.school || school;
+    const merged = mergeEducationEntry(fallback, parsedResumeEducation);
+
+    return hasValue(merged.school) || hasValue(merged.degree) ? [merged] : [];
+  }
+
+  function normalizeEducationEntry(entry, profile) {
+    const value = typeof entry === "string" ? { school: entry } : (entry || {});
+    const graduationYear = yearFromValue(
+      value.endYear
+      || value.graduationYear
+      || value.graduationDate
+      || profile.graduationYear
+      || profile.graduationDate
+    );
+
+    return {
+      school: compactText(value.school || value.university || value.institution || profile.school || ""),
+      degree: compactText(value.degree || value.qualification || profile.degree || ""),
+      fieldOfStudy: compactText(value.fieldOfStudy || value.field || value.discipline || value.major || profile.fieldOfStudy || profile.discipline || profile.major || ""),
+      startYear: yearFromValue(value.startYear || value.from || profile.educationStartYear || ""),
+      endYear: graduationYear
+    };
+  }
+
+  function mergeEducationEntry(entry, fallback) {
+    if (!fallback) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      school: entry.school || fallback.school || "",
+      degree: entry.degree || fallback.degree || "",
+      fieldOfStudy: entry.fieldOfStudy || fallback.fieldOfStudy || "",
+      startYear: entry.startYear || fallback.startYear || "",
+      endYear: entry.endYear || fallback.endYear || ""
+    };
+  }
+
+  function parseResumeEducation(profile) {
+    const lines = Array.isArray(profile.resumeFacts?.education) ? profile.resumeFacts.education : [];
+    const joined = lines.join(" ");
+    const degreeLine = lines.find((line) => /bachelor|master|phd|doctor|associate|diploma|certificate/i.test(line)) || "";
+    const schoolLine = lines.find((line) => /university|college|school/i.test(line)) || "";
+    const dateMatch = joined.match(/\b(19|20)\d{2}\b/g) || [];
+    const degreeMatch = degreeLine.match(/\b(Bachelor|Master|Doctor|Associate|PhD)[^,|]*/i);
+    const inMatch = degreeLine.match(/\bin\s+(.+?)(?:\s+[A-Z][A-Za-z .'-]+,\s*[A-Z]{2}|$)/i);
+    const parsedDegree = degreeMatch ? normalizeDegreeName(degreeMatch[0]) : "";
+
+    return {
+      school: compactText(profile.school || schoolLine.replace(/\s+(January|February|March|April|May|June|July|August|September|October|November|December)\b.*$/i, "")),
+      degree: compactText(profile.degree || parsedDegree),
+      fieldOfStudy: compactText(profile.fieldOfStudy || profile.major || profile.discipline || (inMatch ? inMatch[1].replace(/&/g, "and") : "")),
+      startYear: yearFromValue(dateMatch[0] || profile.educationStartYear || ""),
+      endYear: yearFromValue(dateMatch[1] || profile.graduationDate || profile.graduationYear || "")
+    };
+  }
+
+  function normalizeDegreeName(value) {
+    const text = normalize(value);
+
+    if (/bachelor/.test(text)) {
+      return "Bachelor's Degree";
+    }
+
+    if (/master/.test(text)) {
+      return "Master's Degree";
+    }
+
+    if (/doctor|phd/.test(text)) {
+      return "Doctorate";
+    }
+
+    if (/associate/.test(text)) {
+      return "Associate Degree";
+    }
+
+    return compactText(value);
+  }
+
+  function normalizedProfileLinks(profile) {
+    const links = [
+      profile.linkedin,
+      profile.portfolio,
+      profile.github
+    ];
+
+    const projectLinks = profile.resumeFacts?.projectLinks;
+    if (projectLinks && typeof projectLinks === "object") {
+      Object.values(projectLinks).forEach((item) => {
+        if (typeof item === "string") {
+          links.push(item);
+        } else if (item?.url) {
+          links.push(item.url);
+        }
+      });
+    }
+
+    const explicitLinks = profile.links || profile.websites || profile.urls;
+    if (Array.isArray(explicitLinks)) {
+      explicitLinks.forEach((item) => {
+        if (typeof item === "string") {
+          links.push(item);
+        } else if (item?.url) {
+          links.push(item.url);
+        }
+      });
+    }
+
+    return unique(links)
+      .filter((url) => /^https?:\/\//i.test(url))
+      .slice(0, 12);
+  }
+
+  function yearFromValue(value) {
+    const match = String(value || "").match(/\b(19|20)\d{2}\b/);
+    return match ? match[0] : "";
   }
 
   function normalizeExperienceEntry(entry) {
@@ -1607,6 +1893,351 @@
     return numericMonth && year ? `${numericMonth}/${year}` : "";
   }
 
+  async function fillWorkdayExperienceDateFallback(profile) {
+    const experiences = normalizedWorkExperience(profile);
+    if (!experiences.length || !/work experience/i.test(document.body?.innerText || "")) {
+      return 0;
+    }
+
+    const fromLabels = workdayDateLabelNodes("from");
+    const toLabels = workdayDateLabelNodes("to");
+    const rows = workdayExperienceRows();
+    let filled = 0;
+
+    filled += fillWorkdayExperienceDateInputsByOrder(experiences);
+
+    if (filled > 0) {
+      return filled;
+    }
+
+    if (fromLabels.length || toLabels.length) {
+      experiences.forEach((experience, index) => {
+        const startDate = experienceDateValue(experience, "start");
+        const endDate = experience.currentRole ? "" : experienceDateValue(experience, "end");
+
+        if (startDate && fromLabels[index]) {
+          filled += fillWorkdayDateFromLabel(fromLabels[index], startDate) ? 1 : 0;
+        }
+
+        if (endDate && toLabels[index]) {
+          filled += fillWorkdayDateFromLabel(toLabels[index], endDate) ? 1 : 0;
+        }
+      });
+
+      return filled;
+    }
+
+    rows.slice(0, experiences.length).forEach((row, index) => {
+      const experience = experiences[index];
+      const startDate = experienceDateValue(experience, "start");
+      const endDate = experience.currentRole ? "" : experienceDateValue(experience, "end");
+
+      if (startDate) {
+        filled += fillWorkdayDateInRow(row, "from", startDate) ? 1 : 0;
+      }
+
+      if (endDate) {
+        filled += fillWorkdayDateInRow(row, "to", endDate) ? 1 : 0;
+      }
+    });
+
+    return filled;
+  }
+
+  function fillWorkdayExperienceDateInputsByOrder(experiences) {
+    const controls = workdayExperienceDateInputs();
+    if (controls.length < 4) {
+      return 0;
+    }
+
+    let filled = 0;
+
+    experiences.forEach((experience, index) => {
+      const offset = index * 4;
+      const startMonth = monthNumber(experience.startMonth);
+      const startYear = experience.startYear;
+      const endMonth = experience.currentRole ? "" : monthNumber(experience.endMonth);
+      const endYear = experience.currentRole ? "" : experience.endYear;
+
+      if (startMonth && startYear) {
+        filled += fillDateControl(controls[offset], String(startMonth)) ? 1 : 0;
+        filled += fillDateControl(controls[offset + 1], String(startYear)) ? 1 : 0;
+      }
+
+      if (endMonth && endYear) {
+        filled += fillDateControl(controls[offset + 2], String(endMonth)) ? 1 : 0;
+        filled += fillDateControl(controls[offset + 3], String(endYear)) ? 1 : 0;
+      }
+    });
+
+    return filled;
+  }
+
+  function workdayExperienceDateInputs() {
+    const range = workdaySectionRange("work experience", "education");
+    const selector = [
+      "input[data-automation-id*='dateSectionMonth']",
+      "input[data-automation-id*='dateSectionYear']",
+      "input[aria-label*='Month' i]",
+      "input[aria-label*='Year' i]",
+      "input[placeholder='MM']",
+      "input[placeholder='YYYY']"
+    ].join(",");
+
+    return Array.from(document.querySelectorAll(selector))
+      .filter(isFillable)
+      .filter((element) => elementInRange(element, range))
+      .filter((element) => {
+        const haystack = normalize([
+          element.getAttribute("data-automation-id"),
+          element.getAttribute("aria-label"),
+          element.placeholder,
+          getLabelText(element),
+          getSurroundingText(element)
+        ].join(" "));
+
+        return /(month|year|mm|yyyy|date section)/.test(haystack)
+          && !/(education|school|degree|field of study|websites?|social network)/.test(haystack);
+      })
+      .sort((left, right) => documentOrder(left, right));
+  }
+
+  function workdaySectionRange(startText, endText) {
+    const start = firstVisibleTextElement(startText);
+    const end = Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
+      .filter(isVisibleElement)
+      .find((element) => (
+        normalize(compactText(element.innerText || element.textContent || "")) === normalize(endText)
+        && (!start || followsNode(start, element))
+      )) || null;
+
+    return { start, end };
+  }
+
+  function firstVisibleTextElement(text) {
+    return Array.from(document.querySelectorAll("h1, h2, h3, h4, div, span"))
+      .filter(isVisibleElement)
+      .find((element) => normalize(compactText(element.innerText || element.textContent || "")) === normalize(text)) || null;
+  }
+
+  function elementInRange(element, range) {
+    if (range.start && !followsNode(range.start, element)) {
+      return false;
+    }
+
+    if (range.end && !followsNode(element, range.end)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  function documentOrder(left, right) {
+    if (left === right) {
+      return 0;
+    }
+
+    return followsNode(left, right) ? -1 : 1;
+  }
+
+  function workdayDateLabelNodes(label) {
+    const pattern = label === "from" ? /^from\s*\*?$/i : /^to\s*\*?$/i;
+    return Array.from(document.querySelectorAll("label, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel'], div, span"))
+      .filter(isVisibleElement)
+      .filter((element) => pattern.test(compactText(element.innerText || element.textContent || "")))
+      .filter((element) => isLeafTextNode(element, pattern))
+      .filter((element) => /work experience/i.test(sectionTextForElement(element)))
+      .sort((left, right) => topOfElement(left) - topOfElement(right));
+  }
+
+  function isLeafTextNode(element, pattern) {
+    return !Array.from(element.children || []).some((child) => (
+      isVisibleElement(child)
+      && pattern.test(compactText(child.innerText || child.textContent || ""))
+    ));
+  }
+
+  function sectionTextForElement(element) {
+    return element.closest("[data-automation-id*='workExperience'], [data-automation-id*='experience'], section, fieldset, form, main, body")?.innerText || "";
+  }
+
+  function topOfElement(element) {
+    return element.getBoundingClientRect().top + window.scrollY;
+  }
+
+  function fillWorkdayDateFromLabel(labelNode, desiredDate) {
+    const container = closestDateContainer(labelNode, document.body);
+    const orderedControls = dateControlsAfterLabel(labelNode);
+    const controls = orderedControls.length
+      ? orderedControls
+      : dateControlsNear(container, container || document.body);
+
+    if (!controls.length) {
+      return false;
+    }
+
+    const [month, year] = desiredDate.split("/");
+
+    if (controls.length >= 2 && month && year) {
+      const changedMonth = fillDateControl(controls[0], month);
+      const changedYear = fillDateControl(controls[1], year);
+      return changedMonth || changedYear;
+    }
+
+    return fillDateControl(controls[0], desiredDate);
+  }
+
+  function dateControlsAfterLabel(labelNode) {
+    const allControls = Array.from(document.querySelectorAll("input:not([type='hidden']), [role='textbox'], [contenteditable='true']"))
+      .filter(isFillable)
+      .filter((element) => !/button|checkbox|radio|file/i.test(element.getAttribute("type") || ""));
+    const nextLabel = nextWorkdayDateLabel(labelNode);
+
+    return allControls
+      .filter((element) => followsNode(labelNode, element))
+      .filter((element) => !nextLabel || followsNode(element, nextLabel))
+      .filter((element) => {
+        const text = normalize([getLabelText(element), getSurroundingText(element), element.placeholder, element.getAttribute("aria-label")].join(" "));
+        return !/(company|job title|location|role description|school|degree|url|linkedin|facebook|twitter)/.test(text);
+      })
+      .slice(0, 2);
+  }
+
+  function nextWorkdayDateLabel(labelNode) {
+    return Array.from(document.querySelectorAll("label, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel'], div, span"))
+      .filter(isVisibleElement)
+      .filter((element) => element !== labelNode)
+      .filter((element) => /^(from|to)\s*\*?$/i.test(compactText(element.innerText || element.textContent || "")))
+      .filter((element) => followsNode(labelNode, element))[0] || null;
+  }
+
+  function followsNode(left, right) {
+    return Boolean(left.compareDocumentPosition(right) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }
+
+  function workdayExperienceRows() {
+    const headings = Array.from(document.querySelectorAll("h2, h3, h4, div, span"))
+      .filter(isVisibleElement)
+      .filter((element) => /^work experience\s+\d+$/i.test(compactText(element.innerText || element.textContent || "")));
+    const rows = [];
+
+    for (const heading of headings) {
+      const row = closestUsefulRow(heading);
+      if (row && !rows.includes(row)) {
+        rows.push(row);
+      }
+    }
+
+    if (rows.length) {
+      return rows;
+    }
+
+    return Array.from(document.querySelectorAll(".employment-row, [data-automation-id*='workExperience'], [data-automation-id*='experience']"))
+      .filter(isVisibleElement);
+  }
+
+  function closestUsefulRow(element) {
+    let current = element.parentElement;
+    let best = current;
+
+    for (let depth = 0; current && current !== document.body && depth < 8; depth += 1) {
+      const text = normalize(current.innerText || current.textContent || "");
+      const controlCount = current.querySelectorAll("input, textarea, [role='textbox'], [contenteditable='true']").length;
+
+      if (controlCount >= 4 && /job title|company|location|from|to|role description/.test(text)) {
+        best = current;
+        break;
+      }
+
+      current = current.parentElement;
+    }
+
+    return best;
+  }
+
+  function fillWorkdayDateInRow(row, label, desiredDate) {
+    const labelNode = findDateLabelInRow(row, label);
+    if (!labelNode) {
+      return false;
+    }
+
+    const container = closestDateContainer(labelNode, row);
+    const controls = dateControlsNear(container, row);
+    if (!controls.length) {
+      return false;
+    }
+
+    const [month, year] = desiredDate.split("/");
+
+    if (controls.length >= 2 && month && year) {
+      const changedMonth = fillDateControl(controls[0], month);
+      const changedYear = fillDateControl(controls[1], year);
+      return changedMonth || changedYear;
+    }
+
+    return fillDateControl(controls[0], desiredDate);
+  }
+
+  function findDateLabelInRow(row, label) {
+    const pattern = label === "from" ? /^from\b/i : /^to\b/i;
+    return Array.from(row.querySelectorAll("label, div, span"))
+      .filter(isVisibleElement)
+      .filter((element) => pattern.test(compactText(element.innerText || element.textContent || "")))
+      .sort((left, right) => (left.contains(right) ? 1 : right.contains(left) ? -1 : 0))[0] || null;
+  }
+
+  function closestDateContainer(labelNode, row) {
+    let current = labelNode;
+
+    for (let depth = 0; current && current !== row && depth < 5; depth += 1) {
+      const controls = current.querySelectorAll("input:not([type='hidden']), [role='textbox'], [contenteditable='true']");
+      if (controls.length) {
+        return current;
+      }
+
+      current = current.parentElement;
+    }
+
+    return labelNode.parentElement || row;
+  }
+
+  function dateControlsNear(container, row) {
+    const controls = Array.from(container.querySelectorAll("input:not([type='hidden']), [role='textbox'], [contenteditable='true']"))
+      .filter(isFillable)
+      .filter((element) => !/button|checkbox|radio|file/i.test(element.getAttribute("type") || ""));
+
+    if (controls.length) {
+      return controls;
+    }
+
+    const allControls = Array.from(row.querySelectorAll("input:not([type='hidden']), [role='textbox'], [contenteditable='true']"))
+      .filter(isFillable)
+      .filter((element) => !/button|checkbox|radio|file/i.test(element.getAttribute("type") || ""));
+    const rowText = normalize(container.innerText || container.textContent || "");
+    const dateLike = allControls.filter((element) => {
+      const text = normalize([getLabelText(element), getSurroundingText(element), element.placeholder].join(" "));
+      return /current value|mm yyyy|from|to|date/.test(text) || /from|to/.test(rowText);
+    });
+
+    return dateLike.slice(0, 2);
+  }
+
+  function fillDateControl(element, desiredValue) {
+    if (!element || valueMatches(getCurrentValue(element), desiredValue)) {
+      return false;
+    }
+
+    if (element.isContentEditable || element.getAttribute("role") === "textbox") {
+      setEditableText(element, desiredValue);
+    } else {
+      setNativeValue(element, String(desiredValue));
+    }
+
+    dispatchFormEvents(element);
+    confirmFilledElement(element);
+    return true;
+  }
+
   function normalizeDescription(value) {
     const lines = Array.isArray(value) ? value : String(value || "").split(/\n+/);
     return lines
@@ -1617,6 +2248,20 @@
 
   function employmentSectionText(element) {
     return normalize(element.closest("section, fieldset, form, div")?.innerText || "");
+  }
+
+  function sectionTextAround(element) {
+    let current = element;
+
+    for (let depth = 0; current && current !== document.body && depth < 7; depth += 1) {
+      const text = normalize(current.innerText || current.textContent || "");
+      if (text && !/^(add|add another)$/.test(text)) {
+        return text;
+      }
+      current = current.parentElement;
+    }
+
+    return "";
   }
 
   function signatureValue(profile) {
@@ -1791,8 +2436,15 @@
     }
 
     if (element.isContentEditable || role === "textbox") {
+      if (valueMatches(getCurrentValue(element), mapping.value)) {
+        return false;
+      }
       setEditableText(element, mapping.value);
       return true;
+    }
+
+    if (valueMatches(getCurrentValue(element), mapping.value)) {
+      return false;
     }
 
     setNativeValue(element, String(mapping.value));
@@ -1822,14 +2474,18 @@
           clickOption(choice);
         }
       } else if (choice.getAttribute("role") === "radio") {
-        clickOption(choice);
+        if (choice.getAttribute("aria-checked") !== "true") {
+          clickOption(choice);
+        }
       } else if (choice.type === "checkbox") {
         if (!choice.checked) {
           clickOption(choice);
         }
         choice.checked = true;
       } else if (choice.type === "radio") {
-        clickOption(choice);
+        if (!choice.checked) {
+          clickOption(choice);
+        }
         choice.checked = true;
       }
 
@@ -1908,6 +2564,10 @@
       return false;
     }
 
+    if (select.value === option.value) {
+      return false;
+    }
+
     select.value = option.value;
     dispatchFormEvents(select);
     return true;
@@ -1927,6 +2587,10 @@
     const target = match || (fallback ? candidates.find((radio) => radio.value === fallback.value) : null);
 
     if (!target) {
+      return false;
+    }
+
+    if (target.checked || target.getAttribute("aria-checked") === "true") {
       return false;
     }
 
@@ -2135,6 +2799,24 @@
 
     if (desired === "canada") {
       aliases.add("canada");
+    }
+
+    if (/\bbachelor/.test(desired)) {
+      [
+        "bachelor degree",
+        "bachelors degree",
+        "bachelor s degree",
+        "undergraduate degree"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (/\bmaster/.test(desired)) {
+      [
+        "master degree",
+        "masters degree",
+        "master s degree",
+        "graduate degree"
+      ].forEach((alias) => aliases.add(alias));
     }
 
     for (const alias of usStateAliases(desired)) {
@@ -2393,6 +3075,27 @@
 
   function hasValue(value) {
     return value !== undefined && value !== null && String(value).trim() !== "";
+  }
+
+  function valueMatches(current, desired) {
+    const currentText = String(current ?? "").trim();
+    const desiredText = String(desired ?? "").trim();
+
+    if (!desiredText) {
+      return !currentText;
+    }
+
+    if (currentText === desiredText) {
+      return true;
+    }
+
+    return normalizeDateValue(currentText) === normalizeDateValue(desiredText)
+      && normalizeDateValue(desiredText) !== "";
+  }
+
+  function normalizeDateValue(value) {
+    const match = String(value || "").trim().match(/^0?(\d{1,2})\s*\/\s*(\d{4})$/);
+    return match ? `${Number(match[1])}/${match[2]}` : "";
   }
 
   function firstMeaningfulLine(text) {

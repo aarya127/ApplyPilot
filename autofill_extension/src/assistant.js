@@ -294,12 +294,53 @@ function isAiAskableField(field) {
     return false;
   }
 
+  const haystack = [
+    field.label,
+    field.name,
+    field.id,
+    field.placeholder,
+    field.ariaLabel,
+    field.surroundingText
+  ].map((item) => String(item || "").toLowerCase()).join(" ");
+
+  if (isStructuredAutofillField(haystack)) {
+    return false;
+  }
+
   const value = String(field.value || "").trim();
   if (!value) {
     return true;
   }
 
   return /^(select one|select|choose|none selected|no selection)$/i.test(value);
+}
+
+function isStructuredAutofillField(haystack) {
+  return [
+    /\bwork experience\b/,
+    /\bemployment\b/,
+    /\beducation\b/,
+    /\bschool\b/,
+    /\bdegree\b/,
+    /\bfield of study\b/,
+    /\bresume\b/,
+    /\bcv\b/,
+    /\bwebsites?\b/,
+    /\bsocial network\b/,
+    /\blinkedin\b/,
+    /\bfacebook\b/,
+    /\btwitter\b/,
+    /\bcompany\b/,
+    /\bjob title\b/,
+    /\blocation\b/,
+    /\bfrom\b/,
+    /\bto\b/,
+    /\bcurrent value is\b/,
+    /\bmm\s*\/?\s*yyyy\b/,
+    /\brole description\b/,
+    /\bcertifications?\b/,
+    /\blanguages?\b/
+  ].some((pattern) => pattern.test(haystack));
 }
 
 function mergeAiMappingsIntoPreview(preview, mappings) {

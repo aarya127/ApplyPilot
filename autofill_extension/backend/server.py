@@ -82,7 +82,12 @@ def map_fields():
     if not api_key():
         return jsonify({"mappings": [], "warning": "NVIDIA_API_KEY is not configured"})
 
-    mappings = call_nvidia_mapper(fields, profile, page)
+    try:
+        mappings = call_nvidia_mapper(fields, profile, page)
+    except Exception as exc:
+        app.logger.exception("Mapper request failed")
+        return jsonify({"mappings": [], "warning": f"Mapper request failed: {exc}"}), 200
+
     return jsonify({"mappings": mappings})
 
 
@@ -485,7 +490,10 @@ def parse_json_object(content: str) -> dict[str, Any]:
         if start == -1 or end == -1 or end <= start:
             return {}
 
-        return json.loads(content[start:end + 1])
+        try:
+            return json.loads(content[start:end + 1])
+        except json.JSONDecodeError:
+            return {}
 
 
 def valid_mapping(mapping: Any) -> bool:
