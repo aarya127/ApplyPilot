@@ -89,6 +89,7 @@ def test_parse_resume_text_extracts_structured_work_experience():
     Example Labs September 2025 – December 2025
     Machine Learning Engineer Santa Barbara, CA
     Built useful systems
+    Improved useful systems by 20%
     Sample University January 2025 – April 2025
     Research Assistant Sample City, ST
     """
@@ -99,6 +100,8 @@ def test_parse_resume_text_extracts_structured_work_experience():
     assert work[0]["company"] == "Example Labs"
     assert work[0]["title"] == "Machine Learning Engineer"
     assert work[0]["location"] == "Santa Barbara, CA"
+    assert "Built useful systems" in work[0]["description"]
+    assert "Improved useful systems by 20%" in work[0]["description"]
     assert work[0]["startMonth"] == "September"
     assert work[0]["endYear"] == "2025"
     assert work[1]["company"] == "Sample University"
@@ -509,7 +512,17 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
                   <div data-automation-id="promptOption" data-automation-label="United States of America">United States of America</div>
                 </div>
               </div>
-              <label>Province or Territory<input name="province"></label>
+              <label>Address Line 1*<input name="addressLine1"></label>
+              <label>City*<input name="city"></label>
+              <div class="wd-field">
+                <label id="state-label">State*</label>
+                <button id="state" type="button" aria-labelledby="state-label" aria-haspopup="listbox" aria-controls="state-options">Select One</button>
+                <div id="state-options" role="listbox" hidden>
+                  <div data-automation-id="promptOption" data-automation-label="California">California</div>
+                  <div data-automation-id="promptOption" data-automation-label="Illinois">Illinois</div>
+                </div>
+              </div>
+              <label>Postal Code*<input name="postalCode"></label>
               <div class="wd-field">
                 <label id="phone-device-label">Phone Device Type*</label>
                 <button id="phone-device" type="button" aria-labelledby="phone-device-label" aria-haspopup="listbox" aria-controls="phone-device-options">Select One</button>
@@ -541,6 +554,13 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
                     button.textContent = option.getAttribute('data-automation-label');
                     button.setAttribute('data-selected', option.getAttribute('data-automation-label'));
                     list.hidden = true;
+                    if (button.id === 'country') {
+                      document.querySelector('[name="addressLine1"]').value = '';
+                      document.querySelector('[name="city"]').value = '';
+                      document.querySelector('[name="postalCode"]').value = '';
+                      document.querySelector('#state').textContent = 'Select One';
+                      document.querySelector('#state').removeAttribute('data-selected');
+                    }
                   });
                 });
               }
@@ -574,13 +594,19 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
         )
         assert preview["ok"] is True
         country_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country*")
-        province_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Province or Territory")
+        address_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Address Line 1*")
+        city_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "City*")
+        state_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "State*")
+        postal_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Postal Code*")
         phone_device_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Phone Device Type*")
         phone_code_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country Phone Code*")
         phone_extension_mapping = [mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Phone Extension"]
         unmapped_labels = [field["label"] for field in preview["result"]["unmappedFields"]]
         assert country_mapping["value"] == "United States of America"
-        assert province_mapping["value"] == "IL"
+        assert address_mapping["value"] == "456 Lake St"
+        assert city_mapping["value"] == "Chicago"
+        assert state_mapping["value"] == "Illinois"
+        assert postal_mapping["value"] == "60601"
         assert phone_device_mapping["value"] == "Mobile"
         assert phone_code_mapping["value"] == "Canada (+1)"
         assert phone_extension_mapping == []
@@ -598,7 +624,10 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
         assert fill_response["ok"] is True, fill_response
         assert not page.locator("[name='workedBefore'][value='No']").is_checked()
         assert page.locator("#country").get_attribute("data-selected") == "United States of America"
-        assert page.locator("[name='province']").input_value() == "IL"
+        assert page.locator("[name='addressLine1']").input_value() == "456 Lake St"
+        assert page.locator("[name='city']").input_value() == "Chicago"
+        assert page.locator("#state").get_attribute("data-selected") == "Illinois"
+        assert page.locator("[name='postalCode']").input_value() == "60601"
         assert page.locator("#phone-device").get_attribute("data-selected") == "Mobile"
         assert page.locator("#phone-code").get_attribute("data-selected") == "Canada (+1)"
         assert page.locator("[name='phoneExtension']").input_value() == ""
@@ -916,6 +945,8 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
             {
                 "company": "Example Labs",
                 "title": "Machine Learning Engineer",
+                "location": "Toronto, ON",
+                "description": "Built production ML services\nImproved model quality",
                 "startMonth": "September",
                 "startYear": "2025",
                 "endMonth": "December",
@@ -925,6 +956,8 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
             {
                 "company": "Research Group",
                 "title": "Research Assistant",
+                "location": "Waterloo, ON",
+                "description": "Published efficient transformer research",
                 "startMonth": "January",
                 "startYear": "2025",
                 "endMonth": "April",
@@ -963,13 +996,13 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
               <section id="employment">
                 <h2>Employment</h2>
                 <div class="employment-row">
-                  <label>Company name<input name="company[]"></label>
-                  <label>Title<input name="title[]"></label>
-                  <label>Start date month<select name="startMonth[]"><option></option><option>January</option><option>April</option><option>September</option></select></label>
-                  <label>Start date year<input name="startYear[]"></label>
-                  <label>End date month<select name="endMonth[]"><option></option><option>April</option><option>December</option></select></label>
-                  <label>End date year<input name="endYear[]"></label>
-                  <label>Current role<input type="checkbox" name="current[]"></label>
+                  <label>Company<input name="company[]"></label>
+                  <label>Job Title<input name="title[]"></label>
+                  <label>Location<input name="location[]"></label>
+                  <label>From<input name="from[]"></label>
+                  <label>To<input name="to[]"></label>
+                  <label>Role Description<textarea name="description[]"></textarea></label>
+                  <label>I currently work here<input type="checkbox" name="current[]"></label>
                 </div>
                 <button id="addEmployment" type="button">Add another</button>
               </section>
@@ -1028,9 +1061,14 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         assert page.locator("[name='jobTitle']").input_value() == "Staff Data Engineer"
         assert page.locator("[name='company[]']").nth(0).input_value() == "Example Labs"
         assert page.locator("[name='title[]']").nth(0).input_value() == "Machine Learning Engineer"
-        assert page.locator("[name='startMonth[]']").nth(0).input_value() == "September"
-        assert page.locator("[name='endYear[]']").nth(1).input_value() == "2025"
+        assert page.locator("[name='location[]']").nth(0).input_value() == "Toronto, ON"
+        assert page.locator("[name='from[]']").nth(0).input_value() == "9/2025"
+        assert page.locator("[name='to[]']").nth(0).input_value() == "12/2025"
+        assert page.locator("[name='description[]']").nth(0).input_value() == "Built production ML services\nImproved model quality"
         assert page.locator("[name='company[]']").nth(1).input_value() == "Research Group"
+        assert page.locator("[name='location[]']").nth(1).input_value() == "Waterloo, ON"
+        assert page.locator("[name='to[]']").nth(1).input_value() == "4/2025"
+        assert page.locator("[name='description[]']").nth(1).input_value() == "Published efficient transformer research"
 
         browser.close()
 

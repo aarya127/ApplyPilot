@@ -382,8 +382,10 @@ def option_aliases(value: str) -> set[str]:
     if value == "yes":
         aliases.update({"yes i am", "yes i do", "yes i have"})
 
-    if value in {"united states", "united states of america", "usa", "u s a", "us"}:
-        aliases.update({"united states", "united states of america", "usa", "u s a", "us"})
+    if value in {"united states", "united states of america", "usa", "u s", "u s a", "us"}:
+        aliases.update({"united states", "united states of america", "usa", "u s", "u s a", "us"})
+
+    aliases.update(us_state_aliases(value))
 
     if value == "asian":
         aliases.update({"asian not hispanic or latino", "asian not hispanic"})
@@ -394,12 +396,77 @@ def option_aliases(value: str) -> set[str]:
     return aliases
 
 
+def us_state_aliases(value: str) -> set[str]:
+    states = {
+        "al": "alabama",
+        "ak": "alaska",
+        "az": "arizona",
+        "ar": "arkansas",
+        "ca": "california",
+        "co": "colorado",
+        "ct": "connecticut",
+        "de": "delaware",
+        "fl": "florida",
+        "ga": "georgia",
+        "hi": "hawaii",
+        "id": "idaho",
+        "il": "illinois",
+        "in": "indiana",
+        "ia": "iowa",
+        "ks": "kansas",
+        "ky": "kentucky",
+        "la": "louisiana",
+        "me": "maine",
+        "md": "maryland",
+        "ma": "massachusetts",
+        "mi": "michigan",
+        "mn": "minnesota",
+        "ms": "mississippi",
+        "mo": "missouri",
+        "mt": "montana",
+        "ne": "nebraska",
+        "nv": "nevada",
+        "nh": "new hampshire",
+        "nj": "new jersey",
+        "nm": "new mexico",
+        "ny": "new york",
+        "nc": "north carolina",
+        "nd": "north dakota",
+        "oh": "ohio",
+        "ok": "oklahoma",
+        "or": "oregon",
+        "pa": "pennsylvania",
+        "ri": "rhode island",
+        "sc": "south carolina",
+        "sd": "south dakota",
+        "tn": "tennessee",
+        "tx": "texas",
+        "ut": "utah",
+        "vt": "vermont",
+        "va": "virginia",
+        "wa": "washington",
+        "wv": "west virginia",
+        "wi": "wisconsin",
+        "wy": "wyoming",
+        "dc": "district of columbia",
+    }
+
+    if value in states:
+        return {states[value]}
+
+    for abbreviation, name in states.items():
+        if value == name:
+            return {abbreviation}
+
+    return set()
+
+
 def is_united_states_desired(value: str) -> bool:
-    return value in {"united states", "united states of america", "usa", "u s a", "us"}
+    return value in {"united states", "united states of america", "usa", "u s", "u s a", "us"}
 
 
 def is_united_states_option(value: str) -> bool:
-    return value in {"united states", "united states of america", "usa", "u s a", "us"}
+    return value in {"united states", "united states of america", "usa", "u s", "u s a", "us"}
 
 
 def normalize_for_option(value: Any) -> str:

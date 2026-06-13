@@ -168,6 +168,20 @@
     const failures = [];
 
     try {
+      if (await fillWorkdayTargetCountry(profile, settings || {})) {
+        filled += 1;
+        await sleep(700);
+        fields.length = 0;
+        fields.push(...scanFields());
+        await enrichDynamicDropdownOptions(fields);
+        hydrateFieldsFromPreview(fields);
+        mappings = mergeMappings(
+          mappings,
+          fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean),
+          fields
+        );
+      }
+
       for (const mapping of mappings) {
         const field = fields.find((item) => item.index === mapping.index);
         const element = field?.elementRef?.deref?.();
@@ -186,10 +200,6 @@
         } catch (error) {
           failures.push({ index: mapping.index, label: field.label, error: error.message });
         }
-      }
-
-      if (await fillWorkdayTargetCountry(profile, settings || {})) {
-        filled += 1;
       }
     } finally {
       state.isApplying = false;
@@ -1115,6 +1125,10 @@
       return null;
     }
 
+    if (isEmploymentField(field, haystack)) {
+      return null;
+    }
+
     if (/(work remotely|remote location|plan to work remote)/.test(haystack)) {
       return null;
     }
@@ -1178,6 +1192,10 @@
   }
 
   function mapAddressField(field, profile, settings, haystack) {
+    if (isEmploymentField(field, haystack)) {
+      return null;
+    }
+
     const address = selectAddress(profile, settings, haystack);
 
     if (!address) {
@@ -1366,11 +1384,15 @@
     const buckets = {
       company: [],
       title: [],
+      location: [],
+      startDate: [],
+      endDate: [],
       startMonth: [],
       startYear: [],
       endMonth: [],
       endYear: [],
-      currentRole: []
+      currentRole: [],
+      description: []
     };
 
     for (const field of fields) {
@@ -1380,10 +1402,16 @@
         continue;
       }
 
-      if (/\bcompany name\b|\bemployer\b/.test(haystack)) {
+      if (/^company\b|\bcompany name\b|\bemployer\b/.test(haystack) && !/website|url/.test(haystack)) {
         buckets.company.push(field);
       } else if (/(^|\b)title\b|job title/.test(haystack) || (/\bposition\b/.test(haystack) && /employment|experience|work history/.test(normalize(field.surroundingText)))) {
         buckets.title.push(field);
+      } else if (/\blocation\b/.test(haystack)) {
+        buckets.location.push(field);
+      } else if (/^from\b|from date|date from/.test(haystack)) {
+        buckets.startDate.push(field);
+      } else if (/^to\b|to date|date to/.test(haystack)) {
+        buckets.endDate.push(field);
       } else if (/start date.*month|start month/.test(haystack)) {
         buckets.startMonth.push(field);
       } else if (/start date.*year|start year/.test(haystack)) {
@@ -1394,6 +1422,8 @@
         buckets.endYear.push(field);
       } else if (/current role|currently work|current position/.test(haystack)) {
         buckets.currentRole.push(field);
+      } else if (/role description|description|responsibilities|achievements/.test(haystack)) {
+        buckets.description.push(field);
       }
     }
 
@@ -1401,11 +1431,15 @@
     experiences.forEach((experience, index) => {
       addRepeatableMapping(mappings, buckets.company[index], experience.company);
       addRepeatableMapping(mappings, buckets.title[index], experience.title);
+      addRepeatableMapping(mappings, buckets.location[index], experience.location);
+      addRepeatableMapping(mappings, buckets.startDate[index], experienceDateValue(experience, "start"));
+      addRepeatableMapping(mappings, buckets.endDate[index], experience.currentRole ? "" : experienceDateValue(experience, "end"));
       addRepeatableMapping(mappings, buckets.startMonth[index], experience.startMonth);
       addRepeatableMapping(mappings, buckets.startYear[index], experience.startYear);
       addRepeatableMapping(mappings, buckets.endMonth[index], experience.currentRole ? "" : experience.endMonth);
       addRepeatableMapping(mappings, buckets.endYear[index], experience.currentRole ? "" : experience.endYear);
       addRepeatableMapping(mappings, buckets.currentRole[index], experience.currentRole ? true : false);
+      addRepeatableMapping(mappings, buckets.description[index], experience.description);
     });
 
     return mappings;
@@ -1436,32 +1470,55 @@
       return false;
     }
 
-    return /(employment|experience|work history|company name|employer|\btitle\b|job title|current role|start date|end date|position)/.test(
+    return /(employment|experience|work history|\bcompany\b|company name|employer|\btitle\b|job title|current role|currently work|start date|end date|position|\blocation\b|\bfrom\b|\bto\b|role description|responsibilities|achievements)/.test(
       `${haystack} ${normalize(field.surroundingText)}`
     );
   }
 
   function normalizedWorkExperience(profile) {
     const raw = profile.workExperience || profile.resumeFacts?.workExperience || [];
+    const parsedFromResumeLines = parseExperienceLines(profile.resumeFacts?.experience || []);
+
     if (Array.isArray(raw) && raw.some((item) => item && typeof item === "object")) {
       return raw
         .filter((item) => item && typeof item === "object")
-        .map(normalizeExperienceEntry)
+        .map((item, index) => mergeExperienceEntry(normalizeExperienceEntry(item), parsedFromResumeLines[index]))
         .filter((item) => hasValue(item.company) || hasValue(item.title));
     }
 
-    return parseExperienceLines(profile.resumeFacts?.experience || []);
+    return parsedFromResumeLines;
   }
 
   function normalizeExperienceEntry(entry) {
     return {
       company: compactText(entry.company || entry.employer || entry.organization || ""),
       title: compactText(entry.title || entry.role || entry.position || ""),
+      location: compactText(entry.location || entry.city || ""),
+      description: normalizeDescription(entry.description || entry.summary || entry.responsibilities || entry.bullets || ""),
       startMonth: compactText(entry.startMonth || entry.start_month || ""),
       startYear: compactText(entry.startYear || entry.start_year || ""),
       endMonth: compactText(entry.endMonth || entry.end_month || ""),
       endYear: compactText(entry.endYear || entry.end_year || ""),
       currentRole: entry.currentRole === true || entry.current === true || /present|current/i.test(String(entry.endYear || entry.end || ""))
+    };
+  }
+
+  function mergeExperienceEntry(entry, fallback = {}) {
+    if (!fallback) {
+      return entry;
+    }
+
+    return {
+      ...entry,
+      company: entry.company || fallback.company || "",
+      title: entry.title || fallback.title || "",
+      location: entry.location || fallback.location || "",
+      description: entry.description || fallback.description || "",
+      startMonth: entry.startMonth || fallback.startMonth || "",
+      startYear: entry.startYear || fallback.startYear || "",
+      endMonth: entry.endMonth || fallback.endMonth || "",
+      endYear: entry.endYear || fallback.endYear || "",
+      currentRole: entry.currentRole || fallback.currentRole || false
     };
   }
 
@@ -1482,10 +1539,22 @@
         return;
       }
 
-      const { title } = splitTitleLocation(lines[index + 1] || "");
+      const { title, location: experienceLocation } = splitTitleLocation(lines[index + 1] || "");
+      const descriptionLines = [];
+
+      for (let cursor = index + 2; cursor < lines.length; cursor += 1) {
+        if (datePattern.test(String(lines[cursor] || ""))) {
+          break;
+        }
+
+        descriptionLines.push(lines[cursor]);
+      }
+
       entries.push({
         company: compactText(match[1]).replace(/\bW aterloo\b/g, "Waterloo"),
         title,
+        location: experienceLocation,
+        description: normalizeDescription(descriptionLines),
         startMonth: canonicalMonth(match[2]),
         startYear: match[3],
         endMonth: canonicalMonth(match[4] || ""),
@@ -1509,6 +1578,41 @@
 
   function canonicalMonth(value) {
     return value ? value.slice(0, 1).toUpperCase() + value.slice(1).toLowerCase() : "";
+  }
+
+  function monthNumber(value) {
+    const months = {
+      january: 1,
+      february: 2,
+      march: 3,
+      april: 4,
+      may: 5,
+      june: 6,
+      july: 7,
+      august: 8,
+      september: 9,
+      october: 10,
+      november: 11,
+      december: 12
+    };
+
+    return months[normalize(value)] || "";
+  }
+
+  function experienceDateValue(experience, side) {
+    const month = side === "start" ? experience.startMonth : experience.endMonth;
+    const year = side === "start" ? experience.startYear : experience.endYear;
+    const numericMonth = monthNumber(month);
+
+    return numericMonth && year ? `${numericMonth}/${year}` : "";
+  }
+
+  function normalizeDescription(value) {
+    const lines = Array.isArray(value) ? value : String(value || "").split(/\n+/);
+    return lines
+      .map((line) => compactText(line))
+      .filter(Boolean)
+      .join("\n");
   }
 
   function employmentSectionText(element) {
@@ -1715,17 +1819,17 @@
       if (choice.getAttribute("role") === "checkbox") {
         const current = choice.getAttribute("aria-checked") === "true";
         if (!current) {
-          choice.click();
+          clickOption(choice);
         }
       } else if (choice.getAttribute("role") === "radio") {
-        choice.click();
+        clickOption(choice);
       } else if (choice.type === "checkbox") {
         if (!choice.checked) {
-          choice.click();
+          clickOption(choice);
         }
         choice.checked = true;
       } else if (choice.type === "radio") {
-        choice.click();
+        clickOption(choice);
         choice.checked = true;
       }
 
@@ -1826,7 +1930,7 @@
       return false;
     }
 
-    target.click();
+    clickOption(target);
     target.checked = true;
     dispatchFormEvents(target);
     return true;
@@ -1924,6 +2028,7 @@
       "united states",
       "united states of america",
       "usa",
+      "u s",
       "u s a",
       "us"
     ].includes(value);
@@ -1934,6 +2039,7 @@
       "united states",
       "united states of america",
       "usa",
+      "u s",
       "u s a",
       "us"
     ].includes(value);
@@ -2031,6 +2137,10 @@
       aliases.add("canada");
     }
 
+    for (const alias of usStateAliases(desired)) {
+      aliases.add(alias);
+    }
+
     if (desired === "asian") {
       [
         "asian not hispanic or latino",
@@ -2054,6 +2164,69 @@
     }
 
     return Array.from(aliases);
+  }
+
+  function usStateAliases(value) {
+    const states = {
+      al: "alabama",
+      ak: "alaska",
+      az: "arizona",
+      ar: "arkansas",
+      ca: "california",
+      co: "colorado",
+      ct: "connecticut",
+      de: "delaware",
+      fl: "florida",
+      ga: "georgia",
+      hi: "hawaii",
+      id: "idaho",
+      il: "illinois",
+      in: "indiana",
+      ia: "iowa",
+      ks: "kansas",
+      ky: "kentucky",
+      la: "louisiana",
+      me: "maine",
+      md: "maryland",
+      ma: "massachusetts",
+      mi: "michigan",
+      mn: "minnesota",
+      ms: "mississippi",
+      mo: "missouri",
+      mt: "montana",
+      ne: "nebraska",
+      nv: "nevada",
+      nh: "new hampshire",
+      nj: "new jersey",
+      nm: "new mexico",
+      ny: "new york",
+      nc: "north carolina",
+      nd: "north dakota",
+      oh: "ohio",
+      ok: "oklahoma",
+      or: "oregon",
+      pa: "pennsylvania",
+      ri: "rhode island",
+      sc: "south carolina",
+      sd: "south dakota",
+      tn: "tennessee",
+      tx: "texas",
+      ut: "utah",
+      vt: "vermont",
+      va: "virginia",
+      wa: "washington",
+      wv: "west virginia",
+      wi: "wisconsin",
+      wy: "wyoming",
+      dc: "district of columbia"
+    };
+
+    if (states[value]) {
+      return [states[value]];
+    }
+
+    const abbreviation = Object.entries(states).find(([, name]) => name === value)?.[0];
+    return abbreviation ? [abbreviation] : [];
   }
 
   function fillCheckbox(element, desiredValue) {

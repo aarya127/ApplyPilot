@@ -157,11 +157,19 @@ def parse_work_experience(lines: list[str]) -> list[dict[str, Any]]:
 
         title_line = lines[index + 1] if index + 1 < len(lines) else ""
         title, location = split_title_location(title_line)
+        description_lines = []
+
+        for cursor in range(index + 2, len(lines)):
+            if date_pattern.match(lines[cursor]):
+                break
+            description_lines.append(lines[cursor])
+
         company = clean_company(match.group("company"))
         entry = {
             "company": company,
             "title": title,
             "location": location,
+            "description": "\n".join(description_lines).strip(),
             "startMonth": canonical_month(match.group("start_month")),
             "startYear": match.group("start_year"),
             "endMonth": canonical_month(match.group("end_month") or ""),

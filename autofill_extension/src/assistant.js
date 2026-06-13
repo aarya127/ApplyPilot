@@ -192,13 +192,17 @@ async function saveNewAnswersFromReview() {
 }
 
 async function askAiForMissingAnswers() {
-  if (!lastPreview) {
-    await previewCurrentPage();
+  const freshPreview = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
+
+  if (!freshPreview?.ok) {
+    showError(freshPreview?.error || "I could not refresh the page before asking AI.");
+    return;
   }
 
-  const missingFields = (lastPreview?.unmappedFields || [])
-    .filter((field) => !field.needsManualUpload)
-    .filter((field) => field.answerKey);
+  lastPreview = freshPreview.result;
+  renderReview(lastPreview);
+
+  const missingFields = (lastPreview?.unmappedFields || []).filter(isAiAskableField);
 
   if (!missingFields.length) {
     addMessage("agent", "I do not see any unanswered fields for AI to handle.");
@@ -234,6 +238,7 @@ async function askAiForMissingAnswers() {
 
   const mappings = response.payload?.mappings || [];
   const answers = {};
+  const aiMappings = [];
 
   for (const mapping of mappings) {
     const field = fieldsForModel.find((item) => item.index === mapping.index);
@@ -241,6 +246,16 @@ async function askAiForMissingAnswers() {
 
     if (field?.answerKey && value) {
       answers[field.answerKey] = value;
+      aiMappings.push({
+        index: field.originalIndex,
+        label: field.label,
+        value,
+        source: mapping.source || "llm",
+        confidence: Number(mapping.confidence || 0.8),
+        frameId: field.frameId,
+        frameUrl: field.frameUrl || "",
+        reviewId: `${Number.isInteger(field.frameId) ? field.frameId : 0}:${field.originalIndex}`
+      });
     }
   }
 
@@ -253,8 +268,62 @@ async function askAiForMissingAnswers() {
   profile.answers = { ...(profile.answers || {}), ...answers };
   await chrome.storage.local.set({ candidateProfile: profile });
 
-  addMessage("agent", `Saved ${Object.keys(answers).length} AI answer(s). Previewing again so you can review before filling.`);
-  await previewCurrentPage();
+  lastPreview = mergeAiMappingsIntoPreview(lastPreview, aiMappings);
+  renderReview(lastPreview);
+  const fillResponse = await sendToActiveTab({
+    type: "APPLY_AUTOFILL_MAPPINGS",
+    mappings: aiMappings
+  });
+
+  if (fillResponse?.ok) {
+    lastFillResult = fillResponse.result;
+    trackButton.disabled = false;
+    addMessage("agent", `Added and filled ${fillResponse.result.filled} AI answer(s). Please review them before continuing.`);
+  } else {
+    addMessage("agent", `Added ${aiMappings.length} AI answer(s) to the review list, but I could not fill them automatically. Keep them checked and click Fill selected.`);
+  }
+}
+
+function isAiAskableField(field) {
+  if (!field?.answerKey || field.needsManualUpload) {
+    return false;
+  }
+
+  const label = String(field.label || "").trim().toLowerCase();
+  if (!label || /^(english|settings|phone extension)$/i.test(label)) {
+    return false;
+  }
+
+  const value = String(field.value || "").trim();
+  if (!value) {
+    return true;
+  }
+
+  return /^(select one|select|choose|none selected|no selection)$/i.test(value);
+}
+
+function mergeAiMappingsIntoPreview(preview, mappings) {
+  if (!preview || !mappings.length) {
+    return preview;
+  }
+
+  const mappingKey = (mapping) => `${Number.isInteger(mapping.frameId) ? mapping.frameId : 0}:${mapping.index}`;
+  const answeredKeys = new Set(mappings.map(mappingKey));
+  const existing = new Map((preview.mappings || []).map((mapping) => [mappingKey(mapping), mapping]));
+
+  for (const mapping of mappings) {
+    existing.set(mappingKey(mapping), mapping);
+  }
+
+  return {
+    ...preview,
+    mapped: existing.size,
+    mappings: Array.from(existing.values()),
+    unmappedFields: (preview.unmappedFields || []).filter((field) => {
+      const key = `${Number.isInteger(field.frameId) ? field.frameId : 0}:${field.index}`;
+      return !answeredKeys.has(key);
+    })
+  };
 }
 
 async function trackApplication() {
