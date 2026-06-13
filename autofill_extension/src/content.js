@@ -207,6 +207,7 @@
       }
 
       filled += await fillWorkdayExperienceDateFallback(profile);
+      filled += await fillWorkdayEducationDropdownFallback(profile);
     } finally {
       state.isApplying = false;
     }
@@ -786,6 +787,11 @@
       return workQuestionMapping;
     }
 
+    const commonQuestionMapping = mapCommonAtsQuestion(field, profile, haystack);
+    if (commonQuestionMapping) {
+      return commonQuestionMapping;
+    }
+
     if (/(may we contact|contact).*(current employer)/.test(haystack)) {
       return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.9);
     }
@@ -897,7 +903,7 @@
     if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
       return buildMapping(
         field,
-        profile.workAuthorization || profile.answers?.workAuthorization || "Yes",
+        workAuthorizationAnswer(field, profile),
         "rule",
         0.88
       );
@@ -1057,7 +1063,7 @@
     if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
       return buildMapping(
         field,
-        profile.workAuthorization || profile.answers?.workAuthorization || "Yes",
+        workAuthorizationAnswer(field, profile),
         "rule",
         0.9
       );
@@ -1071,6 +1077,26 @@
     return null;
   }
 
+  function workAuthorizationAnswer(field, profile) {
+    const explicit = profile.workAuthorization || profile.answers?.workAuthorization;
+    const options = field.options || [];
+    const preferredOption = options.find((option) => {
+      const text = normalize([option.label, option.value].join(" "));
+      return /authorized.*work.*(united states|u s|usa)/.test(text)
+        && /(any employer|for any|without sponsorship|do not require sponsorship|not require sponsorship)/.test(text);
+    }) || options.find((option) => {
+      const text = normalize([option.label, option.value].join(" "));
+      return /i am authorized|legally authorized|authorized.*work/.test(text)
+        && !/(not authorized|not eligible|require sponsorship|need sponsorship)/.test(text);
+    });
+
+    if (preferredOption) {
+      return preferredOption.label || preferredOption.value;
+    }
+
+    return explicit || "Yes";
+  }
+
   function mapKnownCustomQuestion(field, profile, haystack) {
     if (/(ai projects?|machine learning projects?|built).*?(spare time|outside of work|personal)/.test(haystack)) {
       const saved = profile.answers?.aiProjectsOutsideWork;
@@ -1081,6 +1107,60 @@
     }
 
     return null;
+  }
+
+  function mapCommonAtsQuestion(field, profile, haystack) {
+    if (/(18 years of age|at least 18|proof of age|minimum age)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.meetsMinimumAge || "Yes", "rule", 0.88);
+    }
+
+    if (/(served|service).*(u\.?s\.?|united states).*(military|armed forces)|military service/.test(haystack)) {
+      return buildMapping(field, profile.answers?.militaryService || profile.militaryService || "No", "rule", 0.88);
+    }
+
+    if (/(spouse|domestic partner).*(served|service).*(military|armed forces)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.spouseMilitaryService || "No", "rule", 0.88);
+    }
+
+    if (/(relatives?|family member).*(employed|work).*(t mobile|subsidiar|affiliate)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.relativesAtCompany || "No", "rule", 0.88);
+    }
+
+    if (/(authorized dealer).*(t mobile|metro)|metro by t mobile/.test(haystack)) {
+      return buildMapping(field, profile.answers?.workedForAuthorizedDealer || "No", "rule", 0.88);
+    }
+
+    if (/(contractor).*(t mobile)|working as a contractor/.test(haystack)) {
+      return buildMapping(field, profile.answers?.workedAsContractorForCompany || "No", "rule", 0.88);
+    }
+
+    if (/(deutsche telekom|softbank|directly employed|received a paycheck|w-2)/.test(haystack)) {
+      return buildMapping(field, previousCompanyAnswer(profile, haystack), "rule", 0.88);
+    }
+
+    if (/(interested in relocating|relocation|relocating)/.test(haystack)) {
+      return buildMapping(field, relocationAnswer(field, profile), "rule", 0.86);
+    }
+
+    return null;
+  }
+
+  function previousCompanyAnswer(profile, haystack) {
+    const companies = normalizedWorkExperience(profile)
+      .map((item) => normalize(item.company))
+      .filter(Boolean);
+
+    return companies.some((company) => company && haystack.includes(company)) ? "Yes" : "No";
+  }
+
+  function relocationAnswer(field, profile) {
+    const explicit = profile.relocation || profile.answers?.relocation;
+    const options = field.options || [];
+    const preferred = options.find((option) => /anywhere/i.test(option.label || option.value || ""))
+      || options.find((option) => /nationwide/i.test(option.label || option.value || ""))
+      || (hasValue(explicit) ? options.find((option) => optionMatches(option.label, option.value, explicit)) : null);
+
+    return preferred ? (preferred.label || preferred.value) : (explicit || "Anywhere");
   }
 
   function mapCompanyQuestion(field, profile, haystack) {
@@ -1385,7 +1465,7 @@
     const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button']"));
     return candidates.find((item) => {
       const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
-      return /^(add|add another)$/.test(text) && sectionPattern.test(sectionTextAround(item));
+      return /^(add|add another)$/.test(text) && sectionPattern.test(nearestSectionHeadingText(item));
     });
   }
 
@@ -1704,11 +1784,12 @@
     const degreeMatch = degreeLine.match(/\b(Bachelor|Master|Doctor|Associate|PhD)[^,|]*/i);
     const inMatch = degreeLine.match(/\bin\s+(.+?)(?:\s+[A-Z][A-Za-z .'-]+,\s*[A-Z]{2}|$)/i);
     const parsedDegree = degreeMatch ? normalizeDegreeName(degreeMatch[0]) : "";
+    const parsedField = normalizeFieldOfStudy(inMatch ? inMatch[1] : "");
 
     return {
       school: compactText(profile.school || schoolLine.replace(/\s+(January|February|March|April|May|June|July|August|September|October|November|December)\b.*$/i, "")),
       degree: compactText(profile.degree || parsedDegree),
-      fieldOfStudy: compactText(profile.fieldOfStudy || profile.major || profile.discipline || (inMatch ? inMatch[1].replace(/&/g, "and") : "")),
+      fieldOfStudy: compactText(profile.fieldOfStudy || profile.major || profile.discipline || parsedField),
       startYear: yearFromValue(dateMatch[0] || profile.educationStartYear || ""),
       endYear: yearFromValue(dateMatch[1] || profile.graduationDate || profile.graduationYear || "")
     };
@@ -1718,7 +1799,7 @@
     const text = normalize(value);
 
     if (/bachelor/.test(text)) {
-      return "Bachelor's Degree";
+      return /science|computer science|statistics/.test(text) ? "Bachelor of Science" : "Bachelor's Degree";
     }
 
     if (/master/.test(text)) {
@@ -1734,6 +1815,20 @@
     }
 
     return compactText(value);
+  }
+
+  function normalizeFieldOfStudy(value) {
+    const text = normalize(value);
+
+    if (/computer science/.test(text)) {
+      return "Computer Science";
+    }
+
+    if (/statistics/.test(text)) {
+      return "Statistics";
+    }
+
+    return compactText(String(value || "").replace(/&/g, "and"));
   }
 
   function normalizedProfileLinks(profile) {
@@ -2264,6 +2359,19 @@
     return "";
   }
 
+  function nearestSectionHeadingText(element) {
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, [role='heading'], div, span"))
+      .filter(isVisibleElement)
+      .filter((item) => {
+        const text = normalize(item.innerText || item.textContent || "");
+        return /^(education|websites?|work experience|employment|certifications?|languages?|social network urls?)$/.test(text);
+      })
+      .filter((heading) => followsNode(heading, element))
+      .sort((left, right) => topOfElement(right) - topOfElement(left));
+
+    return normalize(headings[0]?.innerText || headings[0]?.textContent || sectionTextAround(element));
+  }
+
   function signatureValue(profile) {
     const date = new Date();
     const formatted = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
@@ -2626,6 +2734,101 @@
     return fillCombobox(control, desired);
   }
 
+  async function fillWorkdayEducationDropdownFallback(profile) {
+    if (!/education/i.test(document.body?.innerText || "")) {
+      return 0;
+    }
+
+    const education = normalizedEducation(profile)[0];
+    if (!education) {
+      return 0;
+    }
+
+    let filled = 0;
+    const degree = education.degree || "Bachelor of Science";
+    const degreeControl = findWorkdayDropdownByLabel(/^degree\s*\*?$/i);
+
+    if (degreeControl && !valueMatches(getCurrentValue(degreeControl), degree)) {
+      filled += await fillCombobox(degreeControl, degree) ? 1 : 0;
+    }
+
+    const fieldControl = findWorkdayDropdownByLabel(/^(field of study|discipline|major)\s*\*?$/i);
+    const fields = preferredEducationFields(education);
+
+    for (const field of fields) {
+      if (!fieldControl) {
+        break;
+      }
+
+      const current = normalize(getCurrentValue(fieldControl));
+      if (current && optionMatches(current, "", field)) {
+        continue;
+      }
+
+      filled += await fillCombobox(fieldControl, field) ? 1 : 0;
+
+      if (!isMultiSelectDropdown(fieldControl)) {
+        break;
+      }
+    }
+
+    return filled;
+  }
+
+  function preferredEducationFields(education) {
+    const desired = normalize(education.fieldOfStudy || "");
+    const values = [];
+
+    if (/computer science/.test(desired)) {
+      values.push("Computer Science");
+    }
+
+    if (/statistics/.test(desired)) {
+      values.push("Statistics");
+    }
+
+    if (!values.length && education.fieldOfStudy) {
+      values.push(education.fieldOfStudy);
+    }
+
+    if (!values.includes("Computer Science")) {
+      values.push("Computer Science");
+    }
+
+    if (!values.includes("Statistics")) {
+      values.push("Statistics");
+    }
+
+    return values;
+  }
+
+  function isMultiSelectDropdown(control) {
+    const text = normalize(getCurrentValue(control) || control.innerText || control.textContent || "");
+    const multi = normalize([
+      control.getAttribute("aria-label"),
+      control.getAttribute("data-automation-id"),
+      getSurroundingText(control)
+    ].join(" "));
+
+    return /\d+\s+items?\s+selected|multi|multiple/.test(`${text} ${multi}`);
+  }
+
+  function findWorkdayDropdownByLabel(pattern) {
+    const labels = Array.from(document.querySelectorAll("label, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel'], span, div"))
+      .filter(isVisibleElement)
+      .filter((item) => pattern.test(compactText(item.innerText || item.textContent || "")))
+      .sort((left, right) => topOfElement(left) - topOfElement(right));
+
+    for (const label of labels) {
+      const control = findDropdownNearLabel(label);
+      if (control) {
+        return control;
+      }
+    }
+
+    return null;
+  }
+
   function findWorkdayCountryDropdown() {
     const labels = Array.from(document.querySelectorAll("label, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel'], span, div"))
       .filter(isVisibleElement)
@@ -2803,6 +3006,10 @@
 
     if (/\bbachelor/.test(desired)) {
       [
+        "bachelor of science",
+        "bachelors of science",
+        "bs",
+        "bsc",
         "bachelor degree",
         "bachelors degree",
         "bachelor s degree",

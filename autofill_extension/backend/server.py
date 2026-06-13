@@ -481,9 +481,12 @@ def normalize_for_option(value: Any) -> str:
 
 
 def parse_json_object(content: str) -> dict[str, Any]:
+    if not isinstance(content, str) or not content.strip():
+        return {}
+
     try:
         return json.loads(content)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
         start = content.find("{")
         end = content.rfind("}")
 
