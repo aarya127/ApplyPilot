@@ -168,7 +168,8 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
     if not isinstance(mappings, list):
         return []
 
-    return [mapping for mapping in mappings if valid_mapping(mapping)]
+    valid_mappings = [mapping for mapping in mappings if valid_mapping(mapping)]
+    return enforce_option_values(valid_mappings, fields)
 
 
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
@@ -255,6 +256,118 @@ def safe_location(location: Any, keys: list[str]) -> dict[str, Any]:
         return {}
 
     return {key: location.get(key) for key in keys if location.get(key)}
+
+
+def enforce_option_values(mappings: list[dict[str, Any]], fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    field_by_index = {
+        field.get("index"): field
+        for field in fields
+        if isinstance(field, dict) and isinstance(field.get("index"), int)
+    }
+    filtered: list[dict[str, Any]] = []
+
+    for mapping in mappings:
+        field = field_by_index.get(mapping.get("index"))
+        options = normalized_options(field)
+
+        if not options:
+            filtered.append(mapping)
+            continue
+
+        value = value_from_options(mapping.get("value"), options)
+        if value is None:
+            continue
+
+        filtered.append({**mapping, "value": value})
+
+    return filtered
+
+
+def normalized_options(field: dict[str, Any] | None) -> list[dict[str, str]]:
+    if not isinstance(field, dict) or not isinstance(field.get("options"), list):
+        return []
+
+    options = []
+    for option in field.get("options", []):
+        if not isinstance(option, dict):
+            continue
+
+        label = str(option.get("label") or "").strip()
+        value = str(option.get("value") or "").strip()
+        if label or value:
+            options.append({"label": label, "value": value})
+
+    return options
+
+
+def value_from_options(value: Any, options: list[dict[str, str]]) -> str | list[str] | None:
+    if isinstance(value, list):
+        selected = [match_option_value(item, options) for item in value]
+        selected = [item for item in selected if item is not None]
+        return selected or None
+
+    return match_option_value(value, options)
+
+
+def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
+    desired = normalize_for_option(value)
+    if not desired:
+        return None
+
+    for option in options:
+        label = option.get("label", "")
+        option_value = option.get("value", "")
+        normalized_label = normalize_for_option(label)
+        normalized_value = normalize_for_option(option_value)
+        aliases = option_aliases(desired)
+
+        if desired in {normalized_label, normalized_value}:
+            return label or option_value
+
+        if any(alias in {normalized_label, normalized_value} for alias in aliases):
+            return label or option_value
+
+        if any(alias and alias in normalized_label for alias in aliases if len(alias) > 3):
+            return label or option_value
+
+    return None
+
+
+def option_aliases(value: str) -> set[str]:
+    aliases = {value}
+
+    if value == "no":
+        aliases.update(
+            {
+                "no i am not",
+                "no i do not",
+                "no i don t",
+                "no i have not",
+                "no i do not have",
+                "not a protected veteran",
+                "i am not a protected veteran",
+                "not hispanic or latino",
+                "not hispanic",
+                "not latino",
+            }
+        )
+
+    if value == "yes":
+        aliases.update({"yes i am", "yes i do", "yes i have"})
+
+    if value == "asian":
+        aliases.update({"asian not hispanic or latino", "asian not hispanic"})
+
+    if value == "male":
+        aliases.update({"man", "male"})
+
+    return aliases
+
+
+def normalize_for_option(value: Any) -> str:
+    return " ".join(
+        "".join(char.lower() if char.isalnum() else " " for char in str(value or "")).split()
+    )
 
 
 def parse_json_object(content: str) -> dict[str, Any]:

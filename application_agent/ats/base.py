@@ -50,6 +50,11 @@ class BaseAdapter:
             if source == "generated_review_required":
                 generated_review_required += 1
 
+            value = value_allowed_by_field_options(field, value)
+            if value is None:
+                skipped.append(field.get("label") or field.get("name") or f"field-{field.get('index')}")
+                continue
+
             if self.fill_field(field, value):
                 filled += 1
 
@@ -245,6 +250,26 @@ def option_matches(label: str, value: str, desired: str) -> bool:
         return True
 
     return any(contains_phrase(label_text, alias) for alias in aliases if len(alias) > 2)
+
+
+def value_allowed_by_field_options(field: dict[str, Any], value: Any) -> Any | None:
+    options = [
+        option
+        for option in field.get("options", [])
+        if str(option.get("label") or option.get("value") or "").strip()
+    ]
+
+    if not options:
+        return value
+
+    desired = normalize(str(value))
+    for option in options:
+        label = option.get("label", "")
+        option_value = option.get("value", "")
+        if option_matches(label, option_value, desired):
+            return label or option_value
+
+    return None
 
 
 def answer_aliases(desired: str) -> list[str]:

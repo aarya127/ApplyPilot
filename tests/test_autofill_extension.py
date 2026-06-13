@@ -117,6 +117,44 @@ def test_backend_without_api_key_returns_empty_llm_mapping(monkeypatch, tmp_path
     assert "NVIDIA_API_KEY" in response.json["warning"]
 
 
+def test_backend_enforces_ai_answers_are_dropdown_options():
+    fields = [
+        {
+            "index": 0,
+            "label": "Veteran Status",
+            "options": [
+                {"label": "I identify as one or more classifications of protected veteran", "value": "protected"},
+                {"label": "I am not a protected veteran", "value": "not_protected"},
+            ],
+        },
+        {
+            "index": 1,
+            "label": "Open text",
+            "options": [],
+        },
+        {
+            "index": 2,
+            "label": "Consent",
+            "options": [
+                {"label": "Yes", "value": "yes"},
+                {"label": "No", "value": "no"},
+            ],
+        },
+    ]
+    mappings = [
+        {"index": 0, "value": "No", "confidence": 0.8, "source": "llm"},
+        {"index": 1, "value": "Free text answer", "confidence": 0.8, "source": "llm"},
+        {"index": 2, "value": "Maybe", "confidence": 0.8, "source": "llm"},
+    ]
+
+    filtered = server.enforce_option_values(mappings, fields)
+
+    assert filtered == [
+        {"index": 0, "value": "I am not a protected veteran", "confidence": 0.8, "source": "llm"},
+        {"index": 1, "value": "Free text answer", "confidence": 0.8, "source": "llm"},
+    ]
+
+
 def test_backend_tracks_applications(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
     monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)

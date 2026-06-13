@@ -3,7 +3,7 @@ from pathlib import Path
 from application_agent.agent.detector import detect_ats
 from application_agent.agent.field_mapper import map_field
 from application_agent.agent.profile_loader import normalize_profile
-from application_agent.ats.base import is_final_submit_text, option_matches
+from application_agent.ats.base import is_final_submit_text, option_matches, value_allowed_by_field_options
 
 
 def test_detect_ats_routes_common_platforms():
@@ -93,6 +93,20 @@ def test_option_matching_handles_long_dropdown_labels_without_male_female_collis
     assert option_matches("Asian (Not Hispanic or Latino)", "", "asian")
     assert option_matches("Male", "", "male")
     assert not option_matches("Female", "", "male")
+
+
+def test_agent_only_allows_values_from_field_options():
+    field = {
+        "label": "Veteran Status",
+        "options": [
+            {"label": "I identify as one or more classifications of protected veteran", "value": "protected"},
+            {"label": "I am not a protected veteran", "value": "not_protected"},
+        ],
+    }
+
+    assert value_allowed_by_field_options(field, "No") == "I am not a protected veteran"
+    assert value_allowed_by_field_options(field, "Some unrelated answer") is None
+    assert value_allowed_by_field_options({"label": "Why us?", "options": []}, "Free text") == "Free text"
 
 
 def test_final_submit_detection_is_conservative():
