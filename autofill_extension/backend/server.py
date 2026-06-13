@@ -150,7 +150,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
                     "content": (
                         "You map job application form fields to candidate answers. "
                         "Return only strict JSON. Do not invent experience. "
-                        "Use resumeFacts for custom questions. Skip unknown fields."
+                        "Use resumeFacts and resumeTranscript for custom questions. Skip unknown fields."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -214,6 +214,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
         "demographics": profile.get("demographics", {}),
         "veteranStatus": profile.get("veteranStatus"),
         "resumeFacts": profile.get("resumeFacts", {}),
+        "resumeTranscript": resume_transcript(profile),
         "savedAnswers": profile.get("answers", {}),
     }
     serializable_fields = [
@@ -238,6 +239,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "Use exact option labels when a field has options. "
                 "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
                 "Prefer savedAnswers and explicit profile facts over inference. "
+                "Use resumeTranscript to decide whether the candidate has worked at a named company; if the named company is absent from the transcript and savedAnswers do not say otherwise, answer No. "
                 "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
                 "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
                 "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts. "
@@ -256,6 +258,26 @@ def safe_location(location: Any, keys: list[str]) -> dict[str, Any]:
         return {}
 
     return {key: location.get(key) for key in keys if location.get(key)}
+
+
+def resume_transcript(profile: dict[str, Any]) -> str:
+    facts = profile.get("resumeFacts", {})
+    if not isinstance(facts, dict):
+        return ""
+
+    sections = []
+    for label, key in [
+        ("Education", "education"),
+        ("Experience", "experience"),
+        ("Projects", "projects"),
+        ("Skills", "skills"),
+        ("Certifications", "certifications"),
+    ]:
+        values = facts.get(key, [])
+        if isinstance(values, list) and values:
+            sections.append(f"{label}:\n" + "\n".join(str(item) for item in values if str(item).strip()))
+
+    return "\n\n".join(sections)[:12000]
 
 
 def enforce_option_values(mappings: list[dict[str, Any]], fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -327,6 +349,11 @@ def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
         if any(alias in {normalized_label, normalized_value} for alias in aliases):
             return label or option_value
 
+        if is_united_states_desired(desired):
+            if is_united_states_option(normalized_label) or is_united_states_option(normalized_value):
+                return label or option_value
+            continue
+
         if any(alias and alias in normalized_label for alias in aliases if len(alias) > 3):
             return label or option_value
 
@@ -355,6 +382,9 @@ def option_aliases(value: str) -> set[str]:
     if value == "yes":
         aliases.update({"yes i am", "yes i do", "yes i have"})
 
+    if value in {"united states", "united states of america", "usa", "u s a", "us"}:
+        aliases.update({"united states", "united states of america", "usa", "u s a", "us"})
+
     if value == "asian":
         aliases.update({"asian not hispanic or latino", "asian not hispanic"})
 
@@ -362,6 +392,14 @@ def option_aliases(value: str) -> set[str]:
         aliases.update({"man", "male"})
 
     return aliases
+
+
+def is_united_states_desired(value: str) -> bool:
+    return value in {"united states", "united states of america", "usa", "u s a", "us"}
+
+
+def is_united_states_option(value: str) -> bool:
+    return value in {"united states", "united states of america", "usa", "u s a", "us"}
 
 
 def normalize_for_option(value: Any) -> str:

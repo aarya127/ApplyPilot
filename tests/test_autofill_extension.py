@@ -134,17 +134,17 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
         },
         {
             "index": 2,
-            "label": "Consent",
+            "label": "Country",
             "options": [
-                {"label": "Yes", "value": "yes"},
-                {"label": "No", "value": "no"},
+                {"label": "United States Minor Outlying Islands", "value": "UM"},
+                {"label": "United States of America", "value": "US"},
             ],
         },
     ]
     mappings = [
         {"index": 0, "value": "No", "confidence": 0.8, "source": "llm"},
         {"index": 1, "value": "Free text answer", "confidence": 0.8, "source": "llm"},
-        {"index": 2, "value": "Maybe", "confidence": 0.8, "source": "llm"},
+        {"index": 2, "value": "United States", "confidence": 0.8, "source": "llm"},
     ]
 
     filtered = server.enforce_option_values(mappings, fields)
@@ -152,7 +152,29 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
     assert filtered == [
         {"index": 0, "value": "I am not a protected veteran", "confidence": 0.8, "source": "llm"},
         {"index": 1, "value": "Free text answer", "confidence": 0.8, "source": "llm"},
+        {"index": 2, "value": "United States of America", "confidence": 0.8, "source": "llm"},
     ]
+
+
+def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
+    profile = {
+        "resumeFacts": {
+            "experience": ["Example Labs May 2025 - August 2025", "Built ML pipelines"],
+            "projects": ["Personal AI agent project"],
+            "skills": ["Python", "LLMs"],
+        },
+        "answers": {},
+    }
+
+    prompt = server.build_mapper_prompt(
+        [{"index": 0, "label": "Have you worked for Acme?", "options": [{"label": "Yes"}, {"label": "No"}]}],
+        profile,
+        {},
+    )
+
+    assert "resumeTranscript" in prompt
+    assert "Example Labs May 2025 - August 2025" in prompt
+    assert "Personal AI agent project" in prompt
 
 
 def test_backend_tracks_applications(monkeypatch, tmp_path):
@@ -424,6 +446,162 @@ def test_content_script_uses_usa_target_country_for_stripe_style_fields():
         assert page.locator("[name='sponsorship']").input_value() == "No"
         assert page.locator("[name='remote']").input_value() == ""
         assert page.locator("[name='school']").input_value() == "Sample University"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_workday_country_dropdown_with_target_country_option():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "phone": "5550100000",
+        "addresses": {
+            "usa": {
+                "line1": "456 Lake St",
+                "city": "Chicago",
+                "state": "IL",
+                "zipCode": "60601",
+                "country": "United States",
+            },
+            "canada": {
+                "country": "Canada",
+            },
+        },
+        "answers": {
+            "previouslyEmployedByCompany": "No",
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <nav>
+              <button type="button">English</button>
+              <button type="button">Settings</button>
+            </nav>
+            <form>
+              <div class="wd-field">
+                <div>Do you now or have you previously worked for Example Company, Inc. or any of its subsidiaries?*</div>
+                <label><input type="radio" name="workedBefore" value="Yes">Yes</label>
+                <label><input type="radio" name="workedBefore" value="No">No</label>
+              </div>
+              <div class="wd-field">
+                <label id="country-label">Country*</label>
+                <button id="country" type="button" aria-labelledby="country-label" aria-haspopup="listbox" aria-controls="country-options">Canada</button>
+                <div id="country-options" role="listbox" hidden>
+                  <div data-automation-id="promptOption" data-automation-label="Canada">Canada</div>
+                  <div data-automation-id="promptOption" data-automation-label="United States Minor Outlying Islands">United States Minor Outlying Islands</div>
+                  <div data-automation-id="promptOption" data-automation-label="United States of America">United States of America</div>
+                </div>
+              </div>
+              <label>Province or Territory<input name="province"></label>
+              <div class="wd-field">
+                <label id="phone-device-label">Phone Device Type*</label>
+                <button id="phone-device" type="button" aria-labelledby="phone-device-label" aria-haspopup="listbox" aria-controls="phone-device-options">Select One</button>
+                <div id="phone-device-options" role="listbox" hidden>
+                  <div data-automation-id="promptOption" data-automation-label="Home">Home</div>
+                  <div data-automation-id="promptOption" data-automation-label="Mobile">Mobile</div>
+                </div>
+              </div>
+              <div class="wd-field">
+                <label id="phone-code-label">Country Phone Code*</label>
+                <button id="phone-code" type="button" aria-labelledby="phone-code-label" aria-haspopup="listbox" aria-controls="phone-code-options">Canada (+1)</button>
+                <div id="phone-code-options" role="listbox" hidden>
+                  <div data-automation-id="promptOption" data-automation-label="Canada (+1)">Canada (+1)</div>
+                  <div data-automation-id="promptOption" data-automation-label="United States (+1)">United States (+1)</div>
+                </div>
+              </div>
+              <label>Phone Extension<input name="phoneExtension"></label>
+              <label>kpaj6<input name="kpaj6"></label>
+            </form>
+            <script>
+              for (const button of document.querySelectorAll('button[aria-haspopup="listbox"]')) {
+                const list = document.getElementById(button.getAttribute('aria-controls'));
+                button.addEventListener('click', () => { list.hidden = !list.hidden; });
+                button.addEventListener('keydown', (event) => {
+                  if (event.key === 'Escape') list.hidden = true;
+                });
+                list.querySelectorAll('[data-automation-id="promptOption"]').forEach((option) => {
+                  option.addEventListener('click', () => {
+                    button.textContent = option.getAttribute('data-automation-label');
+                    button.setAttribute('data-selected', option.getAttribute('data-automation-label'));
+                    list.hidden = true;
+                  });
+                });
+              }
+            </script>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        country_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country*")
+        province_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Province or Territory")
+        phone_device_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Phone Device Type*")
+        phone_code_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country Phone Code*")
+        phone_extension_mapping = [mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Phone Extension"]
+        unmapped_labels = [field["label"] for field in preview["result"]["unmappedFields"]]
+        assert country_mapping["value"] == "United States of America"
+        assert province_mapping["value"] == "IL"
+        assert phone_device_mapping["value"] == "Mobile"
+        assert phone_code_mapping["value"] == "Canada (+1)"
+        assert phone_extension_mapping == []
+        assert any("previously worked" in label for label in unmapped_labels)
+        assert "English" not in unmapped_labels
+        assert "Settings" not in unmapped_labels
+        assert "Phone Extension" not in unmapped_labels
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert not page.locator("[name='workedBefore'][value='No']").is_checked()
+        assert page.locator("#country").get_attribute("data-selected") == "United States of America"
+        assert page.locator("[name='province']").input_value() == "IL"
+        assert page.locator("#phone-device").get_attribute("data-selected") == "Mobile"
+        assert page.locator("#phone-code").get_attribute("data-selected") == "Canada (+1)"
+        assert page.locator("[name='phoneExtension']").input_value() == ""
 
         browser.close()
 

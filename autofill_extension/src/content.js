@@ -12,8 +12,11 @@
     "[contenteditable='true']",
     "[role='textbox']",
     "[role='combobox']",
+    "[role='button'][aria-haspopup='listbox']:not([aria-disabled='true'])",
     "button[aria-haspopup='listbox']:not([disabled])",
     "[aria-haspopup='listbox']:not([disabled])",
+    "[data-automation-id='selectWidget']:not([aria-disabled='true'])",
+    "[data-automation-id='selectShowAll']:not([aria-disabled='true'])",
     "[role='checkbox']",
     "[role='radio']"
   ].join(",");
@@ -24,7 +27,8 @@
     filledCount: 0,
     scanCount: 0,
     isApplying: false,
-    dynamicRunCount: 0
+    dynamicRunCount: 0,
+    lastPreviewFields: []
   };
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -87,7 +91,7 @@
       .filter(shouldAskForField)
       .map(({ elementRef, ...field }) => ({
         ...field,
-        label: field.label || field.name || field.id || `Field ${field.index + 1}`,
+        label: displayLabelForField(field),
         answerKey: answerKeyForField(field),
         needsManualUpload: field.type === "file"
       }));
@@ -131,6 +135,7 @@
     await prepareRepeatableSections(profile);
     const fields = scanFields();
     await enrichDynamicDropdownOptions(fields);
+    state.lastPreviewFields = fields.map(({ elementRef, choiceRefs, ...field }) => field);
     const localMappings = fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean);
     const repeatableMappings = mapRepeatableEmploymentFields(fields, profile);
     const backendMappings = settings?.autoMapAmbiguousFields === true
@@ -152,8 +157,13 @@
     }
 
     state.isApplying = true;
-    const { settings } = await chrome.storage.local.get("settings");
+    const { candidateProfile, settings } = await chrome.storage.local.get([
+      "candidateProfile",
+      "settings"
+    ]);
+    const profile = candidateProfile || {};
     const fields = scanFields();
+    hydrateFieldsFromPreview(fields);
     let filled = 0;
     const failures = [];
 
@@ -176,6 +186,10 @@
         } catch (error) {
           failures.push({ index: mapping.index, label: field.label, error: error.message });
         }
+      }
+
+      if (await fillWorkdayTargetCountry(profile, settings || {})) {
+        filled += 1;
       }
     } finally {
       state.isApplying = false;
@@ -239,6 +253,7 @@
       placeholder: element.getAttribute("placeholder") || "",
       ariaLabel: element.getAttribute("aria-label") || "",
       autocomplete: element.getAttribute("autocomplete") || "",
+      dataAutomationId: element.getAttribute("data-automation-id") || "",
       value: getCurrentValue(element),
       options,
       surroundingText: getSurroundingText(element),
@@ -286,7 +301,10 @@
       label: choiceLabel(element),
       value: choiceValue(element)
     }));
-    const label = choiceGroupLabel(group.container, options) || getSurroundingText(first) || getLabelText(first);
+    const initialLabel = choiceGroupLabel(group.container, options) || getSurroundingText(first) || getLabelText(first);
+    const label = isLowInformationText(initialLabel)
+      ? parentQuestionLabel(first, options) || initialLabel
+      : initialLabel;
 
     return {
       index,
@@ -425,6 +443,33 @@
     return lines[0] || "";
   }
 
+  function parentQuestionLabel(element, options) {
+    const optionLabels = new Set(options.map((option) => normalize(option.label)).filter(Boolean));
+    let current = element.parentElement;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 8) {
+      const clone = current.cloneNode(true);
+      clone.querySelectorAll("input, textarea, select, button, option, [role='radio'], [role='checkbox']").forEach((node) => node.remove());
+      const lines = (clone.innerText || clone.textContent || "")
+        .split(/\n+/)
+        .map((line) => compactText(line))
+        .filter((line) => line.length > 1)
+        .filter((line) => !optionLabels.has(normalize(line)))
+        .filter((line) => !/^\*?\s*(required|select one)\s*$/i.test(line));
+      const question = lines.find((line) => /[?]|\b(now|previously|ever|worked|employed|subsidiar|affiliate|authorize|sponsor|require)\b/i.test(line));
+
+      if (question) {
+        return question;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return "";
+  }
+
   function getLabelText(element) {
     const pieces = [];
     const ariaLabelledBy = element.getAttribute("aria-labelledby");
@@ -459,7 +504,7 @@
 
     if (pieces.length === 0) {
       const formGroup = element.closest(
-        ".form-group, .field, .question, .application-field, [data-qa], [data-testid], li, p, div"
+        "[data-automation-id^='formField-'], .form-group, .field, .question, .application-field, [data-qa], [data-testid], li, p, div"
       );
       if (formGroup?.innerText) {
         pieces.push(firstMeaningfulLine(formGroup.innerText));
@@ -480,7 +525,7 @@
   }
 
   function getSurroundingText(element) {
-    const parent = element.closest("label, .form-group, .field, .question, li, div, section");
+    const parent = element.closest("label, [data-automation-id^='formField-'], .form-group, .field, .question, li, div, section");
     return compactText(parent?.innerText || "");
   }
 
@@ -535,40 +580,56 @@
   function isDynamicDropdownField(field) {
     return field.type === "combobox"
       || field.tag === "button"
+      || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
       || field.ariaLabel
       || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "));
   }
 
   async function discoverDynamicDropdownOptions(element) {
-    if (!isListboxTrigger(element)) {
+    const trigger = dropdownTrigger(element);
+
+    if (!trigger) {
       return [];
     }
 
     const active = document.activeElement;
 
     try {
-      element.focus();
-      element.click();
+      trigger.focus();
+      trigger.click();
       await sleep(180);
 
-      const options = collectVisibleDropdownOptions(element);
-      closeDynamicDropdown(element);
+      const options = collectVisibleDropdownOptions(trigger);
+      closeDynamicDropdown(trigger);
 
-      if (active && active !== element && typeof active.focus === "function") {
+      if (active && active !== trigger && typeof active.focus === "function") {
         active.focus();
       }
 
       return uniqueOptions(options);
     } catch (error) {
-      closeDynamicDropdown(element);
+      closeDynamicDropdown(trigger);
       return [];
     }
+  }
+
+  function dropdownTrigger(element) {
+    if (isListboxTrigger(element)) {
+      return element;
+    }
+
+    return element.querySelector?.("[aria-haspopup='listbox'], [role='combobox'], [role='button'][aria-haspopup], button");
   }
 
   function isListboxTrigger(element) {
     const role = (element.getAttribute("role") || "").toLowerCase();
     const popup = (element.getAttribute("aria-haspopup") || "").toLowerCase();
-    return role === "combobox" || popup === "listbox" || popup === "true";
+    const automationId = (element.getAttribute("data-automation-id") || "").toLowerCase();
+    return role === "combobox"
+      || popup === "listbox"
+      || popup === "true"
+      || automationId === "selectwidget"
+      || automationId === "selectshowall";
   }
 
   function collectVisibleDropdownOptions(trigger) {
@@ -586,14 +647,14 @@
     containers.push(document);
 
     const optionNodes = containers.flatMap((container) => (
-      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio']"))
+      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
     ));
 
     return optionNodes
       .filter(isVisibleElement)
       .map((option) => ({
-        label: compactText(option.innerText || option.textContent || option.getAttribute("aria-label") || ""),
-        value: compactText(option.getAttribute("data-value") || option.getAttribute("value") || option.getAttribute("aria-label") || option.innerText || option.textContent || "")
+        label: compactText(option.getAttribute("data-automation-label") || option.innerText || option.textContent || option.getAttribute("aria-label") || ""),
+        value: compactText(option.getAttribute("data-automation-label") || option.getAttribute("data-value") || option.getAttribute("value") || option.getAttribute("aria-label") || option.innerText || option.textContent || "")
       }))
       .filter((option) => option.label || option.value);
   }
@@ -618,6 +679,42 @@
     }
 
     return result;
+  }
+
+  function hydrateFieldsFromPreview(fields) {
+    const previewFields = Array.isArray(state.lastPreviewFields) ? state.lastPreviewFields : [];
+
+    for (const field of fields) {
+      if (field.options?.length) {
+        continue;
+      }
+
+      const match = previewFields.find((item) => (
+        item.index === field.index
+        || sameFieldIdentity(item, field)
+      ));
+
+      if (match?.options?.length) {
+        field.options = match.options;
+      }
+    }
+  }
+
+  function sameFieldIdentity(left, right) {
+    const leftKey = normalize([
+      left?.label,
+      left?.name,
+      left?.id,
+      left?.ariaLabel
+    ].join(" "));
+    const rightKey = normalize([
+      right?.label,
+      right?.name,
+      right?.id,
+      right?.ariaLabel
+    ].join(" "));
+
+    return Boolean(leftKey && rightKey && leftKey === rightKey);
   }
 
   function mapField(field, profile, settings) {
@@ -647,6 +744,20 @@
       return null;
     }
 
+    if (isPhoneCountryCodeField(primaryHaystack)) {
+      return buildMapping(field, profile.answers?.phoneCountryCode || profile.phoneCountryCode || "Canada (+1)", "rule", 0.88);
+    }
+
+    if (isPhoneExtensionField(primaryHaystack)) {
+      return hasValue(profile.phoneExtension)
+        ? buildMapping(field, profile.phoneExtension, "rule", 0.9)
+        : null;
+    }
+
+    if (isPhoneDeviceTypeField(primaryHaystack)) {
+      return buildMapping(field, profile.answers?.phoneDeviceType || profile.phoneDeviceType || "Mobile", "rule", 0.86);
+    }
+
     const address = selectAddress(profile, settings, primaryHaystack);
 
     const agreementMapping = mapAgreementCheckbox(field, primaryHaystack);
@@ -663,7 +774,11 @@
       return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.9);
     }
 
-    const companyQuestionMapping = mapCompanyQuestion(field, profile, primaryHaystack);
+    if (isCompanyHistoryQuestion(haystack)) {
+      return null;
+    }
+
+    const companyQuestionMapping = mapCompanyQuestion(field, profile, haystack);
     if (companyQuestionMapping) {
       return companyQuestionMapping;
     }
@@ -794,7 +909,32 @@
     return null;
   }
 
+  function isPhoneCountryCodeField(haystack) {
+    return /country.*phone.*code|phone.*country.*code|country code/.test(haystack);
+  }
+
+  function isPhoneExtensionField(haystack) {
+    return /phone.*extension|extension/.test(haystack);
+  }
+
+  function isPhoneDeviceTypeField(haystack) {
+    return /phone.*device.*type|device.*type.*phone/.test(haystack);
+  }
+
   function findSavedAnswer(field, profile) {
+    const haystack = normalize([
+      field.label,
+      field.placeholder,
+      field.name,
+      field.id,
+      field.ariaLabel,
+      field.surroundingText
+    ].join(" "));
+
+    if (isLowInformationChoiceLabel(field) || isCompanyHistoryQuestion(haystack)) {
+      return "";
+    }
+
     const answers = profile.answers || {};
     const keys = [
       answerKeyForField(field),
@@ -816,16 +956,30 @@
     return "";
   }
 
+  function isLowInformationChoiceLabel(field) {
+    return isLowInformationText(field.label || "");
+  }
+
+  function isLowInformationText(value) {
+    const label = normalize(value || "");
+    return /^(yes\s*no|no\s*yes|select one|required|true false|false true)$/.test(label);
+  }
+
   function shouldAskForField(field) {
     const haystack = normalize([
       field.label,
       field.placeholder,
       field.name,
       field.id,
-      field.ariaLabel
+      field.ariaLabel,
+      field.surroundingText
     ].join(" "));
 
     if (!haystack || shouldSkipField(haystack)) {
+      return false;
+    }
+
+    if (isPhoneExtensionField(haystack)) {
       return false;
     }
 
@@ -844,8 +998,38 @@
       || field.tag === "button";
   }
 
+  function displayLabelForField(field) {
+    const label = field.label || "";
+
+    if (isLowInformationText(label) && field.surroundingText) {
+      const fallback = firstMeaningfulQuestion(field.surroundingText);
+      if (fallback) {
+        return cleanDisplayLabel(fallback);
+      }
+    }
+
+    return cleanDisplayLabel(label || field.name || field.id || `Field ${field.index + 1}`);
+  }
+
+  function cleanDisplayLabel(value) {
+    return compactText(String(value || "")
+      .replace(/\*?\s*(yes\s*no|no\s*yes)\s*$/i, "")
+      .replace(/\s+required\s+/i, " "));
+  }
+
+  function firstMeaningfulQuestion(text) {
+    return String(text || "")
+      .split(/\n+/)
+      .map((line) => compactText(line))
+      .find((line) => (
+        line.length > 1
+        && !isLowInformationText(line)
+        && /[?]|\b(now|previously|ever|worked|employed|subsidiar|affiliate|authorize|sponsor|require)\b/i.test(line)
+      )) || "";
+  }
+
   function answerKeyForField(field) {
-    const basis = field.label || field.name || field.id || field.placeholder || `field-${field.index}`;
+    const basis = displayLabelForField(field) || field.name || field.id || field.placeholder || `field-${field.index}`;
     return `custom:${normalize(basis).replace(/\s+/g, "-").slice(0, 80)}`;
   }
 
@@ -888,11 +1072,14 @@
       return buildMapping(field, profile.answers?.recruitingMessages || "No", "rule", 0.9);
     }
 
-    if (/(ever|previously|formerly).*(employed|worked).*(affiliate|subsidiary|\bby\b|\bfor\b)/.test(haystack)) {
-      return buildMapping(field, profile.answers?.previouslyEmployedByCompany || "No", "rule", 0.9);
-    }
-
     return null;
+  }
+
+  function isCompanyHistoryQuestion(haystack) {
+    return (
+      /(now|ever|previously|formerly|current).*(employed|worked|work).*(affiliate|subsidiar(?:y|ies)|\bby\b|\bfor\b)/.test(haystack)
+      || /(employed|worked|work).*(affiliate|subsidiar(?:y|ies)|\bby\b|\bfor\b).*(now|ever|previously|formerly|current)/.test(haystack)
+    );
   }
 
   function mapWorkHistoryField(field, profile, haystack) {
@@ -955,6 +1142,13 @@
     }
 
     return [
+      /^english$/,
+      /^settings$/,
+      /^[a-z]{2,}\d{2,}$/,
+      /^search for jobs$/,
+      /^candidate home$/,
+      /^job alerts$/,
+      /\bi have a preferred name\b/,
       /\bcompany name\b/,
       /\bemployer name\b/,
       /\borganization name\b/,
@@ -1013,6 +1207,14 @@
   }
 
   function selectAddress(profile, settings, haystack) {
+    if (settings?.targetCountry === "usa") {
+      return profile.addresses?.usa || profile.addresses?.canada || null;
+    }
+
+    if (settings?.targetCountry === "canada") {
+      return profile.addresses?.canada || profile.addresses?.usa || null;
+    }
+
     if (settings?.targetCountry === "usa" && /(zip code|\bzip\b|postal code|postcode)/.test(haystack)) {
       return profile.addresses?.usa || profile.addresses?.canada || null;
     }
@@ -1027,14 +1229,6 @@
 
     if (/(\bu\.?s\.?\b|\busa\b|\bunited states\b|\bstate\b|zip code|\bzip\b)/.test(haystack)) {
       return profile.addresses?.usa;
-    }
-
-    if (settings?.targetCountry === "usa") {
-      return profile.addresses?.usa || profile.addresses?.canada || null;
-    }
-
-    if (settings?.targetCountry === "canada") {
-      return profile.addresses?.canada || profile.addresses?.usa || null;
     }
 
     return profile.addresses?.canada || profile.addresses?.usa || null;
@@ -1547,24 +1741,59 @@
   }
 
   async function fillCombobox(element, desiredValue) {
-    element.focus();
-    element.click();
-    setEditableText(element, desiredValue);
+    const trigger = dropdownTrigger(element) || element;
+    trigger.focus();
+    trigger.click();
     await sleep(200);
 
-    const option = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option"))
+    const option = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
+      .filter(isVisibleElement)
       .find((item) => optionMatches(
-        item.textContent || item.getAttribute("aria-label") || "",
-        item.getAttribute("data-value") || "",
+        item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
+        item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || "",
         desiredValue
       ));
 
     if (option) {
-      option.click();
+      clickOption(option);
+      dispatchFormEvents(trigger);
+      dispatchFormEvents(element);
+      return true;
     }
 
+    if (trigger.tagName.toLowerCase() !== "button") {
+      setEditableText(trigger, desiredValue);
+      await sleep(200);
+
+      const typedOption = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
+        .filter(isVisibleElement)
+        .find((item) => optionMatches(
+          item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
+          item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || "",
+          desiredValue
+        ));
+
+      if (typedOption) {
+        clickOption(typedOption);
+        dispatchFormEvents(trigger);
+        dispatchFormEvents(element);
+        return true;
+      }
+    }
+
+    dispatchFormEvents(trigger);
     dispatchFormEvents(element);
-    return true;
+    return trigger.tagName.toLowerCase() !== "button";
+  }
+
+  function clickOption(option) {
+    for (const type of ["pointerdown", "mousedown", "mouseup", "click"]) {
+      option.dispatchEvent(new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window
+      }));
+    }
   }
 
   function fillSelect(select, desiredValue) {
@@ -1603,6 +1832,67 @@
     return true;
   }
 
+  async function fillWorkdayTargetCountry(profile, settings) {
+    const targetCountry = settings?.targetCountry || "";
+    const address = selectAddress(profile, settings, "country");
+    const desired = targetCountry === "usa"
+      ? (address?.country || "United States")
+      : targetCountry === "canada"
+        ? (address?.country || "Canada")
+        : "";
+
+    if (!desired) {
+      return false;
+    }
+
+    const control = findWorkdayCountryDropdown();
+    if (!control) {
+      return false;
+    }
+
+    const current = normalize(getCurrentValue(control));
+    if (optionMatches(current, "", desired)) {
+      return false;
+    }
+
+    return fillCombobox(control, desired);
+  }
+
+  function findWorkdayCountryDropdown() {
+    const labels = Array.from(document.querySelectorAll("label, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel'], span, div"))
+      .filter(isVisibleElement)
+      .filter((item) => {
+        const text = normalize(item.innerText || item.textContent || "");
+        return /^country\s*\*?$/.test(text) && !/phone/.test(text);
+      });
+
+    for (const label of labels) {
+      const control = findDropdownNearLabel(label);
+      if (control) {
+        return control;
+      }
+    }
+
+    return null;
+  }
+
+  function findDropdownNearLabel(label) {
+    let container = label;
+
+    for (let depth = 0; container && container !== document.body && depth < 8; depth += 1) {
+      const control = Array.from(container.querySelectorAll("[aria-haspopup='listbox'], [role='combobox'], [data-automation-id='selectWidget'], [data-automation-id='selectShowAll'], button"))
+        .find((item) => isVisibleElement(item) && dropdownTrigger(item) && !/phone/.test(normalize(getLabelText(item) || getSurroundingText(item))));
+
+      if (control) {
+        return control;
+      }
+
+      container = container.parentElement;
+    }
+
+    return null;
+  }
+
   function optionMatches(label, value, desiredValue) {
     const desired = normalize(String(desiredValue));
     const normalizedLabel = normalize(label || "");
@@ -1621,8 +1911,32 @@
       return true;
     }
 
+    if (isUnitedStatesDesired(desired)) {
+      return isUnitedStatesOption(normalizedLabel) || isUnitedStatesOption(normalizedValue);
+    }
+
     return aliases.some((alias) => alias.length > 3 && containsNormalizedPhrase(normalizedLabel, alias))
       || (desired.length > 2 && containsNormalizedPhrase(normalizedLabel, desired));
+  }
+
+  function isUnitedStatesDesired(value) {
+    return [
+      "united states",
+      "united states of america",
+      "usa",
+      "u s a",
+      "us"
+    ].includes(value);
+  }
+
+  function isUnitedStatesOption(value) {
+    return [
+      "united states",
+      "united states of america",
+      "usa",
+      "u s a",
+      "us"
+    ].includes(value);
   }
 
   function containsNormalizedPhrase(text, phrase) {
@@ -1692,6 +2006,29 @@
         "yes i do",
         "yes i have"
       ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "united states" || desired === "usa" || desired === "u s" || desired === "u s a") {
+      [
+        "united states",
+        "united states of america",
+        "usa",
+        "u s a",
+        "us"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "united states of america") {
+      [
+        "united states",
+        "usa",
+        "u s a",
+        "us"
+      ].forEach((alias) => aliases.add(alias));
+    }
+
+    if (desired === "canada") {
+      aliases.add("canada");
     }
 
     if (desired === "asian") {
@@ -1834,15 +2171,39 @@
   function isFillable(element) {
     const style = window.getComputedStyle(element);
     const type = (element.getAttribute("type") || "").toLowerCase();
+    const isDropdownButton = type === "button" && Boolean(dropdownTrigger(element));
 
     return !element.disabled
       && !element.readOnly
       && type !== "hidden"
       && type !== "submit"
-      && type !== "button"
+      && (type !== "button" || isDropdownButton)
       && type !== "reset"
       && style.display !== "none"
       && style.visibility !== "hidden";
+  }
+
+  function isVisibleElement(element) {
+    if (!element || element.hidden || element.getAttribute("aria-hidden") === "true") {
+      return false;
+    }
+
+    let current = element;
+    while (current && current !== document.body) {
+      if (current.hidden || current.getAttribute?.("aria-hidden") === "true") {
+        return false;
+      }
+
+      const style = window.getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) {
+        return false;
+      }
+
+      current = current.parentElement;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 || rect.height > 0 || Boolean(compactText(element.innerText || element.textContent || ""));
   }
 
   function getCurrentValue(element) {
