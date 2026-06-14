@@ -267,6 +267,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "Use candidateContext as the full compact source of truth for profile facts, work history, education, links, preferences, eligibility, and saved answers. "
                 "For relatives, family, spouse, domestic partner, contractors, dealers, affiliates, group/community affiliations, memberships, or company-specific conflict questions, answer No/None of the above by default unless savedAnswers or resumeTranscript explicitly says Yes. "
                 "For email subscriptions, newsletters, marketing emails, promotional emails, and job alerts, answer No unless savedAnswers explicitly says Yes. "
+                "For Terms and Conditions, Terms of Use, Terms of Service, user agreements, or legal terms acceptance prompts, answer Yes. "
                 "For certification questions that ask the candidate to confirm the application is true, correct, or complete, answer Yes. "
                 "Do not confuse relocation preference with relocation assistance: being open to relocation does not mean the candidate needs relocation assistance. "
                 "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
@@ -398,6 +399,7 @@ def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
         "veteranStatus": profile.get("veteranStatus") or profile.get("answers", {}).get("veteranStatus") or "No",
         "recruitingMessages": profile.get("answers", {}).get("recruitingMessages", "No"),
         "subscribeEmails": profile.get("answers", {}).get("subscribeEmails", "No"),
+        "acceptTerms": profile.get("answers", {}).get("acceptTerms", "Yes"),
         "certifyApplicationTruth": profile.get("answers", {}).get("certifyApplicationTruth", "Yes"),
         "relocation": profile.get("relocation") or profile.get("answers", {}).get("relocation") or "Anywhere",
     }
@@ -493,6 +495,9 @@ def policy_answer_for_field(
 
     if any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
         return best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
+
+    if any(term in haystack for term in ["terms and conditions", "terms of use", "terms of service", "conditions of use", "user agreement", "legal terms", "accept terms", "agree terms", "consent terms"]):
+        return best_available_option(policies["acceptTerms"], options) or policies["acceptTerms"]
 
     if any(term in haystack for term in ["certify", "certifying", "certification", "true and correct", "true complete", "information provided true", "facts true"]):
         return best_available_option(policies["certifyApplicationTruth"], options) or policies["certifyApplicationTruth"]

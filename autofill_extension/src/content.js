@@ -1136,6 +1136,10 @@
       return buildMapping(field, profile.answers?.reviewedPrivacyPolicy || "Yes", "rule", 0.82);
     }
 
+    if (/(terms and conditions|terms of use|terms of service|conditions of use|user agreement|legal terms|accept.*terms|agree.*terms|consent.*terms)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.acceptTerms || "Yes", "rule", 0.9);
+    }
+
     if (/(certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true)/.test(haystack)) {
       return buildMapping(field, profile.answers?.certifyApplicationTruth || "Yes", "rule", 0.9);
     }

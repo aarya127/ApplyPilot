@@ -235,11 +235,17 @@ def test_backend_policy_answers_certification_yes_and_subscriptions_no():
             "label": "Subscribe to job alerts and marketing emails?",
             "options": [{"label": "Yes"}, {"label": "No"}],
         },
+        {
+            "index": 2,
+            "label": "Do you accept the Terms and Conditions?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
     ]
 
     assert server.policy_mappings(fields, {}) == [
         {"index": 0, "value": "Yes", "confidence": 0.78, "source": "policy"},
         {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 2, "value": "Yes", "confidence": 0.78, "source": "policy"},
     ]
 
 
