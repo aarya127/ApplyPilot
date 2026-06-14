@@ -733,7 +733,7 @@
         continue;
       }
 
-      const options = await discoverDynamicDropdownOptions(element);
+      const options = await discoverDynamicDropdownOptions(element, typeaheadSeedForField(field));
       if (options.length && options.length <= 40) {
         field.options = options;
       }
@@ -745,10 +745,21 @@
       || field.tag === "button"
       || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
       || field.ariaLabel
+      || /(location|city|country|state|province|phone.*code|country.*phone|select one)/i.test([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "))
       || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "));
   }
 
-  async function discoverDynamicDropdownOptions(element) {
+  function typeaheadSeedForField(field) {
+    const text = normalize([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "));
+
+    if (/location|city/.test(text)) {
+      return "s";
+    }
+
+    return "";
+  }
+
+  async function discoverDynamicDropdownOptions(element, seed = "") {
     const trigger = dropdownTrigger(element);
 
     if (!trigger) {
@@ -762,7 +773,14 @@
       trigger.click();
       await sleep(180);
 
-      const options = collectVisibleDropdownOptions(trigger);
+      let options = collectVisibleDropdownOptions(trigger);
+
+      if (!options.length && seed && trigger.tagName.toLowerCase() !== "button") {
+        setEditableText(trigger, seed);
+        await sleep(300);
+        options = collectVisibleDropdownOptions(trigger);
+      }
+
       closeDynamicDropdown(trigger);
 
       if (active && active !== trigger && typeof active.focus === "function") {
@@ -1147,6 +1165,20 @@
     ].join(" "));
   }
 
+  function fullFieldHaystack(field) {
+    return normalize([
+      field.label,
+      field.placeholder,
+      field.name,
+      field.id,
+      field.ariaLabel,
+      field.autocomplete,
+      field.questionText,
+      field.surroundingText,
+      field.nearbyText
+    ].join(" "));
+  }
+
   function isAiOnlyQuestion(haystack) {
     return [
       /(18 years of age|at least 18|proof of age|minimum age)/,
@@ -1264,7 +1296,7 @@
       return preferredOption.label || preferredOption.value;
     }
 
-    return desired === "No" ? "I do not require sponsorship" : desired;
+    return desired === "No" ? "No" : desired;
   }
 
   function workAuthorizationAnswer(field, profile) {
@@ -1328,6 +1360,10 @@
       return buildMapping(field, previousCompanyAnswer(profile, haystack), "rule", 0.88);
     }
 
+    if (/(relocation assistance|need relocation assistance|relocation support)/.test(haystack)) {
+      return buildMapping(field, relocationAssistanceAnswer(field, profile), "rule", 0.86);
+    }
+
     if (/(interested in relocating|relocation|relocating)/.test(haystack)) {
       return buildMapping(field, relocationAnswer(field, profile), "rule", 0.86);
     }
@@ -1340,15 +1376,7 @@
       .map((item) => normalize(item.company))
       .filter(Boolean);
 
-    if (mentionsKnownCompanyHistoryQuestion(haystack) && !companies.some((company) => company && haystack.includes(company))) {
-      return "No";
-    }
-
     return companies.some((company) => company && exactCompanyMention(company, haystack)) ? "Yes" : "No";
-  }
-
-  function mentionsKnownCompanyHistoryQuestion(haystack) {
-    return /(deutsche telekom|softbank|t mobile|metro by t mobile)/.test(haystack);
   }
 
   function exactCompanyMention(company, haystack) {
@@ -1364,9 +1392,21 @@
     const options = field.options || [];
     const preferred = options.find((option) => /anywhere/i.test(option.label || option.value || ""))
       || options.find((option) => /nationwide/i.test(option.label || option.value || ""))
+      || options.find((option) => /yes/i.test(option.label || option.value || ""))
       || (hasValue(explicit) ? options.find((option) => optionMatches(option.label, option.value, explicit)) : null);
 
     return preferred ? (preferred.label || preferred.value) : (explicit || "Anywhere");
+  }
+
+  function relocationAssistanceAnswer(field, profile) {
+    const explicit = profile.answers?.relocationAssistance || profile.relocation || profile.answers?.relocation;
+    const options = field.options || [];
+    const wantsRelocation = !/not interested|no\b|false/.test(normalize(explicit || ""));
+    const desired = wantsRelocation ? "Yes" : "No";
+    const preferred = options.find((option) => optionMatches(option.label, option.value, desired))
+      || (hasValue(explicit) ? options.find((option) => optionMatches(option.label, option.value, explicit)) : null);
+
+    return preferred ? (preferred.label || preferred.value) : desired;
   }
 
   function mapCompanyQuestion(field, profile, haystack) {
@@ -1375,6 +1415,30 @@
     }
 
     return null;
+  }
+
+  function mapGovernmentSelfIdField(field, profile, primaryHaystack, fullHaystack) {
+    if (!isCc305DisabilityFormContext(fullHaystack)) {
+      return null;
+    }
+
+    if (/(employee id|employee number|worker id)/.test(primaryHaystack)) {
+      return null;
+    }
+
+    if (/^name\s*(required)?$|^full name\s*(required)?$/.test(primaryHaystack)) {
+      return hasValue(profile.fullName) ? buildMapping(field, profile.fullName, "rule", 0.9) : null;
+    }
+
+    if (/^date\s*(required)?$|^today s date\s*(required)?$/.test(primaryHaystack)) {
+      return buildMapping(field, todayDateValue(), "rule", 0.9);
+    }
+
+    return null;
+  }
+
+  function isCc305DisabilityFormContext(haystack) {
+    return /(cc-?305|omb control number 1250-0005|voluntary self-identification of disability|self identification of disability|please check one of the boxes below)/.test(haystack);
   }
 
   function isCompanyHistoryQuestion(haystack) {
@@ -1443,6 +1507,10 @@
   }
 
   function shouldSkipField(haystack) {
+    if (/\bif yes\b|\bif applicable\b|please state their name|please provide.*if yes/.test(haystack)) {
+      return true;
+    }
+
     if (/(current|previous|most recent).*(employer|company|job title|title|position|role)/.test(haystack)) {
       return false;
     }
@@ -1458,8 +1526,6 @@
       /\bcompany name\b/,
       /\bemployer name\b/,
       /\borganization name\b/,
-      /\bif yes\b/,
-      /\bif applicable\b/,
       /\blast assigned\b/,
       /\bcookie/,
       /\btracking/,
@@ -1556,6 +1622,7 @@
       [/(hispanic|latino|latina|latinx)/, demographics.hispanicLatino],
       [/(race|racial)/, demographics.race],
       [/(ethnic|ethnicity)/, demographics.ethnicity || demographics.race],
+      [/(sexual orientation|orientation)/, demographics.sexualOrientation || profile.answers?.sexualOrientation],
       [/(gender identity|cisgender)/, bestOptionValue(field, demographics.genderIdentity || demographics.gender) || demographics.gender || demographics.genderIdentity],
       [/\bgender\b/, demographics.gender || demographics.genderIdentity]
     ];
@@ -2204,10 +2271,13 @@
     const toLabels = workdayDateLabelNodes("to");
     const rows = workdayExperienceRows();
     let filled = 0;
+    const expectedDateFills = experiences.reduce((total, experience) => (
+      total + (experienceDateValue(experience, "start") ? 2 : 0) + (!experience.currentRole && experienceDateValue(experience, "end") ? 2 : 0)
+    ), 0);
 
     filled += fillWorkdayExperienceDateInputsByOrder(experiences);
 
-    if (filled > 0) {
+    if (expectedDateFills > 0 && filled >= expectedDateFills) {
       return filled;
     }
 
@@ -2579,9 +2649,20 @@
   }
 
   function signatureValue(profile) {
+    return [profile.fullName, todayDateValue({ padded: false })].filter(Boolean).join(" ");
+  }
+
+  function todayDateValue(options = {}) {
     const date = new Date();
-    const formatted = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
-    return [profile.fullName, formatted].filter(Boolean).join(" ");
+    const month = date.getMonth() + 1;
+    const day = date.getDate();
+    const padded = options.padded !== false;
+
+    return [
+      padded ? String(month).padStart(2, "0") : String(month),
+      padded ? String(day).padStart(2, "0") : String(day),
+      String(date.getFullYear())
+    ].join("/");
   }
 
   function bestOptionValue(field, value) {
@@ -2746,14 +2827,26 @@
     }
 
     if (role === "combobox" || hasListboxPopup) {
+      const current = getCurrentValue(element);
+      if (valueMatches(current, mapping.value) || optionMatches(current, "", mapping.value)) {
+        return false;
+      }
+
       return fillCombobox(element, mapping.value);
     }
 
     if (field.options?.length && dropdownTrigger(element)) {
+      const current = getCurrentValue(element);
+      if (valueMatches(current, mapping.value) || optionMatches(current, "", mapping.value)) {
+        return false;
+      }
+
       const filled = await fillCombobox(element, mapping.value);
       if (filled) {
         return true;
       }
+
+      return false;
     }
 
     if (element.isContentEditable || role === "textbox") {
@@ -2843,7 +2936,7 @@
     }
 
     if (trigger.tagName.toLowerCase() !== "button") {
-      setEditableText(trigger, desiredValue);
+      setEditableText(trigger, dropdownSearchValue(desiredValue));
       await sleep(200);
 
       const typedOption = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
@@ -2864,7 +2957,11 @@
 
     dispatchFormEvents(trigger);
     dispatchFormEvents(element);
-    return trigger.tagName.toLowerCase() !== "button";
+    return false;
+  }
+
+  function dropdownSearchValue(desiredValue) {
+    return String(desiredValue || "").trim();
   }
 
   function clickOption(option) {
@@ -3243,6 +3340,27 @@
 
     if (desired === "canada") {
       aliases.add("canada");
+    }
+
+    if (desired === "canada 1" || desired === "canada +1" || desired === "+1" || desired === "1 item selected canada 1") {
+      [
+        "canada",
+        "canada 1",
+        "canada +1",
+        "canada plus 1",
+        "+1",
+        "1 canada",
+        "canada country code 1"
+      ].forEach((alias) => aliases.add(normalize(alias)));
+    }
+
+    if (desired === "heterosexual" || desired === "heterosexual straight" || desired === "straight") {
+      [
+        "heterosexual",
+        "heterosexual straight",
+        "heterosexual / straight",
+        "straight"
+      ].forEach((alias) => aliases.add(normalize(alias)));
     }
 
     if (/\bbachelor/.test(desired)) {

@@ -338,11 +338,35 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
                 {"label": "United States of America", "value": "US"},
             ],
         },
+        {
+            "index": 3,
+            "label": "Sexual Orientation",
+            "options": [
+                {"label": "Straight", "value": "straight"},
+                {"label": "I prefer not to answer", "value": "decline"},
+            ],
+        },
+        {
+            "index": 4,
+            "label": "Country Phone Code",
+            "options": [
+                {"label": "United States (+1)", "value": "US"},
+                {"label": "Canada (+1)", "value": "CA"},
+            ],
+        },
+        {
+            "index": 5,
+            "label": "Will you now, or in the future, require sponsorship to work in the United States?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
     ]
     mappings = [
         {"index": 0, "value": "No", "confidence": 0.8, "source": "llm"},
         {"index": 1, "value": "Free text answer", "confidence": 0.8, "source": "llm"},
         {"index": 2, "value": "United States", "confidence": 0.8, "source": "llm"},
+        {"index": 3, "value": "straight", "confidence": 0.8, "source": "llm"},
+        {"index": 4, "value": "Canada (+1)", "confidence": 0.8, "source": "llm"},
+        {"index": 5, "value": "I do not require sponsorship", "confidence": 0.8, "source": "llm"},
     ]
 
     filtered = server.enforce_option_values(mappings, fields)
@@ -351,6 +375,9 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
         {"index": 0, "value": "I am not a protected veteran", "confidence": 0.8, "source": "llm"},
         {"index": 1, "value": "Free text answer", "confidence": 0.8, "source": "llm"},
         {"index": 2, "value": "United States of America", "confidence": 0.8, "source": "llm"},
+        {"index": 3, "value": "Straight", "confidence": 0.8, "source": "llm"},
+        {"index": 4, "value": "Canada (+1)", "confidence": 0.8, "source": "llm"},
+        {"index": 5, "value": "No", "confidence": 0.8, "source": "llm"},
     ]
 
 
@@ -491,6 +518,14 @@ def test_content_script_previews_and_fills_sample_form():
                 <label>If Yes Which Country Were You Last Assigned to?<input name="conditionalCountry"></label>
                 <label>I agree to the Alternate Dispute Resolution statement above<input type="checkbox" name="adrAgree"></label>
                 <label>Consent to cookies from provider LinkedIn<input name="linkedinCookieConsent"></label>
+                <section>
+                  <h2>Voluntary Self-Identification of Disability</h2>
+                  <p>Form CC-305 OMB Control Number 1250-0005</p>
+                  <label>Name*<input name="cc305Name"></label>
+                  <label>Employee ID (if applicable)<input name="employeeId"></label>
+                  <label>Date*<input name="cc305Date" placeholder="MM/DD/YYYY"></label>
+                  <p>Please check one of the boxes below:</p>
+                </section>
               `;
               form.prepend(section);
             }"""
@@ -515,6 +550,9 @@ def test_content_script_previews_and_fills_sample_form():
         assert fill_response["ok"] is True, fill_response
         assert fill_response["result"]["filled"] >= 10
         assert page.locator("[name='firstName']").input_value() == "Test"
+        assert page.locator("[name='cc305Name']").input_value() == "Test Candidate"
+        assert page.locator("[name='cc305Date']").input_value().count("/") == 2
+        assert page.locator("[name='employeeId']").input_value() == ""
         assert page.locator("[name='email_address']").input_value() == "test@example.com"
         assert page.locator("[name='address_line_1']").input_value() == "123 Test St"
         assert page.locator("[name='work_authorization']").input_value() == "Yes"

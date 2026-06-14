@@ -768,6 +768,12 @@ def option_aliases(value: str) -> set[str]:
     if value in {"united states", "united states of america", "usa", "u s", "u s a", "us"}:
         aliases.update({"united states", "united states of america", "usa", "u s", "u s a", "us"})
 
+    if value in {"canada 1", "canada +1", "+1", "1"}:
+        aliases.update({"canada", "canada 1", "canada +1", "canada plus 1", "+1", "1 canada"})
+
+    if value in {"heterosexual", "heterosexual straight", "straight"}:
+        aliases.update({"heterosexual", "heterosexual straight", "heterosexual / straight", "straight"})
+
     aliases.update(us_state_aliases(value))
 
     if value == "asian":

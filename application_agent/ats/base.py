@@ -97,6 +97,19 @@ class BaseAdapter:
             if field_type in {"checkbox", "radio"}:
                 return self.click_choice(locator, value)
 
+            if field.get("options") or field_type == "combobox":
+                if locator_value_matches(locator, value):
+                    return False
+
+                return self.select_dynamic_option(field, value)
+
+            if is_typeahead_field(field):
+                if locator_value_matches(locator, value):
+                    return False
+
+                if self.select_dynamic_option(field, value):
+                    return True
+
             locator.fill(str(value), timeout=2_000)
             return True
         except Exception:
@@ -117,6 +130,60 @@ class BaseAdapter:
             if option_matches(option.get("label", ""), option.get("value", ""), desired):
                 locator.select_option(option.get("value", ""), timeout=2_000)
                 return True
+
+        return False
+
+    def select_dynamic_option(self, field: dict[str, Any], value: Any) -> bool:
+        locator = field["locator"]
+        desired = str(value)
+
+        try:
+            locator.click(timeout=2_000)
+        except Exception:
+            return False
+
+        if self.click_visible_option(locator, desired):
+            return True
+
+        search_value = dropdown_search_value(field, desired)
+
+        try:
+            locator.fill(search_value, timeout=2_000)
+        except Exception:
+            try:
+                locator.press((search_value or desired or "ArrowDown")[:1], timeout=1_000)
+            except Exception:
+                return False
+
+        try:
+            locator.page.wait_for_timeout(350)
+        except Exception:
+            pass
+
+        return self.click_visible_option(locator, desired)
+
+    def click_visible_option(self, locator: Any, desired: Any) -> bool:
+        try:
+            page = locator.page
+        except Exception:
+            return False
+
+        options = page.locator("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']")
+        desired_text = str(desired)
+
+        for index in range(options.count()):
+            option = options.nth(index)
+            try:
+                if not option.is_visible():
+                    continue
+
+                label = option.inner_text(timeout=1_000)
+                value = option.get_attribute("data-value") or option.get_attribute("value") or option.get_attribute("aria-label") or ""
+                if option_matches(label, value, desired_text):
+                    option.click(timeout=2_000)
+                    return True
+            except Exception:
+                continue
 
         return False
 
@@ -239,6 +306,7 @@ def is_final_submit_text(text: str) -> bool:
 
 
 def option_matches(label: str, value: str, desired: str) -> bool:
+    desired = normalize(desired)
     label_text = normalize(label)
     value_text = normalize(value)
     aliases = answer_aliases(desired)
@@ -250,6 +318,38 @@ def option_matches(label: str, value: str, desired: str) -> bool:
         return True
 
     return any(contains_phrase(label_text, alias) for alias in aliases if len(alias) > 2)
+
+
+def locator_value_matches(locator: Any, desired: Any) -> bool:
+    try:
+        current = locator.input_value(timeout=500)
+    except Exception:
+        try:
+            current = locator.inner_text(timeout=500)
+        except Exception:
+            current = ""
+
+    return option_matches(current, "", str(desired))
+
+
+def is_typeahead_field(field: dict[str, Any]) -> bool:
+    text = normalize(
+        " ".join(
+            [
+                field.get("label", ""),
+                field.get("question_text", ""),
+                field.get("name", ""),
+                field.get("id", ""),
+                field.get("placeholder", ""),
+                field.get("aria_label", ""),
+            ]
+        )
+    )
+    return bool(re.search(r"location|city|country|state|province|phone.*code|country.*phone|select one", text))
+
+
+def dropdown_search_value(field: dict[str, Any], desired: str) -> str:
+    return str(desired or "").strip()
 
 
 def value_allowed_by_field_options(field: dict[str, Any], value: Any) -> Any | None:
@@ -281,9 +381,25 @@ def answer_aliases(desired: str) -> list[str]:
                 "no i am not",
                 "no i do not",
                 "no i have not",
+                "i do not require sponsorship",
+                "do not require sponsorship",
+                "will not require sponsorship",
+                "no sponsorship",
                 "i am not a protected veteran",
                 "not a protected veteran",
                 "not hispanic or latino",
+            }
+        )
+
+    if "do not require sponsorship" in desired or "not require sponsorship" in desired or "no sponsorship" in desired:
+        aliases.update(
+            {
+                "no",
+                "no i do not",
+                "i do not require sponsorship",
+                "do not require sponsorship",
+                "will not require sponsorship",
+                "no sponsorship",
             }
         )
 
@@ -295,6 +411,12 @@ def answer_aliases(desired: str) -> list[str]:
 
     if desired == "male":
         aliases.update({"male", "man"})
+
+    if desired in {"heterosexual", "heterosexual straight", "straight"}:
+        aliases.update({"heterosexual", "heterosexual straight", "heterosexual / straight", "straight"})
+
+    if desired in {"canada 1", "canada +1", "+1", "1"}:
+        aliases.update({"canada", "canada 1", "canada +1", "canada plus 1", "+1", "1 canada"})
 
     return list(aliases)
 

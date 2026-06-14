@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 
-FIELD_SELECTOR = "input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='textbox'], [role='combobox']"
+FIELD_SELECTOR = (
+    "input:not([type='hidden']), textarea, select, [contenteditable='true'], "
+    "[role='textbox'], [role='combobox'], [aria-haspopup='listbox'], "
+    "[data-automation-id='selectWidget'], [data-automation-id='selectShowAll']"
+)
 
 
 def scan_fields(page: Any) -> list[dict[str, Any]]:
@@ -27,6 +31,8 @@ def scan_fields(page: Any) -> list[dict[str, Any]]:
                     "placeholder": element.get_attribute("placeholder") or "",
                     "aria_label": element.get_attribute("aria-label") or "",
                     "label": label_for(page, element),
+                    "question_text": question_text_for(element),
+                    "surrounding_text": surrounding_text_for(element),
                     "options": options_for(element),
                     "locator": element,
                 }
@@ -97,3 +103,50 @@ def options_for(element: Any) -> list[dict[str, str]]:
     except Exception:
         return []
 
+
+def surrounding_text_for(element: Any) -> str:
+    try:
+        return element.evaluate(
+            """
+            element => {
+              const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const parent = element.closest('label, fieldset, .field, .form-group, .question, li, div, section');
+              return clean(parent ? (parent.innerText || parent.textContent || '') : '');
+            }
+            """
+        )
+    except Exception:
+        return ""
+
+
+def question_text_for(element: Any) -> str:
+    try:
+        return element.evaluate(
+            """
+            element => {
+              const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+              const isQuestion = line => /[?]|\\b(now|previously|ever|worked|employed|subsidiar|affiliate|authorize|authorization|sponsor|sponsorship|require|visa|military|served|spouse|domestic partner|relative|dealer|contractor|relocat|age|proof of age|disability)\\b/i.test(line);
+              let node = element;
+              for (let depth = 0; node && node !== document.body && depth < 8; depth += 1) {
+                const text = clean(node.innerText || node.textContent || '');
+                const lines = text.split(/\\n+/).map(clean).filter(line => line.length > 3 && line.length < 360);
+                const found = lines.find(isQuestion);
+                if (found) return found;
+                node = node.parentElement;
+              }
+
+              const rect = element.getBoundingClientRect();
+              const candidates = Array.from(document.querySelectorAll('label, legend, p, div, span, [role="heading"]'))
+                .filter(item => {
+                  const itemRect = item.getBoundingClientRect();
+                  return itemRect.bottom <= rect.top && rect.top - itemRect.bottom < 520;
+                })
+                .map(item => clean(item.innerText || item.textContent || ''))
+                .flatMap(text => text.split(/\\n+/).map(clean))
+                .filter(line => line.length > 3 && line.length < 360 && isQuestion(line));
+              return candidates[candidates.length - 1] || '';
+            }
+            """
+        )
+    except Exception:
+        return ""

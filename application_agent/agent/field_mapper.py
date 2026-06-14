@@ -5,23 +5,14 @@ from typing import Any
 
 
 def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str] | None:
-    text = normalize(
-        " ".join(
-            [
-                field.get("label", ""),
-                field.get("name", ""),
-                field.get("id", ""),
-                field.get("placeholder", ""),
-                field.get("aria_label", ""),
-            ]
-        )
-    )
+    text = field_text(field)
 
     if should_skip(text):
         return None
 
+    policy_like = is_policy_question(text)
     saved = saved_answer(field, profile)
-    if has_value(saved):
+    if has_value(saved) and not policy_like:
         return saved, "saved"
 
     rules = [
@@ -45,6 +36,7 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
             profile.get("current_or_previous_job_title"),
         ),
         (r"salary|compensation|pay expectation", profile.get("salary")),
+        (r"relocation assistance|need relocation assistance|relocation support", relocation_assistance_answer(profile)),
         (r"relocat", profile.get("relocation")),
         (r"non[- ]?compete|restrictive covenant|subject to.*agreement", profile.get("subject_to_agreement")),
     ]
@@ -64,7 +56,16 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
         return profile.get("work_authorization") or "Yes", "rule"
 
     if re.search(r"ever|previously|formerly", text) and re.search(r"employed|worked", text):
-        return profile.get("answers", {}).get("previouslyEmployedByCompany", "No"), "rule"
+        return previous_company_answer(text, profile), "rule"
+
+    if re.search(r"relatives?|family member|spouse|domestic partner", text) and re.search(r"employed|work|working|relationship", text):
+        return profile.get("answers", {}).get("relativesAtCompany", "No"), "rule"
+
+    if re.search(r"authorized dealer|dealer", text):
+        return profile.get("answers", {}).get("workedForAuthorizedDealer", "No"), "rule"
+
+    if re.search(r"contractor", text) and re.search(r"work|working|employed", text):
+        return profile.get("answers", {}).get("workedAsContractorForCompany", "No"), "rule"
 
     if re.search(r"whatsapp|sms|text messages?|messaging", text) and re.search(r"recruit|hiring", text):
         return profile.get("answers", {}).get("recruitingMessages", "No"), "rule"
@@ -77,7 +78,26 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
         if sensitive:
             return sensitive, "sensitive"
 
+    if has_value(saved):
+        return saved, "saved"
+
     return None
+
+
+def field_text(field: dict[str, Any]) -> str:
+    return normalize(
+        " ".join(
+            [
+                field.get("label", ""),
+                field.get("question_text", ""),
+                field.get("name", ""),
+                field.get("id", ""),
+                field.get("placeholder", ""),
+                field.get("aria_label", ""),
+                field.get("surrounding_text", ""),
+            ]
+        )
+    )
 
 
 def map_address(text: str, profile: dict[str, Any]) -> str | None:
@@ -111,6 +131,7 @@ def map_sensitive(text: str, profile: dict[str, Any]) -> str | None:
         (r"hispanic|latino|latina|latinx", demographics.get("hispanicLatino")),
         (r"race|racial", demographics.get("race")),
         (r"ethnic|ethnicity", demographics.get("ethnicity")),
+        (r"sexual orientation|orientation", demographics.get("sexualOrientation") or profile.get("answers", {}).get("sexualOrientation")),
         (r"gender", demographics.get("gender") or demographics.get("genderIdentity")),
     ]
 
@@ -119,6 +140,35 @@ def map_sensitive(text: str, profile: dict[str, Any]) -> str | None:
             return value
 
     return None
+
+
+def previous_company_answer(text: str, profile: dict[str, Any]) -> str:
+    companies = [
+        normalize(item.get("company", ""))
+        for item in profile.get("work_experience", [])
+        if isinstance(item, dict) and item.get("company")
+    ]
+    return "Yes" if any(company and phrase_in_text(company, text) for company in companies) else "No"
+
+
+def is_policy_question(text: str) -> bool:
+    return bool(
+        re.search(
+            r"sponsor|visa|work authorization|authorized.*work|previously|formerly|ever.*employed|"
+            r"relatives?|family member|contractor|dealer|veteran|military|relocat|sexual orientation|"
+            r"hispanic|latino|race|ethnic|gender|disability",
+            text,
+        )
+    )
+
+
+def relocation_assistance_answer(profile: dict[str, Any]) -> str:
+    explicit = profile.get("answers", {}).get("relocationAssistance") or profile.get("relocation") or ""
+    return "No" if re.search(r"not interested|^no$|false", normalize(explicit)) else "Yes"
+
+
+def phrase_in_text(phrase: str, text: str) -> bool:
+    return f" {phrase} " in f" {text} "
 
 
 def saved_answer(field: dict[str, Any], profile: dict[str, Any]) -> str:
@@ -153,6 +203,10 @@ def should_skip(text: str) -> bool:
     return any(
         re.search(pattern, text)
         for pattern in [
+            r"\bif yes\b",
+            r"\bif applicable\b",
+            r"please state their name",
+            r"please provide.*if yes",
             r"\bcookie",
             r"\btracking",
             r"\badvertis",

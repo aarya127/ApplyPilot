@@ -73,6 +73,7 @@ def test_field_mapper_handles_greenhouse_style_questions():
             "race": "Asian",
             "hispanicLatino": "No",
             "gender": "Male",
+            "sexualOrientation": "Straight",
         },
         "auto_fill_sensitive_fields": True,
     }
@@ -81,10 +82,14 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Who is your current or previous employer?"}, profile) == ("Example Labs", "rule")
     assert map_field({"label": "What is your current or previous job title?"}, profile) == ("Software Engineer", "rule")
     assert map_field({"label": "Have you ever been employed by Stripe or a Stripe affiliate?"}, profile) == ("No", "rule")
+    assert map_field({"question_text": "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank?"}, profile) == ("No", "rule")
+    assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("Yes", "rule")
     assert map_field({"label": "Do you opt-in to receive WhatsApp messages from Stripe Recruiting?"}, profile) == ("No", "rule")
     assert map_field({"label": "Are you Hispanic/Latino?"}, profile) == ("No", "sensitive")
     assert map_field({"label": "Race"}, profile) == ("Asian", "sensitive")
     assert map_field({"label": "Gender"}, profile) == ("Male", "sensitive")
+    assert map_field({"label": "Sexual Orientation"}, profile) == ("Straight", "sensitive")
+    assert map_field({"label": "If yes, please state their name and job title"}, profile) is None
 
 
 def test_option_matching_handles_long_dropdown_labels_without_male_female_collision():
@@ -93,6 +98,9 @@ def test_option_matching_handles_long_dropdown_labels_without_male_female_collis
     assert option_matches("Asian (Not Hispanic or Latino)", "", "asian")
     assert option_matches("Male", "", "male")
     assert not option_matches("Female", "", "male")
+    assert option_matches("Straight", "", "straight")
+    assert option_matches("Canada (+1)", "", "Canada (+1)")
+    assert option_matches("No", "", "I do not require sponsorship")
 
 
 def test_agent_only_allows_values_from_field_options():
