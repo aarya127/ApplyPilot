@@ -110,6 +110,8 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Gender"}, profile) == ("Male", "sensitive")
     assert map_field({"label": "Sexual Orientation"}, profile) == ("Straight", "sensitive")
     assert map_field({"label": "If yes, please state their name and job title"}, profile) is None
+    assert map_field({"label": "Subscribe to job alerts and marketing emails?"}, profile) == ("No", "rule")
+    assert map_field({"label": "By selecting Yes, I certify that this application is true and correct."}, profile) == ("Yes", "rule")
 
 
 def test_option_matching_handles_long_dropdown_labels_without_male_female_collision():

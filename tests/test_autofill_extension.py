@@ -223,6 +223,26 @@ def test_backend_policy_defaults_group_affiliations_to_none_of_the_above():
     ]
 
 
+def test_backend_policy_answers_certification_yes_and_subscriptions_no():
+    fields = [
+        {
+            "index": 0,
+            "label": "By selecting Yes, I certify that my application is true and correct.",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Subscribe to job alerts and marketing emails?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {"index": 0, "value": "Yes", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+    ]
+
+
 def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
     fields = [
         {

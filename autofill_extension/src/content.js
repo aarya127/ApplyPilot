@@ -100,7 +100,8 @@
         ...field,
         label: displayLabelForField(field),
         answerKey: answerKeyForField(field),
-        needsManualUpload: field.type === "file"
+        needsManualUpload: field.type === "file",
+        unfilledReason: unfilledReasonForField(field, mappedIndexes)
       }));
 
     return {
@@ -149,6 +150,7 @@
       name: field.name || "",
       id: field.id || "",
       ariaLabel: field.ariaLabel || "",
+      required: Boolean(field.required),
       questionText: field.questionText || "",
       surroundingText: field.surroundingText || "",
       nearbyText: field.nearbyText || "",
@@ -157,6 +159,26 @@
       isPolicy: isAiOnlyField(field),
       shouldAsk: shouldAskForField(field)
     };
+  }
+
+  function unfilledReasonForField(field, mappedIndexes) {
+    if (field.type === "file") {
+      return "File inputs require manual browser confirmation.";
+    }
+
+    if (mappedIndexes.has(field.index) && isAiOnlyField(field)) {
+      return "Autofill has a rule, but this policy question is also available for AI review.";
+    }
+
+    if (isOptionLikeField(field) && !field.options?.length) {
+      return "Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.";
+    }
+
+    if (field.required) {
+      return "Required field was not filled by autofill. Ask AI or add a saved answer.";
+    }
+
+    return "No saved profile value or safe rule matched this field.";
   }
 
   async function buildAutofillPlan() {

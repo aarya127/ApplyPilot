@@ -10,6 +10,12 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if should_skip(text):
         return None
 
+    if re.search(r"subscribe|subscription|email alerts?|job alerts?|marketing emails?|promotional emails?|newsletter|mailing list", text):
+        return profile.get("answers", {}).get("subscribeEmails", "No"), "rule"
+
+    if re.search(r"certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true", text):
+        return profile.get("answers", {}).get("certifyApplicationTruth", "Yes"), "rule"
+
     policy_like = is_policy_question(text)
     saved = saved_answer(field, profile)
     if has_value(saved) and not policy_like:
@@ -72,12 +78,6 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
 
     if re.search(r"whatsapp|sms|text messages?|messaging", text) and re.search(r"recruit|hiring", text):
         return profile.get("answers", {}).get("recruitingMessages", "No"), "rule"
-
-    if re.search(r"subscribe|subscription|email alerts?|job alerts?|marketing emails?|promotional emails?|newsletter|mailing list", text):
-        return profile.get("answers", {}).get("subscribeEmails", "No"), "rule"
-
-    if re.search(r"certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true", text):
-        return profile.get("answers", {}).get("certifyApplicationTruth", "Yes"), "rule"
 
     if re.search(r"veteran|protected veteran|military service", text):
         return profile.get("veteran_status") or "No", "rule"
@@ -165,7 +165,8 @@ def is_policy_question(text: str) -> bool:
         re.search(
             r"sponsor|visa|work authorization|authorized.*work|previously|formerly|ever.*employed|"
             r"relatives?|family member|contractor|dealer|veteran|military|relocat|sexual orientation|"
-            r"hispanic|latino|race|ethnic|gender|disability",
+            r"hispanic|latino|race|ethnic|gender|disability|subscribe|newsletter|email alerts?|"
+            r"job alerts?|marketing emails?|certify|true and correct|communities|affiliation|membership",
             text,
         )
     )

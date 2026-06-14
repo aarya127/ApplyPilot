@@ -306,8 +306,33 @@ async function askAiForMissingAnswers() {
     lastFillResult = fillResponse.result;
     trackButton.disabled = false;
     addMessage("agent", `Added and filled ${fillResponse.result.filled} AI answer(s). Please review them before continuing.`);
+    await refreshPreviewAfterAiFill();
+    reportRemainingRequiredFields(lastPreview);
   } else {
     addMessage("agent", `Added ${aiMappings.length} AI answer(s) to the review list, but I could not fill them automatically. Keep them checked and click Fill selected.`);
+    reportRemainingRequiredFields(lastPreview);
+  }
+}
+
+async function refreshPreviewAfterAiFill() {
+  const response = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
+  if (response?.ok) {
+    lastPreview = response.result;
+    renderReview(lastPreview);
+  }
+}
+
+function reportRemainingRequiredFields(preview) {
+  const required = (preview?.unmappedFields || []).filter((field) => field.required);
+
+  if (!required.length) {
+    addMessage("agent", "No remaining required fields were detected in the preview.");
+    return;
+  }
+
+  addMessage("agent", `Still unresolved required field(s): ${required.length}.`);
+  for (const field of required.slice(0, 8)) {
+    addMessage("agent", `${field.label}: ${field.unfilledReason || "No safe answer was available."}`);
   }
 }
 
@@ -940,7 +965,16 @@ function renderReview(preview) {
     label.textContent = field.label;
 
     const input = buildAnswerInput(field);
-    body.append(label, input);
+    body.append(label);
+
+    if (field.required || field.unfilledReason) {
+      const reason = document.createElement("span");
+      reason.className = "review-value";
+      reason.textContent = `${field.required ? "Required. " : ""}${field.unfilledReason || "Not filled yet."}`;
+      body.append(reason);
+    }
+
+    body.append(input);
     item.append(body);
     reviewList.append(item);
   }
