@@ -9,6 +9,11 @@ FIELD_SELECTOR = (
     "[data-automation-id='selectWidget'], [data-automation-id='selectShowAll']"
 )
 
+OPTION_SELECTOR = (
+    "[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], "
+    "[data-automation-id='promptOption'], .select__option, [id*='-option-']"
+)
+
 
 def scan_fields(page: Any) -> list[dict[str, Any]]:
     locators = page.locator(FIELD_SELECTOR)
@@ -21,22 +26,26 @@ def scan_fields(page: Any) -> list[dict[str, Any]]:
             if not element.is_visible() or not element.is_enabled():
                 continue
 
-            fields.append(
-                {
-                    "index": index,
-                    "tag": element.evaluate("element => element.tagName.toLowerCase()"),
-                    "type": (element.get_attribute("type") or element.get_attribute("role") or "").lower(),
-                    "name": element.get_attribute("name") or "",
-                    "id": element.get_attribute("id") or "",
-                    "placeholder": element.get_attribute("placeholder") or "",
-                    "aria_label": element.get_attribute("aria-label") or "",
-                    "label": label_for(page, element),
-                    "question_text": question_text_for(element),
-                    "surrounding_text": surrounding_text_for(element),
-                    "options": options_for(element),
-                    "locator": element,
-                }
-            )
+            options = options_for(element)
+            field = {
+                "index": index,
+                "tag": element.evaluate("element => element.tagName.toLowerCase()"),
+                "type": (element.get_attribute("type") or element.get_attribute("role") or "").lower(),
+                "name": element.get_attribute("name") or "",
+                "id": element.get_attribute("id") or "",
+                "placeholder": element.get_attribute("placeholder") or "",
+                "aria_label": element.get_attribute("aria-label") or "",
+                "data_automation_id": element.get_attribute("data-automation-id") or "",
+                "label": label_for(page, element),
+                "question_text": question_text_for(element),
+                "surrounding_text": surrounding_text_for(element),
+                "options": options,
+                "locator": element,
+            }
+            if not options and is_dynamic_dropdown_field(field):
+                field["options"] = dynamic_options_for(element)
+
+            fields.append(field)
         except Exception:
             continue
 
@@ -102,6 +111,103 @@ def options_for(element: Any) -> list[dict[str, str]]:
         )
     except Exception:
         return []
+
+
+def is_dynamic_dropdown_field(field: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            str(field.get("label") or ""),
+            str(field.get("placeholder") or ""),
+            str(field.get("name") or ""),
+            str(field.get("id") or ""),
+            str(field.get("aria_label") or ""),
+            str(field.get("surrounding_text") or ""),
+        ]
+    ).lower()
+    return (
+        field.get("type") == "combobox"
+        or field.get("tag") == "button"
+        or "listbox" in text
+        or "combobox" in text
+        or field.get("data_automation_id", "").lower() in {"selectwidget", "selectshowall"}
+        or any(term in text for term in ["select one", "dropdown", "country", "state", "province", "location", "city", "phone code"])
+    )
+
+
+def dynamic_options_for(element: Any) -> list[dict[str, str]]:
+    try:
+        page = element.page
+    except Exception:
+        return []
+
+    try:
+        element.click(timeout=1_500)
+        page.wait_for_timeout(250)
+        options = visible_dropdown_options(page)
+
+        if not options:
+            try:
+                element.press("ArrowDown", timeout=800)
+            except Exception:
+                pass
+            page.wait_for_timeout(250)
+            options = visible_dropdown_options(page)
+
+        try:
+            element.press("Escape", timeout=800)
+        except Exception:
+            pass
+
+        return unique_options(options)
+    except Exception:
+        try:
+            element.press("Escape", timeout=800)
+        except Exception:
+            pass
+        return []
+
+
+def visible_dropdown_options(page: Any) -> list[dict[str, str]]:
+    options = page.locator(OPTION_SELECTOR)
+    values: list[dict[str, str]] = []
+
+    for index in range(min(options.count(), 80)):
+        option = options.nth(index)
+        try:
+            if not option.is_visible():
+                continue
+
+            label = option.inner_text(timeout=500)
+            value = (
+                option.get_attribute("data-automation-label")
+                or option.get_attribute("data-value")
+                or option.get_attribute("value")
+                or option.get_attribute("aria-label")
+                or ""
+            )
+            label = " ".join(str(label or "").split())
+            value = " ".join(str(value or "").split())
+            if label or value:
+                values.append({"label": label, "value": value})
+        except Exception:
+            continue
+
+    return values
+
+
+def unique_options(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    unique: list[dict[str, str]] = []
+
+    for option in options:
+        key = f"{option.get('label', '')}\0{option.get('value', '')}".lower()
+        if key in seen:
+            continue
+
+        seen.add(key)
+        unique.append(option)
+
+    return unique
 
 
 def surrounding_text_for(element: Any) -> str:

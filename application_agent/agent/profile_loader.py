@@ -47,7 +47,7 @@ def normalize_profile(profile: dict[str, Any], settings: dict[str, Any] | None =
         "salary": profile.get("salary") or answers.get("salary") or "Negotiable",
         "relocation": profile.get("relocation") or answers.get("relocation") or "",
         "address": address,
-        "location": profile.get("location") or format_location(address),
+        "location": application_location(profile, settings, address),
         "resume_path": resume_path(profile),
         "work_experience": profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience", []),
         "answers": answers,
@@ -70,6 +70,19 @@ def format_location(address: dict[str, Any]) -> str:
     city = address.get("city", "")
     region = address.get("state") or address.get("province") or ""
     return ", ".join(part for part in [city, region] if part)
+
+
+def application_location(profile: dict[str, Any], settings: dict[str, Any], address: dict[str, Any]) -> str:
+    answers = profile.get("answers") or {}
+    target = settings.get("targetCountry") or "canada"
+
+    if target == "usa":
+        return answers.get("usaLocation") or profile.get("usaLocation") or format_location(address)
+
+    if target == "canada":
+        return answers.get("canadaLocation") or profile.get("canadaLocation") or profile.get("location") or format_location(address)
+
+    return profile.get("location") or format_location(address)
 
 
 def resume_path(profile: dict[str, Any]) -> str:

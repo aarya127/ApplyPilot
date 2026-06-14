@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from application_agent.agent.answer_generator import answer_option_question, parse_option_answer
 from application_agent.agent.detector import detect_ats
 from application_agent.agent.field_mapper import map_field
 from application_agent.agent.profile_loader import normalize_profile
@@ -54,6 +55,23 @@ def test_normalize_profile_uses_target_address_and_resume_path(tmp_path, monkeyp
     assert profile["resume_path"] == str(resume_dir / "resume.pdf")
     assert profile["work_experience"][0]["company"] == "Example Labs"
 
+    profile_with_location_override = normalize_profile(
+        {
+            "firstName": "Test",
+            "lastName": "Candidate",
+            "addresses": {
+                "usa": {
+                    "city": "Bartlett",
+                    "state": "IL",
+                    "country": "United States",
+                }
+            },
+            "answers": {"usaLocation": "Chicago, IL"},
+        },
+        {"targetCountry": "usa"},
+    )
+    assert profile_with_location_override["location"] == "Chicago, IL"
+
 
 def test_field_mapper_handles_greenhouse_style_questions():
     profile = {
@@ -82,8 +100,10 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Who is your current or previous employer?"}, profile) == ("Example Labs", "rule")
     assert map_field({"label": "What is your current or previous job title?"}, profile) == ("Software Engineer", "rule")
     assert map_field({"label": "Have you ever been employed by Stripe or a Stripe affiliate?"}, profile) == ("No", "rule")
+    profile["needs_sponsorship"] = "I do not require sponsorship"
+    assert map_field({"label": "Will you now, or in the future, require sponsorship to work in the United States?"}, profile) == ("No", "rule")
     assert map_field({"question_text": "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank?"}, profile) == ("No", "rule")
-    assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("Yes", "rule")
+    assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("No", "rule")
     assert map_field({"label": "Do you opt-in to receive WhatsApp messages from Stripe Recruiting?"}, profile) == ("No", "rule")
     assert map_field({"label": "Are you Hispanic/Latino?"}, profile) == ("No", "sensitive")
     assert map_field({"label": "Race"}, profile) == ("Asian", "sensitive")
@@ -115,9 +135,47 @@ def test_agent_only_allows_values_from_field_options():
     assert value_allowed_by_field_options(field, "No") == "I am not a protected veteran"
     assert value_allowed_by_field_options(field, "Some unrelated answer") is None
     assert value_allowed_by_field_options({"label": "Why us?", "options": []}, "Free text") == "Free text"
+    assert value_allowed_by_field_options(
+        {"label": "Relocation Assistance", "options": [{"label": "Yes"}, {"label": "No"}]},
+        "Open to relocation",
+    ) == "No"
+    disability_field = {
+        "label": "Do you have a disability?",
+        "options": [
+            {"label": "Yes, I have a disability, or have a history/record of having a disability"},
+            {"label": "No, I don't have a disability, or a history/record of having a disability"},
+            {"label": "I don't wish to answer"},
+        ],
+    }
+    assert value_allowed_by_field_options(disability_field, "No, I do not have a disability and have not had one in the past") is None
+    assert (
+        value_allowed_by_field_options(disability_field, "No, I don't have a disability, or a history/record of having a disability")
+        == "No, I don't have a disability, or a history/record of having a disability"
+    )
 
 
 def test_final_submit_detection_is_conservative():
     assert is_final_submit_text("Submit Application")
     assert is_final_submit_text("Complete Application")
     assert not is_final_submit_text("Save and Continue")
+
+
+def test_option_answer_generation_only_accepts_exact_dropdown_options(monkeypatch):
+    options = [{"label": "Yes"}, {"label": "No"}, {"label": "I prefer not to answer"}]
+
+    monkeypatch.setattr(
+        "application_agent.agent.answer_generator.generate_option_answer_with_llm",
+        lambda question, labels, profile: "Nope",
+    )
+    assert answer_option_question("Are you affiliated with any group?", options, {}) == ("", "needs_manual_answer")
+
+    monkeypatch.setattr(
+        "application_agent.agent.answer_generator.generate_option_answer_with_llm",
+        lambda question, labels, profile: "No",
+    )
+    assert answer_option_question("Are you affiliated with any group?", options, {}) == ("No", "generated_review_required")
+
+
+def test_option_answer_parser_accepts_json_only_shape():
+    assert parse_option_answer('{"answer":"No"}') == "No"
+    assert parse_option_answer('```json\n{"answer":"Yes"}\n```') == "Yes"

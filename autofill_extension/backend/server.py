@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -156,6 +157,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
                         "You are ApplyPilot acting for Aarya Shah on job application forms. "
                         "Return only strict JSON with no markdown or reasoning. "
                         "Choose answers from supplied dropdown, radio, checkbox, and combobox options exactly. "
+                        "For optioned fields, infer the intended meaning from the profile and choose the closest supplied option label verbatim. "
                         "Use the profile, resume facts, saved answers, and default policies. "
                         "Do not invent experience. Skip unknown fields."
                     ),
@@ -256,12 +258,17 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "Use exact option labels when a field has options. "
                 "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
                 "If the best semantic answer is not an exact option, choose the closest supplied option label. "
+                "Never return profile wording for an optioned field unless it exactly equals one supplied option. "
+                "For disability, demographic, veteran, work authorization, sponsorship, relocation, consent, and yes/no fields, compare the meaning of every supplied option and return the single closest option label exactly. "
                 "Prefer explicit profile facts and resume facts over inference. "
                 "Use savedAnswers only when they clearly match the same current question; ignore generic or low-information saved answers for policy questions. "
                 "Act as Aarya; answer eligibility/default-policy questions according to defaultPolicies. "
                 "Use resumeTranscript to decide whether the candidate has worked at a named company; if the named company is absent from the transcript and savedAnswers do not say otherwise, answer No. "
                 "Use candidateContext as the full compact source of truth for profile facts, work history, education, links, preferences, eligibility, and saved answers. "
-                "For relatives, family, spouse, domestic partner, contractors, dealers, affiliates, or company-specific conflict questions, answer No by default unless savedAnswers or resumeTranscript explicitly says Yes. "
+                "For relatives, family, spouse, domestic partner, contractors, dealers, affiliates, group/community affiliations, memberships, or company-specific conflict questions, answer No/None of the above by default unless savedAnswers or resumeTranscript explicitly says Yes. "
+                "For email subscriptions, newsletters, marketing emails, promotional emails, and job alerts, answer No unless savedAnswers explicitly says Yes. "
+                "For certification questions that ask the candidate to confirm the application is true, correct, or complete, answer Yes. "
+                "Do not confuse relocation preference with relocation assistance: being open to relocation does not mean the candidate needs relocation assistance. "
                 "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
                 "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
                 "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts. "
@@ -383,12 +390,15 @@ def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
         "subjectToAgreement": profile.get("subjectToAgreement") or profile.get("answers", {}).get("subjectToAgreement") or "No",
         "relativesAtCompany": profile.get("answers", {}).get("relativesAtCompany", "No"),
         "familyAtCompany": profile.get("answers", {}).get("familyAtCompany", "No"),
+        "groupAffiliations": profile.get("answers", {}).get("groupAffiliations", "No"),
         "previousCompanyEmployment": "No unless the named company appears in workExperience or resumeTranscript.",
         "contractorDealerAffiliate": "No unless savedAnswers or resumeTranscript explicitly says otherwise.",
         "militaryService": profile.get("militaryService") or profile.get("answers", {}).get("militaryService") or "No",
         "spouseMilitaryService": profile.get("answers", {}).get("spouseMilitaryService", "No"),
         "veteranStatus": profile.get("veteranStatus") or profile.get("answers", {}).get("veteranStatus") or "No",
         "recruitingMessages": profile.get("answers", {}).get("recruitingMessages", "No"),
+        "subscribeEmails": profile.get("answers", {}).get("subscribeEmails", "No"),
+        "certifyApplicationTruth": profile.get("answers", {}).get("certifyApplicationTruth", "Yes"),
         "relocation": profile.get("relocation") or profile.get("answers", {}).get("relocation") or "Anywhere",
     }
 
@@ -445,6 +455,10 @@ def policy_answer_for_field(
     ):
         return best_authorization_option(options) or best_available_option("Yes", options) or "Yes"
 
+    if any(term in haystack for term in ["relocation assistance", "relocation support", "need relocation assistance"]):
+        answer = profile.get("answers", {}).get("relocationAssistance") or "No"
+        return best_available_option(answer, options) or answer
+
     if "relocat" in haystack:
         return best_relocation_option(options, policies["relocation"]) or policies["relocation"]
 
@@ -460,6 +474,9 @@ def policy_answer_for_field(
     if any(term in haystack for term in ["relative", "family member", "spouse", "domestic partner"]):
         return best_available_option("No", options) or "No"
 
+    if any(term in haystack for term in ["group", "community", "communities", "affiliation", "affiliated", "membership", "member of", "belong to"]):
+        return best_available_option(policies["groupAffiliations"], options) or best_available_option("None of the above", options) or policies["groupAffiliations"]
+
     if any(term in haystack for term in ["authorized dealer", "dealer", "contractor", "affiliate", "subsidiary"]):
         return best_available_option("No", options) or "No"
 
@@ -473,6 +490,12 @@ def policy_answer_for_field(
 
     if any(term in haystack for term in ["whatsapp", "sms", "text message", "messaging"]):
         return best_available_option(policies["recruitingMessages"], options) or policies["recruitingMessages"]
+
+    if any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
+        return best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
+
+    if any(term in haystack for term in ["certify", "certifying", "certification", "true and correct", "true complete", "information provided true", "facts true"]):
+        return best_available_option(policies["certifyApplicationTruth"], options) or policies["certifyApplicationTruth"]
 
     return None
 
@@ -642,13 +665,27 @@ def enforce_option_values(mappings: list[dict[str, Any]], fields: list[dict[str,
             filtered.append(mapping)
             continue
 
-        value = value_from_options(mapping.get("value"), options)
+        value = value_from_options(normalize_mapping_value_for_field(mapping.get("value"), field), options)
         if value is None:
             continue
 
         filtered.append({**mapping, "value": value})
 
     return filtered
+
+
+def normalize_mapping_value_for_field(value: Any, field: dict[str, Any] | None) -> Any:
+    if not isinstance(field, dict):
+        return value
+
+    haystack = field_policy_haystack(field)
+    text = normalize_for_option(value)
+
+    if any(term in haystack for term in ["relocation assistance", "relocation support", "need relocation assistance"]):
+        if "relocation assistance" not in text and re.search(r"\b(open|willing|able|can|anywhere|nationwide|relocat)", text):
+            return "No"
+
+    return value
 
 
 def normalized_options(field: dict[str, Any] | None) -> list[dict[str, str]]:
@@ -682,6 +719,10 @@ def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
     if not desired:
         return None
 
+    constrained_value = yes_no_constrained_value(desired, options)
+    if constrained_value is not None:
+        return constrained_value
+
     for option in options:
         label = option.get("label", "")
         option_value = option.get("value", "")
@@ -702,6 +743,52 @@ def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
 
         if any(alias and alias in normalized_label for alias in aliases if len(alias) > 3):
             return label or option_value
+
+    return None
+
+
+def yes_no_constrained_value(value: str, options: list[dict[str, str]]) -> str | None:
+    semantic = semantic_yes_no_value(value)
+    if semantic is None:
+        return None
+
+    yes_option = None
+    no_option = None
+
+    for option in options:
+        label = option.get("label", "")
+        option_value = option.get("value", "")
+        text = normalize_for_option(f"{label} {option_value}")
+        if not text or re.search(r"select one|choose|please select", text):
+            continue
+
+        if match_simple_yes_no_option(label, option_value, "yes"):
+            yes_option = label or option_value
+        elif match_simple_yes_no_option(label, option_value, "no"):
+            no_option = label or option_value
+
+    if not yes_option or not no_option:
+        return None
+
+    return yes_option if semantic == "yes" else no_option
+
+
+def match_simple_yes_no_option(label: str, value: str, desired: str) -> bool:
+    normalized_label = normalize_for_option(label)
+    normalized_value = normalize_for_option(value)
+    aliases = option_aliases(desired)
+    return desired in {normalized_label, normalized_value} or any(
+        alias in {normalized_label, normalized_value}
+        for alias in aliases
+    )
+
+
+def semantic_yes_no_value(value: str) -> str | None:
+    if re.search(r"^(no|false|n|0)$", value) or re.search(r"\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b", value):
+        return "no"
+
+    if re.search(r"^(yes|true|y|1)$", value) or re.search(r"\b(open|willing|able|can|agree|consent|authorized|eligible)\b", value):
+        return "yes"
 
     return None
 
@@ -732,6 +819,12 @@ def option_aliases(value: str) -> set[str]:
                 "not hispanic or latino",
                 "not hispanic",
                 "not latino",
+                "none",
+                "none of the above",
+                "no affiliation",
+                "no affiliations",
+                "not affiliated",
+                "not a member",
             }
         )
 

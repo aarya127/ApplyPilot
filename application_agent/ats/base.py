@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from application_agent.agent.answer_generator import answer_question
+from application_agent.agent.answer_generator import answer_option_question, answer_question
 from application_agent.agent.field_mapper import map_field, normalize
 from application_agent.agent.form_scanner import scan_fields
 
@@ -39,7 +39,7 @@ class BaseAdapter:
         for field in fields:
             mapping = map_field(field, profile)
             if not mapping:
-                custom_mapping = self.custom_text_answer(field, profile)
+                custom_mapping = self.custom_option_answer(field, profile) or self.custom_text_answer(field, profile)
                 if custom_mapping:
                     mapping = custom_mapping
                 else:
@@ -77,6 +77,21 @@ class BaseAdapter:
             return None
 
         answer, source = answer_question(question, profile, profile.get("_standard_answers", {}))
+        if not answer:
+            return None
+
+        return answer, source
+
+    def custom_option_answer(self, field: dict[str, Any], profile: dict[str, Any]) -> tuple[str, str] | None:
+        options = field.get("options") or []
+        if not options:
+            return None
+
+        question = field.get("question_text") or field.get("label") or field.get("placeholder") or field.get("name") or ""
+        if not question:
+            return None
+
+        answer, source = answer_option_question(question, options, profile, profile.get("_standard_answers", {}))
         if not answer:
             return None
 
@@ -156,11 +171,29 @@ class BaseAdapter:
                 return False
 
         try:
-            locator.page.wait_for_timeout(350)
+            locator.press("ArrowDown", timeout=1_000)
         except Exception:
             pass
 
-        return self.click_visible_option(locator, desired)
+        if self.wait_and_click_visible_option(locator, desired):
+            return True
+
+        if requires_dropdown_option_click(field):
+            return False
+
+        return locator_value_matches(locator, desired)
+
+    def wait_and_click_visible_option(self, locator: Any, desired: Any, attempts: int = 8) -> bool:
+        for _ in range(attempts):
+            try:
+                locator.page.wait_for_timeout(150)
+            except Exception:
+                pass
+
+            if self.click_visible_option(locator, desired):
+                return True
+
+        return False
 
     def click_visible_option(self, locator: Any, desired: Any) -> bool:
         try:
@@ -168,8 +201,25 @@ class BaseAdapter:
         except Exception:
             return False
 
-        options = page.locator("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']")
-        desired_text = str(desired)
+        options = page.locator("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption'], .select__option, [id*='-option-']")
+        option_values: list[dict[str, str]] = []
+
+        for index in range(options.count()):
+            option = options.nth(index)
+            try:
+                if not option.is_visible():
+                    continue
+
+                option_values.append(
+                    {
+                        "label": option.inner_text(timeout=1_000),
+                        "value": option.get_attribute("data-value") or option.get_attribute("value") or option.get_attribute("aria-label") or "",
+                    }
+                )
+            except Exception:
+                continue
+
+        desired_text = yes_no_constrained_value(str(desired), option_values) or str(desired)
 
         for index in range(options.count()):
             option = options.nth(index)
@@ -306,9 +356,9 @@ def is_final_submit_text(text: str) -> bool:
 
 
 def option_matches(label: str, value: str, desired: str) -> bool:
-    desired = normalize(desired)
-    label_text = normalize(label)
-    value_text = normalize(value)
+    desired = option_text(desired)
+    label_text = option_text(label)
+    value_text = option_text(value)
     aliases = answer_aliases(desired)
 
     if desired in {label_text, value_text}:
@@ -320,16 +370,23 @@ def option_matches(label: str, value: str, desired: str) -> bool:
     return any(contains_phrase(label_text, alias) for alias in aliases if len(alias) > 2)
 
 
+def option_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+]+", " ", str(value or "").lower())).strip()
+
+
 def locator_value_matches(locator: Any, desired: Any) -> bool:
+    current = locator_current_value(locator)
+    return option_matches(current, "", str(desired))
+
+
+def locator_current_value(locator: Any) -> str:
     try:
-        current = locator.input_value(timeout=500)
+        return locator.input_value(timeout=500)
     except Exception:
         try:
-            current = locator.inner_text(timeout=500)
+            return locator.inner_text(timeout=500)
         except Exception:
-            current = ""
-
-    return option_matches(current, "", str(desired))
+            return ""
 
 
 def is_typeahead_field(field: dict[str, Any]) -> bool:
@@ -345,11 +402,20 @@ def is_typeahead_field(field: dict[str, Any]) -> bool:
             ]
         )
     )
-    return bool(re.search(r"location|city|country|state|province|phone.*code|country.*phone|select one", text))
+    return bool(re.search(r"\blocation\b|\bcity\b|\bcountry\b|\bstate\b|\bprovince\b|phone.*code|country.*phone|select one", text))
 
 
 def dropdown_search_value(field: dict[str, Any], desired: str) -> str:
     return str(desired or "").strip()
+
+
+def requires_dropdown_option_click(field: dict[str, Any]) -> bool:
+    try:
+        url = field["locator"].page.url
+    except Exception:
+        url = ""
+
+    return bool(re.search(r"greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse", url, re.I))
 
 
 def value_allowed_by_field_options(field: dict[str, Any], value: Any) -> Any | None:
@@ -362,12 +428,77 @@ def value_allowed_by_field_options(field: dict[str, Any], value: Any) -> Any | N
     if not options:
         return value
 
-    desired = normalize(str(value))
+    value = normalize_value_for_field_options(field, value)
+    constrained = yes_no_constrained_value(str(value), options)
+    if constrained is not None:
+        return constrained
+
+    desired = option_text(str(value))
     for option in options:
         label = option.get("label", "")
         option_value = option.get("value", "")
         if option_matches(label, option_value, desired):
             return label or option_value
+
+    return None
+
+
+def normalize_value_for_field_options(field: dict[str, Any], value: Any) -> Any:
+    text = normalize(
+        " ".join(
+            [
+                str(field.get("label") or ""),
+                str(field.get("question_text") or ""),
+                str(field.get("name") or ""),
+                str(field.get("id") or ""),
+                str(field.get("placeholder") or ""),
+                str(field.get("aria_label") or ""),
+            ]
+        )
+    )
+    desired = normalize(str(value or ""))
+
+    if re.search(r"relocation assistance|relocation support|need relocation assistance", text):
+        if "relocation assistance" not in desired and re.search(r"\b(open|willing|able|can|anywhere|nationwide|relocat)", desired):
+            return "No"
+
+    return value
+
+
+def yes_no_constrained_value(value: str, options: list[dict[str, Any]]) -> str | None:
+    semantic = semantic_yes_no_value(value)
+    if semantic is None:
+        return None
+
+    yes_option = None
+    no_option = None
+
+    for option in options:
+        label = str(option.get("label") or "")
+        option_value = str(option.get("value") or "")
+        text = normalize(f"{label} {option_value}")
+        if not text or re.search(r"select one|choose|please select", text):
+            continue
+
+        if option_matches(label, option_value, "Yes"):
+            yes_option = label or option_value
+        elif option_matches(label, option_value, "No"):
+            no_option = label or option_value
+
+    if not yes_option or not no_option:
+        return None
+
+    return yes_option if semantic == "yes" else no_option
+
+
+def semantic_yes_no_value(value: str) -> str | None:
+    text = normalize(str(value or ""))
+
+    if re.search(r"^(no|false|n|0)$", text) or re.search(r"\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b", text):
+        return "no"
+
+    if re.search(r"^(yes|true|y|1)$", text) or re.search(r"\b(open|willing|able|can|agree|consent|authorized|eligible)\b", text):
+        return "yes"
 
     return None
 
@@ -388,6 +519,12 @@ def answer_aliases(desired: str) -> list[str]:
                 "i am not a protected veteran",
                 "not a protected veteran",
                 "not hispanic or latino",
+                "none",
+                "none of the above",
+                "no affiliation",
+                "no affiliations",
+                "not affiliated",
+                "not a member",
             }
         )
 

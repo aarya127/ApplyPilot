@@ -189,6 +189,40 @@ def test_backend_policy_mapper_answers_general_eligibility_dropdowns():
     ]
 
 
+def test_backend_policy_distinguishes_relocation_assistance_from_relocation_preference():
+    fields = [
+        {
+            "index": 0,
+            "label": "Will you need relocation assistance to work at this role's specified location?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        }
+    ]
+
+    assert server.policy_mappings(fields, {"relocation": "Open to relocation"}) == [
+        {"index": 0, "value": "No", "confidence": 0.78, "source": "policy"}
+    ]
+
+
+def test_backend_policy_defaults_group_affiliations_to_none_of_the_above():
+    fields = [
+        {
+            "index": 0,
+            "label": "Which of the following communities do you belong to?",
+            "options": [
+                {"label": "Person with disability"},
+                {"label": "Veteran"},
+                {"label": "Parent"},
+                {"label": "None of the above"},
+                {"label": "I prefer not to answer"},
+            ],
+        }
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {"index": 0, "value": "None of the above", "confidence": 0.78, "source": "policy"}
+    ]
+
+
 def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
     fields = [
         {
@@ -359,6 +393,11 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
             "label": "Will you now, or in the future, require sponsorship to work in the United States?",
             "options": [{"label": "Yes"}, {"label": "No"}],
         },
+        {
+            "index": 6,
+            "label": "Will you need relocation assistance to work at this role's specified location?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
     ]
     mappings = [
         {"index": 0, "value": "No", "confidence": 0.8, "source": "llm"},
@@ -367,6 +406,7 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
         {"index": 3, "value": "straight", "confidence": 0.8, "source": "llm"},
         {"index": 4, "value": "Canada (+1)", "confidence": 0.8, "source": "llm"},
         {"index": 5, "value": "I do not require sponsorship", "confidence": 0.8, "source": "llm"},
+        {"index": 6, "value": "Open to relocation", "confidence": 0.8, "source": "llm"},
     ]
 
     filtered = server.enforce_option_values(mappings, fields)
@@ -378,6 +418,37 @@ def test_backend_enforces_ai_answers_are_dropdown_options():
         {"index": 3, "value": "Straight", "confidence": 0.8, "source": "llm"},
         {"index": 4, "value": "Canada (+1)", "confidence": 0.8, "source": "llm"},
         {"index": 5, "value": "No", "confidence": 0.8, "source": "llm"},
+        {"index": 6, "value": "No", "confidence": 0.8, "source": "llm"},
+    ]
+
+
+def test_backend_drops_non_option_wording_for_optioned_fields():
+    fields = [
+        {
+            "index": 0,
+            "label": "Do you have a disability?",
+            "options": [
+                {"label": "Yes, I have a disability, or have a history/record of having a disability"},
+                {"label": "No, I don't have a disability, or a history/record of having a disability"},
+                {"label": "I don't wish to answer"},
+            ],
+        },
+    ]
+
+    assert server.enforce_option_values(
+        [{"index": 0, "value": "No, I do not have a disability and have not had one in the past", "confidence": 0.8, "source": "llm"}],
+        fields,
+    ) == []
+    assert server.enforce_option_values(
+        [{"index": 0, "value": "No, I don't have a disability, or a history/record of having a disability", "confidence": 0.8, "source": "llm"}],
+        fields,
+    ) == [
+        {
+            "index": 0,
+            "value": "No, I don't have a disability, or a history/record of having a disability",
+            "confidence": 0.8,
+            "source": "llm",
+        }
     ]
 
 

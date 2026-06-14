@@ -50,7 +50,7 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
         return address_answer, "rule"
 
     if re.search(r"sponsor|visa|h-?1b|work permit", text):
-        return profile.get("needs_sponsorship") or "No", "rule"
+        return sponsorship_answer(profile.get("needs_sponsorship") or profile.get("answers", {}).get("sponsorship") or "No"), "rule"
 
     if re.search(r"authorized|eligible|legally.*work|work authorization", text):
         return profile.get("work_authorization") or "Yes", "rule"
@@ -61,6 +61,9 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if re.search(r"relatives?|family member|spouse|domestic partner", text) and re.search(r"employed|work|working|relationship", text):
         return profile.get("answers", {}).get("relativesAtCompany", "No"), "rule"
 
+    if re.search(r"groups?|communities|community|affiliation|affiliated|membership|member of|belong to", text):
+        return profile.get("answers", {}).get("groupAffiliations", "No"), "rule"
+
     if re.search(r"authorized dealer|dealer", text):
         return profile.get("answers", {}).get("workedForAuthorizedDealer", "No"), "rule"
 
@@ -69,6 +72,12 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
 
     if re.search(r"whatsapp|sms|text messages?|messaging", text) and re.search(r"recruit|hiring", text):
         return profile.get("answers", {}).get("recruitingMessages", "No"), "rule"
+
+    if re.search(r"subscribe|subscription|email alerts?|job alerts?|marketing emails?|promotional emails?|newsletter|mailing list", text):
+        return profile.get("answers", {}).get("subscribeEmails", "No"), "rule"
+
+    if re.search(r"certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true", text):
+        return profile.get("answers", {}).get("certifyApplicationTruth", "Yes"), "rule"
 
     if re.search(r"veteran|protected veteran|military service", text):
         return profile.get("veteran_status") or "No", "rule"
@@ -163,8 +172,28 @@ def is_policy_question(text: str) -> bool:
 
 
 def relocation_assistance_answer(profile: dict[str, Any]) -> str:
-    explicit = profile.get("answers", {}).get("relocationAssistance") or profile.get("relocation") or ""
-    return "No" if re.search(r"not interested|^no$|false", normalize(explicit)) else "Yes"
+    explicit = profile.get("answers", {}).get("relocationAssistance") or ""
+    return "Yes" if re.search(r"^(yes|true|1)$|need|require|request|want", normalize(explicit)) else "No"
+
+
+def sponsorship_answer(value: Any) -> str:
+    text = normalize(str(value or ""))
+
+    if (
+        text == "no"
+        or re.search(r"(do not|don t|will not|would not|won t|not).*(require|need).*(sponsor|visa|work permit)", text)
+        or re.search(r"not require sponsorship|no sponsorship", text)
+    ):
+        return "No"
+
+    if (
+        text == "yes"
+        or re.search(r"(require|need).*(sponsor|visa|work permit)", text)
+        or re.search(r"h-?1b|f-?1|opt|cpt|tn|ead", text)
+    ):
+        return "Yes"
+
+    return str(value or "No")
 
 
 def phrase_in_text(phrase: str, text: str) -> bool:

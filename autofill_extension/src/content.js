@@ -38,6 +38,13 @@
       return false;
     }
 
+    if (message?.type === "DEBUG_DROPDOWNS") {
+      debugDropdowns()
+        .then((result) => sendResponse({ ok: true, result }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message?.type === "AUTOFILL_PAGE") {
       autofillPage()
         .then((result) => sendResponse({ ok: true, result }))
@@ -105,6 +112,10 @@
         return {
           ...mapping,
           label: field?.label || field?.name || field?.id || `Field ${mapping.index + 1}`,
+          name: field?.name || "",
+          id: field?.id || "",
+          placeholder: field?.placeholder || "",
+          ariaLabel: field?.ariaLabel || "",
           tag: field?.tag || "",
           type: field?.type || "",
           options: field?.options || []
@@ -172,6 +183,37 @@
     return { fields, mappings, profile };
   }
 
+  async function debugDropdowns() {
+    const fields = scanFields();
+    const dropdowns = [];
+
+    for (const field of fields) {
+      if (!isDynamicDropdownField(field) && field.tag !== "select" && !field.options?.length) {
+        continue;
+      }
+
+      const element = field.elementRef?.deref?.();
+      let options = field.options || [];
+
+      if (element && isFillable(element) && !options.length && isDynamicDropdownField(field)) {
+        options = await discoverDynamicDropdownOptions(element);
+      }
+
+      dropdowns.push({
+        index: field.index,
+        label: displayLabelForField(field),
+        tag: field.tag,
+        type: field.type,
+        value: field.value || "",
+        isDynamic: isDynamicDropdownField(field),
+        optionsFound: options.length,
+        options: options.slice(0, 25)
+      });
+    }
+
+    return { count: dropdowns.length, dropdowns };
+  }
+
   async function applyMappings(mappings) {
     if (state.isApplying) {
       return {
@@ -190,6 +232,9 @@
     const profile = candidateProfile || {};
     const fields = scanFields();
     hydrateFieldsFromPreview(fields);
+    mappings = mappings
+      .map((mapping) => normalizeMappingForField(mapping, fields))
+      .filter((mapping) => hasValue(mapping.value));
     let filled = 0;
     const failures = [];
 
@@ -209,10 +254,14 @@
       }
 
       for (const mapping of mappings) {
-        const field = fields.find((item) => item.index === mapping.index);
+        const field = resolveFieldForMapping(mapping, fields);
         const element = field?.elementRef?.deref?.();
 
         if (!element || !isFillable(element)) {
+          continue;
+        }
+
+        if (shouldSkipMappingForExistingCoreField(mapping, field, element)) {
           continue;
         }
 
@@ -298,6 +347,7 @@
       ariaLabel: element.getAttribute("aria-label") || "",
       autocomplete: element.getAttribute("autocomplete") || "",
       dataAutomationId: element.getAttribute("data-automation-id") || "",
+      required: isRequiredElement(element, rawLabel),
       value: getCurrentValue(element),
       options,
       surroundingText: getSurroundingText(element),
@@ -364,6 +414,7 @@
       placeholder: "",
       ariaLabel: group.container?.getAttribute?.("aria-label") || first.getAttribute("aria-label") || "",
       autocomplete: "",
+      required: isRequiredElement(first, label),
       value: "",
       options,
       surroundingText: compactText(group.container?.innerText || ""),
@@ -379,6 +430,14 @@
     const type = (element.getAttribute("type") || "").toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
     return type === "radio" || type === "checkbox" || role === "radio" || role === "checkbox";
+  }
+
+  function isRequiredElement(element, label = "") {
+    return element.required === true
+      || element.getAttribute("aria-required") === "true"
+      || /\*/.test(label || "")
+      || /\brequired\b/i.test(label || "")
+      || /\*/.test(getSurroundingText(element));
   }
 
   function isStandaloneCheckbox(element) {
@@ -733,7 +792,7 @@
         continue;
       }
 
-      const options = await discoverDynamicDropdownOptions(element, typeaheadSeedForField(field));
+      const options = await discoverDynamicDropdownOptions(element);
       if (options.length && options.length <= 40) {
         field.options = options;
       }
@@ -745,21 +804,11 @@
       || field.tag === "button"
       || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
       || field.ariaLabel
-      || /(location|city|country|state|province|phone.*code|country.*phone|select one)/i.test([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "))
+      || /(\blocation\b|\bcity\b|\bcountry\b|\bstate\b|\bprovince\b|phone.*code|country.*phone|select one)/i.test([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "))
       || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "));
   }
 
-  function typeaheadSeedForField(field) {
-    const text = normalize([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "));
-
-    if (/location|city/.test(text)) {
-      return "s";
-    }
-
-    return "";
-  }
-
-  async function discoverDynamicDropdownOptions(element, seed = "") {
+  async function discoverDynamicDropdownOptions(element) {
     const trigger = dropdownTrigger(element);
 
     if (!trigger) {
@@ -771,14 +820,14 @@
     try {
       trigger.focus();
       trigger.click();
-      await sleep(180);
+      await sleep(250);
 
-      let options = collectVisibleDropdownOptions(trigger);
+      let options = await waitForDropdownOptions(trigger);
 
-      if (!options.length && seed && trigger.tagName.toLowerCase() !== "button") {
-        setEditableText(trigger, seed);
-        await sleep(300);
-        options = collectVisibleDropdownOptions(trigger);
+      if (!options.length) {
+        dispatchEnterOrEscape(trigger, "ArrowDown");
+        await sleep(250);
+        options = await waitForDropdownOptions(trigger);
       }
 
       closeDynamicDropdown(trigger);
@@ -828,7 +877,7 @@
     containers.push(document);
 
     const optionNodes = containers.flatMap((container) => (
-      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
+      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption'], .select__option, [id*='-option-']"))
     ));
 
     return optionNodes
@@ -838,6 +887,19 @@
         value: compactText(option.getAttribute("data-automation-label") || option.getAttribute("data-value") || option.getAttribute("value") || option.getAttribute("aria-label") || option.innerText || option.textContent || "")
       }))
       .filter((option) => option.label || option.value);
+  }
+
+  async function waitForDropdownOptions(trigger, attempts = 8) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const options = collectVisibleDropdownOptions(trigger);
+      if (options.length) {
+        return options;
+      }
+
+      await sleep(125);
+    }
+
+    return [];
   }
 
   function closeDynamicDropdown(element) {
@@ -911,13 +973,14 @@
     );
     const haystack = fieldHaystack(field);
     const fullHaystack = fullFieldHaystack(field);
+    const phoneContextHaystack = normalize([primaryHaystack, field.surroundingText, field.nearbyText].join(" "));
 
     if (shouldSkipField(primaryHaystack)) {
       return null;
     }
 
-    if (isPhoneCountryCodeField(primaryHaystack)) {
-      return buildMapping(field, profile.answers?.phoneCountryCode || profile.phoneCountryCode || "Canada (+1)", "rule", 0.88);
+    if (isPhoneCountryCodeField(primaryHaystack) || isGreenhousePhoneCountryField(field, primaryHaystack, phoneContextHaystack)) {
+      return buildMapping(field, phoneCountryCodeAnswer(field, profile), "rule", 0.88);
     }
 
     if (isPhoneExtensionField(primaryHaystack)) {
@@ -928,6 +991,10 @@
 
     if (isPhoneDeviceTypeField(primaryHaystack)) {
       return buildMapping(field, profile.answers?.phoneDeviceType || profile.phoneDeviceType || "Mobile", "rule", 0.86);
+    }
+
+    if (isPhoneNumberField(primaryHaystack)) {
+      return buildMapping(field, profile.phone, "rule", 0.9);
     }
 
     const address = selectAddress(profile, settings, primaryHaystack);
@@ -992,7 +1059,7 @@
       return workHistoryMapping;
     }
 
-    const locationMapping = mapLocationField(field, address, primaryHaystack);
+    const locationMapping = mapLocationField(field, profile, settings, address, primaryHaystack);
     if (locationMapping) {
       return locationMapping;
     }
@@ -1010,7 +1077,6 @@
       [/(\bfirst\b.*\bname\b|\bgiven\b.*\bname\b|fname)/, profile.firstName],
       [/(\blast\b.*\bname\b|\bfamily\b.*\bname\b|lname|surname)/, profile.lastName],
       [/(email|e-mail)/, profile.email],
-      [/(phone|mobile|cell|telephone)/, profile.phone],
       [/(linkedin profile|linkedin url|linked in profile|linked in url|^linkedin$)/, profile.linkedin],
       [/(github profile|github url|git hub profile|git hub url)/, profile.github],
       [/(portfolio|personal website|website url|personal site)/, profile.portfolio],
@@ -1046,6 +1112,10 @@
 
     if (/(review.*linked document|candidate privacy policy|privacy policy|linked document)/.test(haystack)) {
       return buildMapping(field, profile.answers?.reviewedPrivacyPolicy || "Yes", "rule", 0.82);
+    }
+
+    if (/(certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.certifyApplicationTruth || "Yes", "rule", 0.9);
     }
 
     if (/(relevant employment|military service).*(above|add another|employment link)/.test(haystack)) {
@@ -1096,7 +1166,29 @@
   }
 
   function isPhoneCountryCodeField(haystack) {
-    return /country.*phone.*code|phone.*country.*code|country code/.test(haystack);
+    return /country.*phone.*code|phone.*country.*code|country code|phone\s+country|country\s+phone/.test(haystack);
+  }
+
+  function isGreenhousePhoneCountryField(field, primaryHaystack, fullHaystack) {
+    return /^country\s*(required)?\s*\*?$|^required\s+country\s*\*?$/.test(primaryHaystack)
+      && (/\bphone\b/.test(fullHaystack) || hasPhoneCountryCodeOptions(field.options))
+      && !/(currently reside|current residence|country.*reside|country region|country\/region|location|city)/.test(primaryHaystack)
+      && (!field.options?.length || hasPhoneCountryCodeOptions(field.options));
+  }
+
+  function hasPhoneCountryCodeOptions(options = []) {
+    return options.some((option) => /\+\s*\d{1,4}|\(\s*\+\s*\d{1,4}\s*\)/.test(`${option.label || ""} ${option.value || ""}`));
+  }
+
+  function phoneCountryCodeAnswer(field, profile) {
+    const explicit = profile.answers?.phoneCountryCode || profile.phoneCountryCode || "Canada (+1)";
+    const options = field.options || [];
+    const canadaOption = options.find((option) => {
+      const text = normalize(`${option.label || ""} ${option.value || ""}`);
+      return /\bcanada\b/.test(text) && /(^|\s|\()\+?1(\)|\s|$)/.test(text);
+    });
+
+    return canadaOption ? (canadaOption.label || canadaOption.value) : explicit;
   }
 
   function isPhoneExtensionField(haystack) {
@@ -1105,6 +1197,14 @@
 
   function isPhoneDeviceTypeField(haystack) {
     return /phone.*device.*type|device.*type.*phone/.test(haystack);
+  }
+
+  function isPhoneNumberField(haystack) {
+    return /(phone|mobile|cell|telephone)/.test(haystack)
+      && !isPhoneCountryCodeField(haystack)
+      && !isPhoneExtensionField(haystack)
+      && !isPhoneDeviceTypeField(haystack)
+      && !/(location|city|country|state|province|postal|zip)/.test(haystack);
   }
 
   function findSavedAnswer(field, profile) {
@@ -1296,7 +1396,7 @@
       return preferredOption.label || preferredOption.value;
     }
 
-    return desired === "No" ? "No" : desired;
+    return normalizeSponsorshipValue(desired);
   }
 
   function workAuthorizationAnswer(field, profile) {
@@ -1346,6 +1446,10 @@
 
     if (/(relatives?|family member|spouse|domestic partner).*(employed|work|working)|((employed|work|working).*(relatives?|family member|spouse|domestic partner))/.test(haystack)) {
       return buildMapping(field, profile.answers?.relativesAtCompany || "No", "rule", 0.88);
+    }
+
+    if (/(groups?|communities|community|affiliation|affiliated|membership|member of|belong to)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.groupAffiliations || "No", "rule", 0.86);
     }
 
     if (/(authorized dealer|dealer).*(employed|work|working)|((employed|work|working).*(authorized dealer|dealer))/.test(haystack)) {
@@ -1399,10 +1503,10 @@
   }
 
   function relocationAssistanceAnswer(field, profile) {
-    const explicit = profile.answers?.relocationAssistance || profile.relocation || profile.answers?.relocation;
+    const explicit = profile.answers?.relocationAssistance;
     const options = field.options || [];
-    const wantsRelocation = !/not interested|no\b|false/.test(normalize(explicit || ""));
-    const desired = wantsRelocation ? "Yes" : "No";
+    const needsAssistance = /^(yes|true|1)$|need|require|request|want/.test(normalize(explicit || ""));
+    const desired = needsAssistance ? "Yes" : "No";
     const preferred = options.find((option) => optionMatches(option.label, option.value, desired))
       || (hasValue(explicit) ? options.find((option) => optionMatches(option.label, option.value, explicit)) : null);
 
@@ -1412,6 +1516,10 @@
   function mapCompanyQuestion(field, profile, haystack) {
     if (/(whatsapp|sms|text messages?|messaging).*(recruit|hiring)|recruit.*(whatsapp|sms|text messages?|messaging)/.test(haystack)) {
       return buildMapping(field, profile.answers?.recruitingMessages || "No", "rule", 0.9);
+    }
+
+    if (/(subscribe|subscription|email alerts?|job alerts?|marketing emails?|promotional emails?|newsletter|mailing list)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.subscribeEmails || "No", "rule", 0.9);
     }
 
     return null;
@@ -1476,7 +1584,7 @@
     return null;
   }
 
-  function mapLocationField(field, address, haystack) {
+  function mapLocationField(field, profile, settings, address, haystack) {
     if (!address) {
       return null;
     }
@@ -1489,13 +1597,14 @@
       return null;
     }
 
+    const applicationLocation = selectApplicationLocation(profile, settings, address);
+
     if (/(location city|city location|current city|where.*city)/.test(haystack)) {
-      return hasValue(address.city) ? buildMapping(field, address.city, "rule", 0.9) : null;
+      return hasValue(applicationLocation.city) ? buildMapping(field, applicationLocation.city, "rule", 0.9) : null;
     }
 
     if (/(location|required.*city.*(state|region|country)|city.*(state|region).*(country))/.test(haystack)) {
-      const region = address.state || address.province || "";
-      const location = [address.city, region, address.country].filter(Boolean).join(", ");
+      const location = applicationLocation.full || [applicationLocation.city, applicationLocation.region, address.country].filter(Boolean).join(", ");
       return hasValue(location) ? buildMapping(field, location, "rule", 0.9) : null;
     }
 
@@ -1504,6 +1613,26 @@
     }
 
     return null;
+  }
+
+  function selectApplicationLocation(profile, settings, address) {
+    const answers = profile.answers || {};
+    const target = settings?.targetCountry || "";
+    const cityKey = target === "usa" ? "usaCity" : target === "canada" ? "canadaCity" : "";
+    const locationKey = target === "usa" ? "usaLocation" : target === "canada" ? "canadaLocation" : "";
+    const full = answers[locationKey] || profile[locationKey] || profile.applicationLocation || "";
+    const city = answers[cityKey] || profile[cityKey] || cityFromLocation(full) || address.city || "";
+    const region = (full && regionFromLocation(full)) || address.state || address.province || "";
+
+    return { city, region, full };
+  }
+
+  function cityFromLocation(value) {
+    return compactText(String(value || "").split(",")[0] || "");
+  }
+
+  function regionFromLocation(value) {
+    return compactText(String(value || "").split(",")[1] || "");
   }
 
   function shouldSkipField(haystack) {
@@ -1644,6 +1773,10 @@
     }
 
     if (/(age|sexual orientation|disability|communities|transgender)/.test(haystack)) {
+      if (/sexual orientation|orientation/.test(haystack)) {
+        return null;
+      }
+
       const preferred = options.find((option) => /prefer not|do not want|decline/i.test(option.label || option.value || ""));
       return preferred
         ? buildMapping(field, preferred.label || preferred.value, "voluntary-fallback", 0.7)
@@ -1936,7 +2069,10 @@
       return;
     }
 
-    mappings.push(buildMapping(field, value, "experience", 0.92));
+    const mapping = buildMapping(field, value, "experience", 0.92);
+    if (mapping) {
+      mappings.push(mapping);
+    }
   }
 
   function isEmploymentField(field, haystack) {
@@ -2670,6 +2806,11 @@
       return "";
     }
 
+    const constrainedValue = optionConstrainedValue(field.options, value);
+    if (constrainedValue) {
+      return constrainedValue;
+    }
+
     const match = field.options.find((option) => optionMatches(option.label, option.value, value));
     return match ? (match.label || match.value) : "";
   }
@@ -2723,17 +2864,112 @@
   }
 
   function buildMapping(field, value, source, confidence) {
+    const normalizedValue = normalizedMappingValue(field, value);
+
+    if (field.options?.length && !hasValue(normalizedValue)) {
+      return null;
+    }
+
+    if (!field.options?.length && isOptionLikeField(field)) {
+      return null;
+    }
+
     return {
       index: field.index,
-      value: normalizedMappingValue(field, value),
+      value: normalizedValue,
       source,
       confidence
     };
   }
 
+  function isOptionLikeField(field) {
+    return field.tag === "select"
+      || field.tag === "button"
+      || field.type === "combobox"
+      || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "))
+      || /selectwidget|selectshowall/i.test(field.dataAutomationId || "");
+  }
+
   function normalizedMappingValue(field, value) {
+    const policyValue = normalizedPolicyValue(field, value);
+    if (policyValue !== null) {
+      return bestOptionValue(field, policyValue) || policyValue;
+    }
+
     const exactOption = bestOptionValue(field, value);
-    return exactOption || value;
+    if (field.options?.length) {
+      return exactOption || "";
+    }
+
+    return value;
+  }
+
+  function normalizedPolicyValue(field, value) {
+    const haystack = fullFieldHaystack(field);
+    const desired = normalize(value);
+
+    if (/(sponsor|sponsorship|visa|h-?1b|f-?1|opt|cpt|tn|ead|work permit)/.test(haystack)) {
+      return normalizeSponsorshipValue(value);
+    }
+
+    if (/(relocation assistance|need relocation assistance|relocation support)/.test(haystack)) {
+      return normalizeRelocationAssistanceValue(value);
+    }
+
+    if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
+      if (/(not authorized|not eligible|unauthorized|cannot work)/.test(desired)) {
+        return "No";
+      }
+
+      if (/(authorized|eligible|legally|yes|any employer|green card|permanent resident|citizen)/.test(desired)) {
+        return "Yes";
+      }
+    }
+
+    return null;
+  }
+
+  function normalizeRelocationAssistanceValue(value) {
+    const text = normalize(value);
+
+    if (
+      text === "yes"
+      || /(need|require|request|want).*(relocation assistance|relocation support|assistance|support)/.test(text)
+    ) {
+      return "Yes";
+    }
+
+    if (
+      text === "no"
+      || /(do not|don t|will not|would not|not).*(need|require|request|want).*(relocation assistance|relocation support|assistance|support)/.test(text)
+      || /open to relocation|open to relocate|willing to relocate|anywhere|nationwide/.test(text)
+    ) {
+      return "No";
+    }
+
+    return value;
+  }
+
+  function normalizeSponsorshipValue(value) {
+    const text = normalize(value);
+
+    if (
+      text === "no"
+      || /(do not|don t|will not|would not|won t|not).*(require|need).*(sponsor|visa|work permit)/.test(text)
+      || /not require sponsorship|no sponsorship/.test(text)
+    ) {
+      return "No";
+    }
+
+    if (
+      text === "yes"
+      || /(require|need).*(sponsor|visa|work permit)/.test(text)
+      || /(h-?1b|f-?1|opt|cpt|tn|ead)/.test(text)
+    ) {
+      return "Yes";
+    }
+
+    return value;
   }
 
   async function getBackendMappings(fields, profile) {
@@ -2771,16 +3007,47 @@
 
     for (const mapping of backendMappings) {
       const existing = byIndex.get(mapping.index);
-      if (!existing || Number(mapping.confidence || 0) >= Number(existing.confidence || 0)) {
-        byIndex.set(mapping.index, normalizeMappingForField(mapping, fields));
+      const candidate = normalizeMappingForField(mapping, fields);
+
+      if (!hasValue(candidate.value)) {
+        continue;
+      }
+
+      if (shouldKeepExistingMapping(existing, candidate, fields)) {
+        continue;
+      }
+
+      if (!existing || Number(candidate.confidence || 0) >= Number(existing.confidence || 0)) {
+        byIndex.set(mapping.index, candidate);
       }
     }
 
     return Array.from(byIndex.values());
   }
 
+  function shouldKeepExistingMapping(existing, candidate, fields) {
+    if (!existing || !hasValue(existing.value)) {
+      return false;
+    }
+
+    const field = fields.find((item) => item.index === existing.index);
+    const haystack = field ? fullFieldHaystack(field) : "";
+    const existingValue = normalize(existing.value);
+    const candidateValue = normalize(candidate.value);
+
+    if (
+      /(relocation assistance|need relocation assistance|relocation support)/.test(haystack)
+      && /^(yes|no)$/.test(existingValue)
+      && !/^(yes|no)$/.test(candidateValue)
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
   function normalizeMappingForField(mapping, fields) {
-    const field = fields.find((item) => item.index === mapping.index);
+    const field = resolveFieldForMapping(mapping, fields);
 
     if (!field) {
       return mapping;
@@ -2792,8 +3059,96 @@
     };
   }
 
+  function resolveFieldForMapping(mapping, fields) {
+    const indexed = fields.find((item) => item.index === mapping.index);
+
+    if (indexed && mappingMatchesField(mapping, indexed)) {
+      return indexed;
+    }
+
+    const exact = fields.find((field) => mappingMatchesField(mapping, field));
+    if (exact) {
+      return exact;
+    }
+
+    return mappingHasIdentity(mapping) ? null : indexed;
+  }
+
+  function mappingMatchesField(mapping, field) {
+    if (!field) {
+      return false;
+    }
+
+    if (mapping.id && field.id && mapping.id === field.id) {
+      return true;
+    }
+
+    if (mapping.name && field.name && mapping.name === field.name) {
+      return true;
+    }
+
+    const mappingLabel = normalize(cleanDisplayLabel(mapping.label || ""));
+    const fieldLabel = normalize(displayLabelForField(field));
+
+    if (mappingLabel && fieldLabel && mappingLabel === fieldLabel) {
+      if (mapping.tag && field.tag && mapping.tag !== field.tag) {
+        return false;
+      }
+
+      if (mapping.type && field.type && mapping.type !== field.type && !compatibleFieldTypes(mapping.type, field.type)) {
+        return false;
+      }
+
+      return true;
+    }
+
+    return false;
+  }
+
+  function mappingHasIdentity(mapping) {
+    return Boolean(mapping.label || mapping.name || mapping.id || mapping.ariaLabel || mapping.placeholder);
+  }
+
+  function compatibleFieldTypes(left, right) {
+    const pair = new Set([left, right].map((item) => String(item || "").toLowerCase()));
+    return pair.has("text") && (pair.has("input") || pair.has("textbox"));
+  }
+
   function serializeFields(fields) {
     return fields.map(({ elementRef, choiceRefs, ...field }) => field);
+  }
+
+  function shouldSkipMappingForExistingCoreField(mapping, field, element) {
+    if (!isAiMapping(mapping) || !isCoreProfileField(field)) {
+      return false;
+    }
+
+    const current = compactText(getCurrentValue(element));
+    if (!current || isPlaceholderValue(current)) {
+      return false;
+    }
+
+    return !valueMatches(current, mapping.value) && !optionMatches(current, "", mapping.value);
+  }
+
+  function isAiMapping(mapping) {
+    return /llm|ai|policy/.test(normalize(mapping.source || ""));
+  }
+
+  function isCoreProfileField(field) {
+    const haystack = fullFieldHaystack(field);
+    return [
+      /\b(first|middle|last|preferred|full|legal)\s+name\b/,
+      /\bname\s+(first|middle|last|preferred|full|legal)\b/,
+      /^name$/,
+      /\bemail\b|\be-mail\b/,
+      /\bphone\b|\bmobile\b|\bcell\b|\btelephone\b/,
+      /\baddress\b|\bstreet\b|\bcity\b|\bstate\b|\bprovince\b|\bpostal\b|\bzip\b|\bcountry\b/
+    ].some((pattern) => pattern.test(haystack));
+  }
+
+  function isPlaceholderValue(value) {
+    return /^(select one|select|choose|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
   }
 
   async function fillElement(element, mapping, field) {
@@ -2867,9 +3222,14 @@
   }
 
   function fillChoiceGroup(field, desiredValue, allowMultiple) {
+    const choiceOptions = (field.choiceRefs || [])
+      .map((ref) => ref.deref())
+      .filter(Boolean)
+      .map((choice) => ({ label: choiceLabel(choice), value: choiceValue(choice) }));
+    const constrainedValue = optionConstrainedValue(choiceOptions, desiredValue);
     const values = Array.isArray(desiredValue)
       ? desiredValue
-      : String(desiredValue).split(/\s*[;,]\s*/).filter(Boolean);
+      : String(constrainedValue || desiredValue).split(/\s*[;,]\s*/).filter(Boolean);
     const choices = field.choiceRefs.map((ref) => ref.deref()).filter(Boolean);
     let clicked = 0;
 
@@ -2916,17 +3276,16 @@
 
   async function fillCombobox(element, desiredValue) {
     const trigger = dropdownTrigger(element) || element;
+    const previousValue = getCurrentValue(trigger);
+    const mustClickOption = requiresDropdownOptionClick();
+
     trigger.focus();
     trigger.click();
-    await sleep(200);
+    await sleep(250);
 
-    const option = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
-      .filter(isVisibleElement)
-      .find((item) => optionMatches(
-        item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
-        item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || "",
-        desiredValue
-      ));
+    const initialOptions = visibleOptionElements(trigger);
+    const optionValue = optionConstrainedValue(optionsFromElements(initialOptions), desiredValue) || desiredValue;
+    const option = await waitForMatchingDropdownOption(trigger, optionValue);
 
     if (option) {
       clickOption(option);
@@ -2936,16 +3295,12 @@
     }
 
     if (trigger.tagName.toLowerCase() !== "button") {
-      setEditableText(trigger, dropdownSearchValue(desiredValue));
-      await sleep(200);
+      setEditableText(trigger, dropdownSearchValue(optionValue));
+      await sleep(250);
 
-      const typedOption = Array.from(document.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption']"))
-        .filter(isVisibleElement)
-        .find((item) => optionMatches(
-          item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
-          item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || "",
-          desiredValue
-        ));
+      const typedOptions = visibleOptionElements(trigger);
+      const typedOptionValue = optionConstrainedValue(optionsFromElements(typedOptions), desiredValue) || optionValue;
+      const typedOption = await waitForMatchingDropdownOption(trigger, typedOptionValue);
 
       if (typedOption) {
         clickOption(typedOption);
@@ -2953,6 +3308,35 @@
         dispatchFormEvents(element);
         return true;
       }
+
+      if (!typedOption) {
+        dispatchEnterOrEscape(trigger, "ArrowDown");
+        await sleep(250);
+        const arrowOption = await waitForMatchingDropdownOption(trigger, typedOptionValue);
+
+        if (arrowOption) {
+          clickOption(arrowOption);
+          dispatchFormEvents(trigger);
+          dispatchFormEvents(element);
+          return true;
+        }
+      }
+
+      if (!mustClickOption && optionMatches(getCurrentValue(trigger), "", typedOptionValue)) {
+        confirmFilledElement(trigger);
+        await sleep(250);
+        if (optionMatches(getCurrentValue(trigger), "", typedOptionValue)) {
+          dispatchFormEvents(element);
+          return true;
+        }
+      }
+
+      dispatchFormEvents(trigger);
+      dispatchFormEvents(element);
+      if (!valueMatches(getCurrentValue(trigger), previousValue)) {
+        setEditableText(trigger, previousValue);
+      }
+      return false;
     }
 
     dispatchFormEvents(trigger);
@@ -2962,6 +3346,113 @@
 
   function dropdownSearchValue(desiredValue) {
     return String(desiredValue || "").trim();
+  }
+
+  function requiresDropdownOptionClick() {
+    return /greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse/i.test(location.hostname);
+  }
+
+  async function waitForMatchingDropdownOption(trigger, desiredValue, attempts = 10) {
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const option = visibleOptionElements(trigger).find((item) => optionMatches(
+        item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
+        item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || "",
+        desiredValue
+      ));
+
+      if (option) {
+        return option;
+      }
+
+      await sleep(150);
+    }
+
+    return null;
+  }
+
+  function visibleOptionElements(trigger = null) {
+    const containers = [];
+    const controls = trigger?.getAttribute?.("aria-controls");
+    const owns = trigger?.getAttribute?.("aria-owns");
+
+    for (const id of [controls, owns].filter(Boolean)) {
+      const container = document.getElementById(id);
+      if (container) {
+        containers.push(container);
+      }
+    }
+
+    containers.push(document);
+
+    return uniqueElements(containers.flatMap((container) => (
+      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption'], .select__option, [id*='-option-']"))
+    )))
+      .filter(isVisibleElement);
+  }
+
+  function uniqueElements(elements) {
+    return Array.from(new Set(elements));
+  }
+
+  function optionsFromElements(elements) {
+    return elements.map((item) => ({
+      label: item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
+      value: item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || ""
+    }));
+  }
+
+  function optionConstrainedValue(options, value) {
+    if (!Array.isArray(options) || !options.length) {
+      return "";
+    }
+
+    const yesNo = yesNoOptions(options);
+    if (!yesNo) {
+      return "";
+    }
+
+    const semantic = semanticYesNoValue(value);
+    if (!semantic) {
+      return "";
+    }
+
+    return semantic === "yes" ? yesNo.yes : yesNo.no;
+  }
+
+  function yesNoOptions(options) {
+    const usable = options
+      .map((option) => ({
+        label: compactText(option.label || ""),
+        value: compactText(option.value || "")
+      }))
+      .filter((option) => {
+        const text = normalize([option.label, option.value].join(" "));
+        return text && !/select one|choose|please select/.test(text);
+      });
+    const yes = usable.find((option) => optionMatches(option.label, option.value, "Yes"));
+    const no = usable.find((option) => optionMatches(option.label, option.value, "No"));
+
+    return yes && no
+      ? { yes: yes.label || yes.value, no: no.label || no.value }
+      : null;
+  }
+
+  function semanticYesNoValue(value) {
+    const text = normalize(value);
+
+    if (!text) {
+      return "";
+    }
+
+    if (/^(no|false|n|0)$/.test(text) || /\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b/.test(text)) {
+      return "no";
+    }
+
+    if (/^(yes|true|y|1)$/.test(text) || /\b(open|willing|able|can|agree|consent|authorized|eligible)\b/.test(text)) {
+      return "yes";
+    }
+
+    return "";
   }
 
   function clickOption(option) {
@@ -3258,7 +3749,13 @@
         "not a veteran",
         "not hispanic or latino",
         "not hispanic",
-        "not latino"
+        "not latino",
+        "none",
+        "none of the above",
+        "no affiliation",
+        "no affiliations",
+        "not affiliated",
+        "not a member"
       ].forEach((alias) => aliases.add(alias));
     }
 
@@ -3269,16 +3766,6 @@
         "i am willing to relocate before starting employment",
         "open to relocating",
         "open to relocate"
-      ].forEach((alias) => aliases.add(alias));
-    }
-
-    if (desired === "no disability" || desired === "no disabilities") {
-      [
-        "no",
-        "no i do not have a disability",
-        "no i don t have a disability",
-        "no i do not have a disability and have not had one in the past",
-        "no i don t have a disability and have not had one in the past"
       ].forEach((alias) => aliases.add(alias));
     }
 
@@ -3531,7 +4018,14 @@
   }
 
   function dispatchEnterOrEscape(element, key) {
-    const keyCode = key === "Enter" ? 13 : 27;
+    const keyCodes = {
+      Enter: 13,
+      Escape: 27,
+      ArrowDown: 40,
+      ArrowUp: 38,
+      Space: 32
+    };
+    const keyCode = keyCodes[key] || 0;
     for (const type of ["keydown", "keypress", "keyup"]) {
       element.dispatchEvent(new KeyboardEvent(type, {
         key,

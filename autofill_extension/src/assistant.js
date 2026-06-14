@@ -109,6 +109,11 @@ async function handleChat(text) {
     return;
   }
 
+  if (/\b(dropdown|dropdowns|options)\b/.test(normalized) && /\b(debug|test|find|scan|show)\b/.test(normalized)) {
+    await showDropdownDebug();
+    return;
+  }
+
   if (/\bdebug\b/.test(normalized)) {
     await showDebugFields();
     return;
@@ -208,10 +213,20 @@ async function askAiForMissingAnswers() {
   renderReview(lastPreview);
 
   const missingFields = (lastPreview?.unmappedFields || []).filter(isAiAskableField);
+  const skippedOptionFields = (lastPreview?.unmappedFields || []).filter((field) => (
+    isOptionLikeField(field) && !(field.options || []).length
+  ));
 
   if (!missingFields.length) {
     addMessage("agent", "I do not see any unanswered fields for AI to handle.");
+    if (skippedOptionFields.length) {
+      addMessage("agent", `I skipped ${skippedOptionFields.length} dropdown-like field(s) because I could not read their options. Type \`debug dropdowns\` to test option discovery.`);
+    }
     return;
+  }
+
+  if (skippedOptionFields.length) {
+    addMessage("agent", `I will not ask AI to fill ${skippedOptionFields.length} dropdown-like field(s) without options. Type \`debug dropdowns\` to see what I can read.`);
   }
 
   const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
@@ -254,6 +269,13 @@ async function askAiForMissingAnswers() {
       aiMappings.push({
         index: field.originalIndex,
         label: field.label,
+        name: field.name || "",
+        id: field.id || "",
+        placeholder: field.placeholder || "",
+        ariaLabel: field.ariaLabel || "",
+        tag: field.tag || "",
+        type: field.type || "",
+        options: field.options || [],
         value,
         source: mapping.source || "llm",
         confidence: Number(mapping.confidence || 0.8),
@@ -306,6 +328,47 @@ async function showDebugFields() {
   }
 }
 
+async function showDropdownDebug() {
+  setBusy("Testing dropdown option discovery...");
+  const response = await sendToActiveTab({ type: "DEBUG_DROPDOWNS" });
+
+  if (!response?.ok) {
+    showError(response?.error || "I could not test dropdowns on this page.");
+    return;
+  }
+
+  const dropdowns = response.result?.dropdowns || [];
+  addMessage("agent", `Dropdown debug: found ${dropdowns.length} dropdown-like field(s).`);
+
+  if (!dropdowns.length) {
+    assistantStatus.textContent = "No dropdowns";
+    return;
+  }
+
+  for (const dropdown of dropdowns.slice(0, 20)) {
+    addMessage("agent", dropdownDebugSummary(dropdown));
+  }
+
+  assistantStatus.textContent = "Dropdown debug complete";
+}
+
+function dropdownDebugSummary(dropdown) {
+  const options = (dropdown.options || [])
+    .map((option) => option.label || option.value)
+    .filter(Boolean)
+    .slice(0, 12)
+    .join(" | ");
+
+  return [
+    `Dropdown #${dropdown.index}`,
+    `label: ${truncateDebug(dropdown.label || "")}`,
+    `tag/type: ${truncateDebug([dropdown.tag, dropdown.type].filter(Boolean).join("/"))}`,
+    `value: ${truncateDebug(dropdown.value || "")}`,
+    `dynamic=${Boolean(dropdown.isDynamic)} options=${dropdown.optionsFound || 0}`,
+    `options: ${truncateDebug(options)}`
+  ].join("\n");
+}
+
 function isDebugRelevantField(field) {
   const haystack = [
     field.label,
@@ -350,12 +413,19 @@ function isAiAskableField(field) {
     return false;
   }
 
+  if (isOptionLikeField(field) && !(field.options || []).length) {
+    return false;
+  }
+
   const label = String(field.label || "").trim().toLowerCase();
   if (!label || /^(english|settings|phone extension)$/i.test(label)) {
     return false;
   }
 
   const haystack = aiFieldHaystack(field);
+  if (isCoreProfileField(haystack)) {
+    return false;
+  }
 
   const value = String(field.value || "").trim();
 
@@ -372,6 +442,14 @@ function isAiAskableField(field) {
   }
 
   return /^(select one|select|choose|none selected|no selection)$/i.test(value);
+}
+
+function isOptionLikeField(field) {
+  return field.tag === "select"
+    || field.tag === "button"
+    || field.type === "combobox"
+    || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "))
+    || /selectwidget|selectshowall/i.test(field.dataAutomationId || "");
 }
 
 function aiFieldHaystack(field) {
@@ -408,6 +486,12 @@ function isAiPolicyQuestion(haystack) {
 
 function isStructuredAutofillField(haystack) {
   return [
+    /\b(first|middle|last|preferred|full|legal)\s+name\b/,
+    /\bname\s+(first|middle|last|preferred|full|legal)\b/,
+    /^name$/,
+    /\bemail\b|\be-mail\b/,
+    /\bphone\b|\bmobile\b|\bcell\b|\btelephone\b/,
+    /\baddress\b|\bstreet\b|\bcity\b|\bstate\b|\bprovince\b|\bpostal\b|\bzip\b|\bcountry\b/,
     /\bwork experience\b/,
     /\bemployment\s+(history|section|row)\b/,
     /\beducation\b/,
@@ -431,6 +515,17 @@ function isStructuredAutofillField(haystack) {
     /\brole description\b/,
     /\bcertifications?\b/,
     /\blanguages?\b/
+  ].some((pattern) => pattern.test(haystack));
+}
+
+function isCoreProfileField(haystack) {
+  return [
+    /\b(first|middle|last|preferred|full|legal)\s+name\b/,
+    /\bname\s+(first|middle|last|preferred|full|legal)\b/,
+    /^name$/,
+    /\bemail\b|\be-mail\b/,
+    /\bphone\b|\bmobile\b|\bcell\b|\btelephone\b/,
+    /\baddress\b|\bstreet\b|\bcity\b|\bstate\b|\bprovince\b|\bpostal\b|\bzip\b|\bcountry\b/
   ].some((pattern) => pattern.test(haystack));
 }
 
@@ -596,6 +691,10 @@ async function sendFrameAwareMessage(tab, message) {
     return aggregatePreviewResponses(successful, tab, frames.length);
   }
 
+  if (message.type === "DEBUG_DROPDOWNS") {
+    return aggregateDropdownDebugResponses(successful, frames.length);
+  }
+
   return successful[0]?.response || { ok: false, error: accessErrorMessage(tab.url) };
 }
 
@@ -682,6 +781,31 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
         url: tab.url || "",
         title: tab.title || ""
       }
+    }
+  };
+}
+
+function aggregateDropdownDebugResponses(successful, frameCount) {
+  const dropdowns = [];
+
+  for (const { frame, response } of successful) {
+    const result = response.result || {};
+    for (const dropdown of result.dropdowns || []) {
+      dropdowns.push({
+        ...dropdown,
+        frameId: frame.frameId,
+        frameUrl: frame.url || ""
+      });
+    }
+  }
+
+  return {
+    ok: true,
+    result: {
+      count: dropdowns.length,
+      frameCount,
+      accessibleFrameCount: successful.length,
+      dropdowns
     }
   };
 }
