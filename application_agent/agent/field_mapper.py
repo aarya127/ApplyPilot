@@ -61,7 +61,7 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if re.search(r"sponsor|visa|h-?1b|work permit", text):
         return sponsorship_answer(profile.get("needs_sponsorship") or profile.get("answers", {}).get("sponsorship") or "No"), "rule"
 
-    if re.search(r"authorized|eligible|legally.*work|work authorization", text):
+    if is_work_eligibility_question(text):
         return profile.get("work_authorization") or "Yes", "rule"
 
     if re.search(r"ever|previously|formerly", text) and re.search(r"employed|worked", text):
@@ -109,6 +109,16 @@ def field_text(field: dict[str, Any]) -> str:
                 field.get("surrounding_text", ""),
             ]
         )
+    )
+
+
+def is_work_eligibility_question(text: str) -> bool:
+    return bool(
+        re.search(r"(legally\s+)?(authorized|eligible|permitted|allowed).*(work|employment)", text)
+        or re.search(r"(work|employment).*(authorized|eligible|authorization|eligibility)", text)
+        or "work authorization" in text
+        or "proof of authorization" in text
+        or "legally eligible" in text
     )
 
 

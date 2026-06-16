@@ -267,6 +267,11 @@ def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
                 {"label": "I require sponsorship"},
             ],
         },
+        {
+            "index": 2,
+            "label": "Are you legally eligible to work in the country of employment?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
     ]
 
     assert server.policy_mappings(fields, {}) == [
@@ -277,6 +282,7 @@ def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
             "confidence": 0.78,
             "source": "policy",
         },
+        {"index": 2, "value": "Yes", "confidence": 0.78, "source": "policy"},
     ]
 
 

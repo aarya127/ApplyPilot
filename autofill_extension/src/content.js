@@ -1160,7 +1160,7 @@
       return buildMapping(field, profile.veteranStatus || profile.answers?.veteranStatus || "No", "rule", 0.9);
     }
 
-    if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
+    if (isWorkEligibilityQuestion(haystack)) {
       return buildMapping(
         field,
         workAuthorizationAnswer(field, profile),
@@ -1308,14 +1308,22 @@
   function isAiOnlyQuestion(haystack) {
     return [
       /(18 years of age|at least 18|proof of age|minimum age)/,
-      /(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/,
+      isWorkEligibilityQuestion,
       /(sponsor|sponsorship|visa|h-?1b|f-?1|opt|cpt|tn|ead|work permit)/,
       /(now|ever|previously|formerly|current|directly).*(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2)/,
       /(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2).*(now|ever|previously|formerly|current|directly)/,
       /(relatives?|family member|spouse|domestic partner).*(employed|work|working|military|armed forces|served|service)/,
       /(military|armed forces|served|service|veteran)/,
       /(interested in relocating|relocation|relocating)/
-    ].some((pattern) => pattern.test(haystack));
+    ].some((pattern) => (
+      typeof pattern === "function" ? pattern(haystack) : pattern.test(haystack)
+    ));
+  }
+
+  function isWorkEligibilityQuestion(haystack) {
+    return /(legally\s+)?(authorized|eligible|permitted|allowed).*(work|employment)/.test(haystack)
+      || /(work|employment).*(authorized|eligible|authorization|eligibility)/.test(haystack)
+      || /work authorization|proof of authorization|legally eligible/.test(haystack);
   }
 
   function shouldAskForField(field) {
@@ -1392,7 +1400,7 @@
       return buildMapping(field, sponsorshipAnswer(field, profile), "rule", 0.9);
     }
 
-    if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
+    if (isWorkEligibilityQuestion(haystack)) {
       return buildMapping(
         field,
         workAuthorizationAnswer(field, profile),
@@ -2942,7 +2950,7 @@
       return normalizeRelocationAssistanceValue(value);
     }
 
-    if (/(authorized|eligible|legally|authorization).*(work|employment)|work authorization|proof of authorization/.test(haystack)) {
+    if (isWorkEligibilityQuestion(haystack)) {
       if (/(not authorized|not eligible|unauthorized|cannot work)/.test(desired)) {
         return "No";
       }

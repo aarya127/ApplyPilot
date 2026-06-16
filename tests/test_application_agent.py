@@ -102,6 +102,7 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Have you ever been employed by Stripe or a Stripe affiliate?"}, profile) == ("No", "rule")
     profile["needs_sponsorship"] = "I do not require sponsorship"
     assert map_field({"label": "Will you now, or in the future, require sponsorship to work in the United States?"}, profile) == ("No", "rule")
+    assert map_field({"label": "Are you legally eligible to work in the country of employment?"}, profile) == ("Yes", "rule")
     assert map_field({"question_text": "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank?"}, profile) == ("No", "rule")
     assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("No", "rule")
     assert map_field({"label": "Do you opt-in to receive WhatsApp messages from Stripe Recruiting?"}, profile) == ("No", "rule")

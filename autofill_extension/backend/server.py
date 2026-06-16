@@ -158,6 +158,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
                         "Return only strict JSON with no markdown or reasoning. "
                         "Choose answers from supplied dropdown, radio, checkbox, and combobox options exactly. "
                         "For optioned fields, infer the intended meaning from the profile and choose the closest supplied option label verbatim. "
+                        "For legal eligibility or authorization to work in the country of employment, choose the positive authorized/eligible option. "
                         "Use the profile, resume facts, saved answers, and default policies. "
                         "Do not invent experience. Skip unknown fields."
                     ),
@@ -451,10 +452,7 @@ def policy_answer_for_field(
     if any(term in haystack for term in ["sponsor", "sponsorship", "visa", "h 1b", "f 1 opt", "cpt", "tn", "ead"]):
         return best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
 
-    if (
-        ("authorized" in haystack or "authorization" in haystack or "legally" in haystack)
-        and ("work" in haystack or "employment" in haystack)
-    ):
+    if is_work_eligibility_question(haystack):
         return best_authorization_option(options) or best_available_option("Yes", options) or "Yes"
 
     if any(term in haystack for term in ["relocation assistance", "relocation support", "need relocation assistance"]):
@@ -512,6 +510,16 @@ def is_previous_company_question(haystack: str) -> bool:
             any(term in haystack for term in ["previously", "currently", "directly", "ever"])
             and any(term in haystack for term in ["employed", "worked", "paycheck", "w 2"])
         )
+    )
+
+
+def is_work_eligibility_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"(legally\s+)?(authorized|eligible|permitted|allowed).*(work|employment)", haystack)
+        or re.search(r"(work|employment).*(authorized|eligible|authorization|eligibility)", haystack)
+        or "work authorization" in haystack
+        or "proof of authorization" in haystack
+        or "legally eligible" in haystack
     )
 
 
