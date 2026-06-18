@@ -110,7 +110,14 @@ Workflow:
 - Lever: label-based known fields plus generic scanner fallback.
 - Ashby: generic scanner fallback.
 - Workday: generic scanner fallback only. Workday-specific custom widgets still need deeper adapter work.
+- Oracle Cloud / Oracle Recruiting / Oracle HCM: first-class detection, label-first common-field filling, expanded Oracle JET dropdown option scanning, and generic scanner fallback.
+- Taleo: first-class detection, label-first common-field filling, Select2/jQuery-style dropdown option scanning, and generic scanner fallback.
+- iCIMS: first-class detection, label-first common-field filling, Select2/iCIMS dropdown option scanning, and generic scanner fallback.
+- SmartRecruiters: first-class detection, label-first common-field filling, custom dropdown option click handling, and generic scanner fallback.
+- SuccessFactors: first-class detection, label-first common-field filling, SAP UI5 dropdown option scanning, and generic scanner fallback.
 - Generic: scans visible inputs, textareas, selects, contenteditable controls, and basic ARIA text/combobox controls.
+
+For Greenhouse, Oracle/Taleo, iCIMS, SmartRecruiters, and SuccessFactors, option-style fields are treated as click-required controls. The agent should choose an actual visible option instead of relying on typed text that the ATS may erase.
 
 ## Private Standard Answers
 

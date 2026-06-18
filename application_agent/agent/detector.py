@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 
 def detect_ats(url: str, page_text: str = "") -> str:
     haystack = f"{url} {page_text}".lower()
@@ -35,6 +37,7 @@ def detect_ats(url: str, page_text: str = "") -> str:
 
     if (
         "successfactors.com" in haystack
+        or re.search(r"successfactors\.[a-z.]+", haystack)
         or "jobs.sap.com" in haystack
         or "sap successfactors" in haystack
         or "successfactors" in haystack

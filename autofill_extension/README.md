@@ -230,8 +230,8 @@ The AI mapper receives the visible fields, labels, nearby text, page context, yo
 4. Local profile storage: working via `chrome.storage.local`; backend profile sync is not built.
 5. Rule matching: working for common contact, address, links, work authorization, sponsorship, relocation, salary, agreement, and optional demographic fields.
 6. LLM mapping: implemented through the local backend; requires `NVIDIA_API_KEY`.
-7. DOM filling plus `input`/`change`/`blur` events: working for native inputs, textareas, selects, radios, checkboxes, simple contenteditable controls, and basic ARIA/listbox dropdowns. Dynamic refilling has a re-entry guard and is off by default.
-8. ATS-specific adapters: generic Greenhouse-style form handling is partially covered; deeper Workday/Lever/Ashby adapters are not built yet.
+7. DOM filling plus `input`/`change`/`blur` events: working for native inputs, textareas, selects, radios, checkboxes, simple contenteditable controls, and ARIA/listbox dropdowns. Dynamic refilling has a re-entry guard and is off by default.
+8. ATS-specific handling: Greenhouse, Workday-style controls, Oracle/JET, Taleo/Select2, iCIMS, SmartRecruiters, and SuccessFactors/SAP UI5 dropdowns have expanded option scanning and click-required selection behavior. Platform coverage still varies by company implementation.
 9. Review UI before fill: working in the popup preview flow.
 10. Backend application tracking: working locally with SQLite; no cloud sync/auth yet.
 
