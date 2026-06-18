@@ -396,6 +396,7 @@
       label: recoveredLabel,
       placeholder: element.getAttribute("placeholder") || "",
       ariaLabel: element.getAttribute("aria-label") || "",
+      ariaAutocomplete: element.getAttribute("aria-autocomplete") || "",
       autocomplete: element.getAttribute("autocomplete") || "",
       dataAutomationId: element.getAttribute("data-automation-id") || "",
       required: isRequiredElement(element, rawLabel),
@@ -1489,6 +1490,7 @@
       field.name,
       field.id,
       field.ariaLabel,
+      field.ariaAutocomplete,
       field.autocomplete,
       field.questionText,
       field.surroundingText,
@@ -1851,7 +1853,8 @@
     const applicationLocation = selectApplicationLocation(profile, settings, address);
 
     if (/(location city|city location|current city|where.*city)/.test(haystack)) {
-      return hasValue(applicationLocation.city) ? buildMapping(field, applicationLocation.city, "rule", 0.9) : null;
+      const location = locationAnswerForField(field, applicationLocation, address);
+      return hasValue(location) ? buildMapping(field, location, "rule", 0.9) : null;
     }
 
     if (/(location|required.*city.*(state|region|country)|city.*(state|region).*(country))/.test(haystack)) {
@@ -1868,7 +1871,7 @@
 
   function selectApplicationLocation(profile, settings, address) {
     const answers = profile.answers || {};
-    const target = settings?.targetCountry || "";
+    const target = settings?.targetCountry || targetCountryFromAddress(address);
     const cityKey = target === "usa" ? "usaCity" : target === "canada" ? "canadaCity" : "";
     const locationKey = target === "usa" ? "usaLocation" : target === "canada" ? "canadaLocation" : "";
     const full = answers[locationKey] || profile[locationKey] || profile.applicationLocation || "";
@@ -1876,6 +1879,41 @@
     const region = (full && regionFromLocation(full)) || address.state || address.province || "";
 
     return { city, region, full };
+  }
+
+  function targetCountryFromAddress(address) {
+    const country = normalize(address?.country || "");
+    if (/united states|usa|u s/.test(country)) {
+      return "usa";
+    }
+
+    if (/canada/.test(country)) {
+      return "canada";
+    }
+
+    return "";
+  }
+
+  function locationAnswerForField(field, applicationLocation, address) {
+    const disambiguated = applicationLocation.full
+      || [applicationLocation.city, applicationLocation.region, address.country].filter(Boolean).join(", ");
+
+    if (locationFieldNeedsDisambiguation(field)) {
+      return disambiguated || applicationLocation.city;
+    }
+
+    return applicationLocation.city || disambiguated;
+  }
+
+  function locationFieldNeedsDisambiguation(field) {
+    const haystack = fullFieldHaystack(field);
+    return Boolean(field.options?.length)
+      || field.tag === "select"
+      || field.tag === "button"
+      || field.type === "combobox"
+      || /listbox|combobox/i.test([field.type, field.ariaLabel, field.ariaAutocomplete, field.surroundingText].join(" "))
+      || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
+      || /autocomplete|typeahead|start typing/.test(haystack);
   }
 
   function cityFromLocation(value) {

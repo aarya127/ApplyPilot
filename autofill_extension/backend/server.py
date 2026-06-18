@@ -472,6 +472,10 @@ def policy_answer_for_field(
     if "veteran" in haystack:
         return best_available_option(policies["veteranStatus"], options) or policies["veteranStatus"]
 
+    demographic_answer = demographic_policy_answer(haystack, field, profile)
+    if demographic_answer is not None:
+        return demographic_answer
+
     if is_dependent_no_detail_question(haystack):
         return best_available_option("N/A", options) or "N/A"
 
@@ -532,6 +536,40 @@ def has_sponsorship_terms(haystack: str) -> bool:
         re.search(r"\b(sponsor|sponsorship|visa|work permit)\b", haystack)
         or re.search(r"\b(h\s*1b|f\s*1|opt|cpt|tn|ead)\b", haystack)
     )
+
+
+def demographic_policy_answer(haystack: str, field: dict[str, Any], profile: dict[str, Any]) -> str | None:
+    demographics = profile.get("demographics") or {}
+    options = normalized_options(field)
+
+    if any(term in haystack for term in ["hispanic", "latino", "latina", "latinx"]):
+        answer = demographics.get("hispanicLatino")
+        return option_or_value(answer, options)
+
+    if any(term in haystack for term in ["race", "racial", "ethnic", "ethnicity"]):
+        answer = demographics.get("race") or demographics.get("ethnicity")
+        return option_or_value(answer, options)
+
+    if "sexual orientation" in haystack or "orientation" in haystack:
+        answer = demographics.get("sexualOrientation") or profile.get("answers", {}).get("sexualOrientation")
+        return option_or_value(answer, options)
+
+    if "gender identity" in haystack or "gender" in haystack:
+        answer = demographics.get("genderIdentity") or demographics.get("gender")
+        return option_or_value(answer, options)
+
+    if "disability" in haystack:
+        answer = profile.get("answers", {}).get("disabilityStatus") or profile.get("disabilityStatus")
+        return option_or_value(answer, options)
+
+    return None
+
+
+def option_or_value(answer: Any, options: list[dict[str, str]]) -> str | None:
+    if answer in (None, "", [], {}):
+        return None
+
+    return best_available_option(str(answer), options) or str(answer)
 
 
 def is_dependent_no_detail_question(haystack: str) -> bool:

@@ -345,6 +345,44 @@ def test_backend_policy_answers_generic_policy_questions_without_visible_options
     ]
 
 
+def test_backend_policy_answers_generic_voluntary_demographics_from_profile():
+    profile = {
+        "veteranStatus": "No",
+        "disabilityStatus": "No",
+        "demographics": {
+            "gender": "Male",
+            "hispanicLatino": "No",
+            "race": "Asian",
+            "sexualOrientation": "Heterosexual",
+        },
+    }
+    fields = [
+        {"index": 0, "label": "Gender", "options": [{"label": "Male"}, {"label": "Female"}, {"label": "Decline to self-identify"}]},
+        {"index": 1, "label": "Are you Hispanic/Latino?", "options": [{"label": "Yes"}, {"label": "No"}]},
+        {"index": 2, "label": "Please identify your race", "options": [{"label": "White"}, {"label": "Asian"}, {"label": "Decline to self-identify"}]},
+        {"index": 3, "label": "Sexual Orientation", "options": [{"label": "Heterosexual / straight"}, {"label": "I prefer not to answer"}]},
+        {
+            "index": 4,
+            "label": "Disability Status",
+            "options": [
+                {"label": "Yes, I have a disability, or have had one in the past"},
+                {"label": "No, I don't have a disability and have not had one in the past"},
+                {"label": "I do not want to answer"},
+            ],
+        },
+        {"index": 5, "label": "Veteran Status", "options": [{"label": "I am not a protected veteran"}, {"label": "I decline to self-identify"}]},
+    ]
+
+    assert server.policy_mappings(fields, profile) == [
+        {"index": 0, "value": "Male", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 2, "value": "Asian", "confidence": 0.78, "source": "policy"},
+        {"index": 3, "value": "Heterosexual / straight", "confidence": 0.78, "source": "policy"},
+        {"index": 4, "value": "No, I don't have a disability and have not had one in the past", "confidence": 0.78, "source": "policy"},
+        {"index": 5, "value": "I am not a protected veteran", "confidence": 0.78, "source": "policy"},
+    ]
+
+
 def test_backend_policy_matches_long_no_dropdown_options():
     fields = [
         {
@@ -876,6 +914,79 @@ def test_content_script_uses_usa_target_country_for_stripe_style_fields():
 
 
 @pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_disambiguates_location_typeahead_with_saved_usa_location():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "addresses": {
+            "usa": {
+                "city": "Bartlett",
+                "state": "IL",
+                "zipCode": "60103",
+                "country": "United States",
+            }
+        },
+        "answers": {
+            "usaLocation": "Chicago, IL",
+            "usaCity": "Chicago",
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Location (City)*<input name="locationCity" aria-autocomplete="list" placeholder="Start typing..."></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+
+        assert preview["ok"] is True
+        mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Location (City)*")
+        assert mapping["value"] == "Chicago, IL"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
 def test_content_script_fills_workday_country_dropdown_with_target_country_option():
     from playwright.sync_api import sync_playwright
 
@@ -1173,7 +1284,7 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         assert page.locator("[name='k8s']").input_value() == "Yes"
         assert page.locator("[name='employer']").input_value() == "Example Labs"
         assert page.locator("[name='jobTitle']").input_value() == "Software Engineer"
-        assert page.locator("[name='stripeAffiliate']").input_value() == "No"
+        assert page.locator("[name='companyAffiliate']").input_value() == "No"
         assert page.locator("[name='whatsapp']").input_value() == "No"
         assert page.locator("[name='gender']").input_value() == "Male"
         assert page.locator("[name='hispanic']").input_value() == "No, I am not Hispanic or Latino"
