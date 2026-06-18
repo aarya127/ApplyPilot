@@ -114,25 +114,109 @@ The CLI prints each source, total jobs found when available, and the first match
 
 The Chrome extension and Playwright completion agent are separate from the Flask dashboard.
 
+They are designed to be reusable. Each user should keep their own profile, resume, API key, browser session, and application logs in gitignored local files.
+
+### Set Up A Personal Application Profile
+
+Copy the sample profile:
+
+```bash
+cp autofill_extension/profile.example.json autofill_extension/profile.private.json
+```
+
+Then edit the ignored private copy with your own information:
+
+- contact details, links, school, degree, and expected graduation date
+- Canada and/or USA addresses
+- work authorization, sponsorship, veteran, relocation, salary, and consent defaults
+- work experience, education, projects, and websites
+- optional demographic answers, only if you want the tool to fill them
+- `resumeFileName`, matching a file in `autofill_extension/resumes/`
+
+Private files are ignored by git:
+
+```text
+autofill_extension/profile.private.json
+autofill_extension/resumes/
+autofill_extension/generated/
+autofill_extension/backend/env.private
+application_agent/browser_profile/
+application_agent/data/
+application_agent/files/
+application_agent/*.private.json
+```
+
+### Configure The AI Backend
+
+Create:
+
+```text
+autofill_extension/backend/env.private
+```
+
+Use your own NVIDIA API key:
+
+```text
+NVIDIA_API_KEY=your-key-here
+NVIDIA_MODEL=nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+PORT=8000
+```
+
+Start the local mapper/tracking backend:
+
+```bash
+python autofill_extension/backend/server.py
+```
+
+The backend lets the extension and agent ask one structured AI request for visible missing fields, constrained to the actual dropdown/radio options when those options are available.
+
+### Use The Chrome Extension
+
 Load the extension from:
 
 ```text
 autofill_extension/
 ```
 
-Run the post-apply agent with:
+Then:
+
+1. Open `chrome://extensions`.
+2. Enable Developer Mode.
+3. Click **Load unpacked** and choose `autofill_extension/`.
+4. Open the extension options page.
+5. Import `autofill_extension/profile.private.json`.
+6. Set backend base URL to `http://127.0.0.1:8000`.
+7. Save, open an application page, preview, fill, and review before submitting.
+
+### Use The Post-Apply Agent
+
+Run the Playwright agent with:
 
 ```bash
 python -m application_agent.main
 ```
 
-The agent uses your ignored private extension profile at:
+The agent uses the same ignored private extension profile at:
 
 ```text
 autofill_extension/profile.private.json
 ```
 
 It opens a persistent Playwright browser, waits for you to click Apply, detects Greenhouse/Lever/Ashby/Workday/generic pages, fills what it can, uploads the ignored local resume when a file input allows it, logs to ignored SQLite storage, and pauses before final submission.
+
+The intended workflow is:
+
+```text
+Open/click Apply
+  -> detect ATS
+  -> scan visible fields and dropdown options
+  -> fill profile-backed fields
+  -> ask AI for visible missing fields when needed
+  -> choose only supplied options for dropdown/radio fields
+  -> upload resume when allowed
+  -> click safe Next/Continue steps
+  -> stop before final Submit
+```
 
 See:
 

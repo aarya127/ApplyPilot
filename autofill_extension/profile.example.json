@@ -1,0 +1,122 @@
+{
+  "candidateProfile": {
+    "firstName": "Sample",
+    "lastName": "Candidate",
+    "fullName": "Sample Candidate",
+    "email": "candidate@example.com",
+    "phone": "5550100000",
+    "linkedin": "https://www.linkedin.com/in/sample-candidate",
+    "github": "https://github.com/sample",
+    "portfolio": "https://sample.dev",
+    "location": "Sample City, ST",
+    "addresses": {
+      "canada": {
+        "line1": "123 Example Street",
+        "line2": "",
+        "city": "Toronto",
+        "province": "ON",
+        "postalCode": "A1A1A1",
+        "country": "Canada",
+        "fullAddress": "123 Example Street, Toronto, ON, A1A1A1"
+      },
+      "usa": {
+        "line1": "456 Demo Avenue",
+        "line2": "",
+        "city": "Chicago",
+        "state": "IL",
+        "zipCode": "60601",
+        "country": "United States",
+        "fullAddress": "456 Demo Avenue, Chicago, IL, 60601"
+      }
+    },
+    "school": "Sample University",
+    "degree": "Bachelor's Degree",
+    "fieldOfStudy": "Computer Science",
+    "graduationDate": "2026",
+    "currentOrPreviousEmployer": "Example Labs",
+    "currentOrPreviousJobTitle": "Software Engineer Intern",
+    "workAuthorization": "Yes",
+    "needsSponsorship": "No",
+    "veteranStatus": "No",
+    "canadianCitizen": "No",
+    "usPermanentResident": "No",
+    "subjectToAgreement": "No",
+    "relocation": "Open to relocation",
+    "salary": "Negotiable",
+    "resumeFileName": "resume.private.pdf",
+    "workExperience": [
+      {
+        "company": "Example Labs",
+        "title": "Software Engineer Intern",
+        "location": "Chicago, IL",
+        "startMonth": "May",
+        "startYear": "2025",
+        "endMonth": "August",
+        "endYear": "2025",
+        "description": [
+          "Built production features with Python and TypeScript.",
+          "Improved backend latency by 20% through query optimization."
+        ]
+      }
+    ],
+    "education": [
+      {
+        "school": "Sample University",
+        "degree": "Bachelor's Degree",
+        "fieldOfStudy": "Computer Science",
+        "startYear": "2022",
+        "endYear": "2026"
+      }
+    ],
+    "links": [
+      "https://www.linkedin.com/in/sample-candidate",
+      "https://github.com/sample",
+      "https://sample.dev"
+    ],
+    "resumeFacts": {
+      "skills": ["Python", "TypeScript", "SQL"],
+      "education": [],
+      "experience": [],
+      "projects": [],
+      "projectLinks": [],
+      "rawTextFile": ""
+    },
+    "demographics": {
+      "race": "",
+      "ethnicity": "",
+      "hispanicLatino": "",
+      "gender": "",
+      "genderIdentity": "",
+      "sexualOrientation": ""
+    },
+    "answers": {
+      "sponsorship": "No",
+      "workAuthorization": "Yes",
+      "veteranStatus": "No",
+      "subjectToAgreement": "No",
+      "previouslyEmployedByCompany": "No",
+      "relativesAtCompany": "No",
+      "workedForAuthorizedDealer": "No",
+      "workedAsContractorForCompany": "No",
+      "recruitingMessages": "No",
+      "subscribeEmails": "No",
+      "acceptTerms": "Yes",
+      "certifyApplicationTruth": "Yes",
+      "relocation": "Open to relocation",
+      "relocationAssistance": "No",
+      "salary": "Negotiable",
+      "phoneCountryCode": "Canada (+1)",
+      "phoneDeviceType": "Mobile",
+      "usaLocation": "Chicago, IL",
+      "canadaLocation": "Toronto, ON"
+    }
+  },
+  "settings": {
+    "backendMapperUrl": "",
+    "backendBaseUrl": "http://127.0.0.1:8000",
+    "autoFillDynamicFields": false,
+    "autoFillSensitiveFields": false,
+    "requireReviewBeforeSubmit": true,
+    "targetCountry": "usa"
+  }
+}

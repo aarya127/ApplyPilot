@@ -1,6 +1,6 @@
-# Application Autofill Prototype
+# ApplyPilot Chrome Autofill Extension
 
-This is a standalone Chrome extension prototype for job application autofill. It is separate from the Flask HR dashboard.
+This is a standalone Chrome extension for job application autofill. It is separate from the Flask HR dashboard and can be configured by any user with their own local profile, resume, and AI API key.
 
 ## What It Does
 
@@ -25,8 +25,9 @@ Dynamic refilling is off by default because some React/Greenhouse pages rerender
 2. Turn on Developer Mode.
 3. Click **Load unpacked**.
 4. Select the `autofill_extension` folder.
-5. Open the extension options page and save your profile.
-6. Visit a job application page and click **Autofill page** from the extension popup.
+5. Open the extension options page.
+6. Import or enter your private profile.
+7. Visit a job application page and click **Autofill page** from the extension popup.
 
 ## Assistant Side Panel
 
@@ -43,7 +44,7 @@ The extension also includes a right-side chat-style assistant.
 
 The assistant uses the same scanner, mapper, saved answers, and backend as the popup. It is a more guided interface, not a separate profile store.
 
-## Private Profile Import
+## Set Up Your Own Private Profile
 
 Personal addresses, work eligibility, and voluntary demographic fields should live outside committed source files. This repo ignores:
 
@@ -54,7 +55,84 @@ autofill_extension/resumes/
 autofill_extension/generated/
 ```
 
-To load a private profile:
+Start from the tracked fake template:
+
+```bash
+cp autofill_extension/profile.example.json autofill_extension/profile.private.json
+```
+
+Then edit `autofill_extension/profile.private.json` with your own information. Keep the file local; do not commit it.
+
+Profile shape:
+
+```json
+{
+  "candidateProfile": {
+    "firstName": "Your",
+    "lastName": "Name",
+    "fullName": "Your Name",
+    "email": "you@example.com",
+    "phone": "5550100000",
+    "linkedin": "https://www.linkedin.com/in/your-profile",
+    "github": "https://github.com/your-handle",
+    "portfolio": "https://your-site.example",
+    "addresses": {
+      "canada": {
+        "line1": "",
+        "city": "",
+        "province": "",
+        "postalCode": "",
+        "country": "Canada",
+        "fullAddress": ""
+      },
+      "usa": {
+        "line1": "",
+        "city": "",
+        "state": "",
+        "zipCode": "",
+        "country": "United States",
+        "fullAddress": ""
+      }
+    },
+    "school": "",
+    "degree": "",
+    "fieldOfStudy": "",
+    "graduationDate": "",
+    "workAuthorization": "Yes",
+    "needsSponsorship": "No",
+    "veteranStatus": "No",
+    "resumeFileName": "resume.private.pdf",
+    "workExperience": [],
+    "education": [],
+    "links": [],
+    "demographics": {},
+    "answers": {
+      "sponsorship": "No",
+      "workAuthorization": "Yes",
+      "relocationAssistance": "No",
+      "subscribeEmails": "No",
+      "acceptTerms": "Yes"
+    }
+  },
+  "settings": {
+    "backendBaseUrl": "http://127.0.0.1:8000",
+    "autoFillSensitiveFields": false,
+    "targetCountry": "usa"
+  }
+}
+```
+
+Recommended profile fields:
+
+- `addresses.canada` and `addresses.usa`: used when the assistant asks which country the role is based in.
+- `workExperience`: used for repeatable employment sections.
+- `education`: used for repeatable education sections.
+- `links`: used for websites/profile links.
+- `resumeFileName`: must match a file in `autofill_extension/resumes/`.
+- `answers`: reusable answers and defaults for yes/no, authorization, sponsorship, relocation, subscriptions, terms, and custom questions.
+- `demographics`: optional self-identification answers. These are only filled when **Fill sensitive optional fields** is enabled.
+
+To load a private profile into Chrome:
 
 1. Open the extension options page.
 2. Click **Import JSON**.
@@ -141,6 +219,8 @@ Application tracking is written to ignored SQLite storage:
 ```text
 autofill_extension/generated/applications.sqlite3
 ```
+
+The AI mapper receives the visible fields, labels, nearby text, page context, your profile, resume facts, and visible dropdown/radio options. For option-based controls, it should return one of the supplied option labels exactly. The extension also enforces this locally before filling.
 
 ## Current Build Status
 
