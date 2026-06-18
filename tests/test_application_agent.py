@@ -4,7 +4,8 @@ from application_agent.agent.answer_generator import answer_option_question, par
 from application_agent.agent.detector import detect_ats
 from application_agent.agent.field_mapper import map_field
 from application_agent.agent.profile_loader import normalize_profile
-from application_agent.ats.base import is_final_submit_text, option_matches, value_allowed_by_field_options
+from application_agent.ats.base import is_final_submit_text, option_matches, requires_dropdown_option_click, value_allowed_by_field_options
+from application_agent.ats.router import get_adapter
 
 
 def test_detect_ats_routes_common_platforms():
@@ -12,7 +13,39 @@ def test_detect_ats_routes_common_platforms():
     assert detect_ats("https://jobs.lever.co/acme/1") == "lever"
     assert detect_ats("https://jobs.ashbyhq.com/acme/1") == "ashby"
     assert detect_ats("https://acme.myworkdayjobs.com/job/1") == "workday"
+    assert detect_ats("https://example.fa.us2.oraclecloud.com/hcmUI/CandidateExperience/en/sites/CX/job/1") == "oracle"
+    assert detect_ats("https://oraclecloud.taleo.net/careersection/jobdetail.ftl") == "taleo"
+    assert detect_ats("https://careers-company.icims.com/jobs/123/apply") == "icims"
+    assert detect_ats("https://jobs.smartrecruiters.com/Acme/123") == "smartrecruiters"
+    assert detect_ats("https://career012.successfactors.eu/career?company=acme") == "successfactors"
     assert detect_ats("https://example.com/apply") == "generic"
+
+
+def test_router_returns_first_class_ats_adapters():
+    assert get_adapter("oracle").name == "oracle"
+    assert get_adapter("taleo").name == "taleo"
+    assert get_adapter("icims").name == "icims"
+    assert get_adapter("smartrecruiters").name == "smartrecruiters"
+    assert get_adapter("successfactors").name == "successfactors"
+
+
+def test_custom_ats_dropdowns_require_clicking_actual_options():
+    class Page:
+        def __init__(self, url: str) -> None:
+            self.url = url
+
+    class Locator:
+        def __init__(self, url: str) -> None:
+            self.page = Page(url)
+
+    for url in [
+        "https://example.fa.us2.oraclecloud.com/hcmUI/CandidateExperience",
+        "https://oraclecloud.taleo.net/careersection/jobdetail.ftl",
+        "https://careers-company.icims.com/jobs/123",
+        "https://jobs.smartrecruiters.com/Acme/123",
+        "https://career012.successfactors.eu/career",
+    ]:
+        assert requires_dropdown_option_click({"locator": Locator(url)})
 
 
 def test_normalize_profile_uses_target_address_and_resume_path(tmp_path, monkeypatch):

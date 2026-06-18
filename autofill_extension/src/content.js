@@ -17,8 +17,35 @@
     "[aria-haspopup='listbox']:not([disabled])",
     "[data-automation-id='selectWidget']:not([aria-disabled='true'])",
     "[data-automation-id='selectShowAll']:not([aria-disabled='true'])",
+    "oj-select-single",
+    "oj-combobox-one",
+    ".select2-choice",
+    ".select2-selection",
+    ".sapMInputBaseInner",
+    "[aria-autocomplete='list']",
     "[role='checkbox']",
     "[role='radio']"
+  ].join(",");
+
+  const DROPDOWN_OPTION_SELECTOR = [
+    "[role='option']",
+    "[data-option]",
+    ".select2-results__option",
+    ".select2-result-label",
+    "[role='menuitemradio']",
+    "[data-automation-id='promptOption']",
+    ".select__option",
+    "[id*='-option-']",
+    ".oj-listbox-result",
+    ".oj-listbox-result-label",
+    ".oj-option",
+    "[oj-option-id]",
+    ".sapMSelectListItem",
+    ".sapMLIB",
+    ".sapMComboBoxBaseItem",
+    ".ui-menu-item",
+    ".ui-menu-item-wrapper",
+    ".iCIMS_Dropdown_Option"
   ].join(",");
 
   const state = {
@@ -824,6 +851,8 @@
   function isDynamicDropdownField(field) {
     return field.type === "combobox"
       || field.tag === "button"
+      || field.tag === "oj-select-single"
+      || field.tag === "oj-combobox-one"
       || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
       || field.ariaLabel
       || /(\blocation\b|\bcity\b|\bcountry\b|\bstate\b|\bprovince\b|phone.*code|country.*phone|select one)/i.test([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "))
@@ -870,18 +899,23 @@
       return element;
     }
 
-    return element.querySelector?.("[aria-haspopup='listbox'], [role='combobox'], [role='button'][aria-haspopup], button");
+    return element.querySelector?.("[aria-haspopup='listbox'], [role='combobox'], [role='button'][aria-haspopup], button, .select2-choice, .select2-selection, .sapMInputBaseInner");
   }
 
   function isListboxTrigger(element) {
     const role = (element.getAttribute("role") || "").toLowerCase();
     const popup = (element.getAttribute("aria-haspopup") || "").toLowerCase();
     const automationId = (element.getAttribute("data-automation-id") || "").toLowerCase();
+    const tag = element.tagName.toLowerCase();
+    const className = (element.getAttribute("class") || "").toLowerCase();
     return role === "combobox"
       || popup === "listbox"
       || popup === "true"
       || automationId === "selectwidget"
-      || automationId === "selectshowall";
+      || automationId === "selectshowall"
+      || tag === "oj-select-single"
+      || tag === "oj-combobox-one"
+      || /select2|sapminput|sapmcombobox|oj-select|oj-combobox/.test(className);
   }
 
   function collectVisibleDropdownOptions(trigger) {
@@ -899,14 +933,25 @@
     containers.push(document);
 
     const optionNodes = containers.flatMap((container) => (
-      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption'], .select__option, [id*='-option-']"))
+      Array.from(container.querySelectorAll(DROPDOWN_OPTION_SELECTOR))
     ));
 
     return optionNodes
       .filter(isVisibleElement)
       .map((option) => ({
         label: compactText(option.getAttribute("data-automation-label") || option.innerText || option.textContent || option.getAttribute("aria-label") || ""),
-        value: compactText(option.getAttribute("data-automation-label") || option.getAttribute("data-value") || option.getAttribute("value") || option.getAttribute("aria-label") || option.innerText || option.textContent || "")
+        value: compactText(
+          option.getAttribute("data-automation-label")
+          || option.getAttribute("data-value")
+          || option.getAttribute("data-id")
+          || option.getAttribute("data-key")
+          || option.getAttribute("oj-option-id")
+          || option.getAttribute("value")
+          || option.getAttribute("aria-label")
+          || option.innerText
+          || option.textContent
+          || ""
+        )
       }))
       .filter((option) => option.label || option.value);
   }
@@ -3383,7 +3428,7 @@
   }
 
   function requiresDropdownOptionClick() {
-    return /greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse/i.test(location.hostname);
+    return /greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse|oraclecloud\.com|taleo\.net|icims\.com|smartrecruiters\.com|successfactors\.[a-z.]+|jobs\.sap\.com/i.test(location.hostname);
   }
 
   async function waitForMatchingDropdownOption(trigger, desiredValue, attempts = 10) {
@@ -3419,7 +3464,7 @@
     containers.push(document);
 
     return uniqueElements(containers.flatMap((container) => (
-      Array.from(container.querySelectorAll("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption'], .select__option, [id*='-option-']"))
+      Array.from(container.querySelectorAll(DROPDOWN_OPTION_SELECTOR))
     )))
       .filter(isVisibleElement);
   }

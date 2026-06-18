@@ -201,7 +201,7 @@ class BaseAdapter:
         except Exception:
             return False
 
-        options = page.locator("[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], [data-automation-id='promptOption'], .select__option, [id*='-option-']")
+        options = page.locator(dropdown_option_selector())
         option_values: list[dict[str, str]] = []
 
         for index in range(options.count()):
@@ -415,7 +415,23 @@ def requires_dropdown_option_click(field: dict[str, Any]) -> bool:
     except Exception:
         url = ""
 
-    return bool(re.search(r"greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse", url, re.I))
+    return bool(re.search(
+        r"greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse|"
+        r"oraclecloud\.com|taleo\.net|icims\.com|smartrecruiters\.com|"
+        r"successfactors\.[a-z.]+|jobs\.sap\.com",
+        url,
+        re.I,
+    ))
+
+
+def dropdown_option_selector() -> str:
+    return (
+        "[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], "
+        "[data-automation-id='promptOption'], .select__option, [id*='-option-'], "
+        ".oj-listbox-result, .oj-listbox-result-label, .oj-option, [oj-option-id], "
+        ".sapMSelectListItem, .sapMLIB, .sapMComboBoxBaseItem, "
+        ".ui-menu-item, .ui-menu-item-wrapper, .iCIMS_Dropdown_Option"
+    )
 
 
 def value_allowed_by_field_options(field: dict[str, Any], value: Any) -> Any | None:

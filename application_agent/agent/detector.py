@@ -16,5 +16,29 @@ def detect_ats(url: str, page_text: str = "") -> str:
     if "myworkdayjobs.com" in haystack or "workday" in haystack:
         return "workday"
 
-    return "generic"
+    if (
+        "oraclecloud.com" in haystack
+        or "oracle recruiting" in haystack
+        or "oracle hcm" in haystack
+        or "oracle cloud" in haystack
+    ):
+        return "oracle"
 
+    if "taleo.net" in haystack or "careersection" in haystack:
+        return "taleo"
+
+    if "icims.com" in haystack or "icims" in haystack:
+        return "icims"
+
+    if "smartrecruiters.com" in haystack or "smartrecruiters" in haystack:
+        return "smartrecruiters"
+
+    if (
+        "successfactors.com" in haystack
+        or "jobs.sap.com" in haystack
+        or "sap successfactors" in haystack
+        or "successfactors" in haystack
+    ):
+        return "successfactors"
+
+    return "generic"

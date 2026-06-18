@@ -6,12 +6,17 @@ from typing import Any
 FIELD_SELECTOR = (
     "input:not([type='hidden']), textarea, select, [contenteditable='true'], "
     "[role='textbox'], [role='combobox'], [aria-haspopup='listbox'], "
-    "[data-automation-id='selectWidget'], [data-automation-id='selectShowAll']"
+    "[data-automation-id='selectWidget'], [data-automation-id='selectShowAll'], "
+    "oj-select-single, oj-combobox-one, .select2-choice, .select2-selection, "
+    ".sapMInputBaseInner, [data-sap-ui], [aria-autocomplete='list']"
 )
 
 OPTION_SELECTOR = (
     "[role='option'], [data-option], .select2-results__option, [role='menuitemradio'], "
-    "[data-automation-id='promptOption'], .select__option, [id*='-option-']"
+    "[data-automation-id='promptOption'], .select__option, [id*='-option-'], "
+    ".oj-listbox-result, .oj-listbox-result-label, .oj-option, [oj-option-id], "
+    ".sapMSelectListItem, .sapMLIB, .sapMComboBoxBaseItem, "
+    ".ui-menu-item, .ui-menu-item-wrapper, .iCIMS_Dropdown_Option"
 )
 
 
@@ -36,6 +41,7 @@ def scan_fields(page: Any) -> list[dict[str, Any]]:
                 "placeholder": element.get_attribute("placeholder") or "",
                 "aria_label": element.get_attribute("aria-label") or "",
                 "data_automation_id": element.get_attribute("data-automation-id") or "",
+                "class": element.get_attribute("class") or "",
                 "label": label_for(page, element),
                 "question_text": question_text_for(element),
                 "surrounding_text": surrounding_text_for(element),
@@ -57,7 +63,7 @@ def label_for(page: Any, element: Any) -> str:
         """
         element => {
           const pieces = [];
-          const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
+            const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
           const withoutControls = label => {
             if (!label) return '';
             const clone = label.cloneNode(true);
@@ -86,7 +92,10 @@ def label_for(page: Any, element: Any) -> str:
           if (wrappingText) pieces.push(wrappingText);
 
           if (!pieces.length) {
-            const parent = element.closest('.field, .form-group, .question, li, div');
+            const parent = element.closest(
+              '.field, .form-group, .question, .oj-form-control, .oj-flex-item, ' +
+              '.iCIMS_FormField, .form-field, .sapMInputBase, .sapMFlexItem, li, div'
+            );
             if (parent) pieces.push(clean(parent.innerText || parent.textContent || '').split('\\n')[0]);
           }
 
@@ -130,6 +139,7 @@ def is_dynamic_dropdown_field(field: dict[str, Any]) -> bool:
         or "listbox" in text
         or "combobox" in text
         or field.get("data_automation_id", "").lower() in {"selectwidget", "selectshowall"}
+        or any(term in field.get("class", "").lower() for term in ["select2", "sapm", "oj-", "icims"])
         or any(term in text for term in ["select one", "dropdown", "country", "state", "province", "location", "city", "phone code"])
     )
 
@@ -181,6 +191,9 @@ def visible_dropdown_options(page: Any) -> list[dict[str, str]]:
             value = (
                 option.get_attribute("data-automation-label")
                 or option.get_attribute("data-value")
+                or option.get_attribute("data-id")
+                or option.get_attribute("data-key")
+                or option.get_attribute("oj-option-id")
                 or option.get_attribute("value")
                 or option.get_attribute("aria-label")
                 or ""
@@ -216,7 +229,10 @@ def surrounding_text_for(element: Any) -> str:
             """
             element => {
               const clean = value => (value || '').replace(/\\s+/g, ' ').trim();
-              const parent = element.closest('label, fieldset, .field, .form-group, .question, li, div, section');
+              const parent = element.closest(
+                'label, fieldset, .field, .form-group, .question, .oj-form-control, .oj-flex-item, ' +
+                '.iCIMS_FormField, .form-field, .sapMInputBase, .sapMFlexItem, li, div, section'
+              );
               return clean(parent ? (parent.innerText || parent.textContent || '') : '');
             }
             """
