@@ -381,8 +381,10 @@
     const rawLabel = getLabelText(element);
     const nearbyText = nearbyTextForField(element, options);
     const questionText = policyQuestionTextForField(element, options);
-    const recoveredLabel = isLowInformationText(rawLabel)
-      ? parentQuestionLabel(element, options) || precedingQuestionLabel(element, options) || questionText || firstPolicyQuestionLine(nearbyText) || rawLabel
+    const recoveredLabel = needsSimpleLabelRecovery(rawLabel, element)
+      ? simpleFieldLabelFor(element) || parentQuestionLabel(element, options) || precedingQuestionLabel(element, options) || questionText || firstPolicyQuestionLine(nearbyText) || rawLabel
+      : isLowInformationText(rawLabel)
+        ? parentQuestionLabel(element, options) || precedingQuestionLabel(element, options) || questionText || firstPolicyQuestionLine(nearbyText) || rawLabel
       : rawLabel;
 
     return {
@@ -626,6 +628,106 @@
     }
 
     return "";
+  }
+
+  function needsSimpleLabelRecovery(rawLabel, element) {
+    const text = normalize([
+      rawLabel,
+      element.getAttribute("placeholder") || "",
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("name") || "",
+      element.id || ""
+    ].join(" "));
+
+    return !compactText(rawLabel)
+      || isLowInformationText(rawLabel)
+      || /enter name|name as per national identifier|national identifier/.test(text);
+  }
+
+  function simpleFieldLabelFor(element) {
+    const parentLabel = parentSimpleFieldLabel(element);
+    if (parentLabel) {
+      return parentLabel;
+    }
+
+    return precedingSimpleFieldLabel(element);
+  }
+
+  function parentSimpleFieldLabel(element) {
+    let current = element.parentElement;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 6) {
+      const controlCount = current.querySelectorAll?.("input:not([type='hidden']), textarea, select, button, [role='combobox']").length || 0;
+      if (controlCount > 1) {
+        current = current.parentElement;
+        depth += 1;
+        continue;
+      }
+
+      const clone = current.cloneNode(true);
+      clone.querySelectorAll("input, textarea, select, button, option, [role='radio'], [role='checkbox'], [role='combobox']").forEach((node) => node.remove());
+      const lines = (clone.innerText || clone.textContent || "")
+        .split(/\n+/)
+        .map((line) => compactText(line))
+        .filter(Boolean);
+      const label = lines.find(isSimpleFieldLabelLine);
+
+      if (label) {
+        return cleanSimpleFieldLabel(label);
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return "";
+  }
+
+  function precedingSimpleFieldLabel(element) {
+    const targetRect = element.getBoundingClientRect();
+    const candidates = Array.from(document.querySelectorAll("label, legend, p, div, span, strong, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel']"))
+      .filter(isVisibleElement)
+      .filter((node) => node !== element && followsNode(node, element))
+      .flatMap((node) => simpleFieldLabelCandidatesNear(node, targetRect))
+      .sort((left, right) => left.distance - right.distance);
+
+    return candidates[0]?.text || "";
+  }
+
+  function simpleFieldLabelCandidatesNear(node, targetRect) {
+    const rect = node.getBoundingClientRect();
+    const text = compactText(node.innerText || node.textContent || "");
+    const controlCount = node.querySelectorAll?.("input, textarea, select, button, [role='radio'], [role='checkbox'], [role='combobox']").length || 0;
+
+    if (!text || text.length > 600 || controlCount > 3 || rect.bottom < targetRect.top - 180 || rect.top > targetRect.bottom + 24) {
+      return [];
+    }
+
+    const distance = rect.bottom <= targetRect.top
+      ? targetRect.top - rect.bottom
+      : rect.top >= targetRect.bottom
+        ? rect.top - targetRect.bottom + 40
+        : 0;
+
+    return text
+      .split(/\n+/)
+      .map((line) => compactText(line))
+      .filter(isSimpleFieldLabelLine)
+      .map((line) => ({
+        text: cleanSimpleFieldLabel(line),
+        distance
+      }));
+  }
+
+  function isSimpleFieldLabelLine(line) {
+    const normalized = normalize(line).replace(/\s+/g, " ").trim();
+    return /^(legal\s+)?(first|middle|last|preferred|given|family)\s+name\s*:?\*?$/.test(normalized)
+      || /^(email|e-mail|phone|mobile|city|state|province|country|postal code|zip code)\s*:?\*?$/.test(normalized);
+  }
+
+  function cleanSimpleFieldLabel(line) {
+    return compactText(String(line || "").replace(/\s*:\s*$/, ""));
   }
 
   function precedingQuestionLabel(element, options) {
@@ -1042,6 +1144,11 @@
     const fullHaystack = fullFieldHaystack(field);
     const phoneContextHaystack = normalize([primaryHaystack, field.surroundingText, field.nearbyText].join(" "));
 
+    const dependentNoDetailMapping = mapDependentNoDetailField(field, fullHaystack);
+    if (dependentNoDetailMapping) {
+      return dependentNoDetailMapping;
+    }
+
     if (shouldSkipField(primaryHaystack)) {
       return null;
     }
@@ -1169,7 +1276,7 @@
       return addressMapping;
     }
 
-    if (/(sponsor|visa|h-?1b|work permit)/.test(haystack)) {
+    if (hasSponsorshipTerms(haystack)) {
       return buildMapping(field, profile.needsSponsorship || profile.answers?.sponsorship || "No", "rule", 0.88);
     }
 
@@ -1242,9 +1349,39 @@
 
   function isGreenhousePhoneCountryField(field, primaryHaystack, fullHaystack) {
     return /^country\s*(required)?\s*\*?$|^required\s+country\s*\*?$/.test(primaryHaystack)
+      && /greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse/i.test(location.hostname)
+      && isNearPhoneNumberField(field)
       && (/\bphone\b/.test(fullHaystack) || hasPhoneCountryCodeOptions(field.options))
       && !/(currently reside|current residence|country.*reside|country region|country\/region|location|city)/.test(primaryHaystack)
       && (!field.options?.length || hasPhoneCountryCodeOptions(field.options));
+  }
+
+  function isNearPhoneNumberField(field) {
+    const element = field.elementRef?.deref?.();
+    if (!element) {
+      return false;
+    }
+
+    const rect = element.getBoundingClientRect();
+    return Array.from(document.querySelectorAll("input:not([type='hidden']), textarea, select, [role='combobox'], [aria-haspopup='listbox']"))
+      .filter((candidate) => candidate !== element && isVisibleElement(candidate))
+      .some((candidate) => {
+        const candidateText = normalize([
+          getLabelText(candidate),
+          candidate.getAttribute("name") || "",
+          candidate.id || "",
+          candidate.getAttribute("placeholder") || "",
+          candidate.getAttribute("aria-label") || ""
+        ].join(" "));
+        if (!/phone|mobile|telephone/.test(candidateText)) {
+          return false;
+        }
+
+        const candidateRect = candidate.getBoundingClientRect();
+        return Math.abs(candidateRect.top - rect.top) < 120
+          || Math.abs(candidateRect.left - rect.right) < 320
+          || Math.abs(rect.left - candidateRect.right) < 320;
+      });
   }
 
   function hasPhoneCountryCodeOptions(options = []) {
@@ -1252,14 +1389,23 @@
   }
 
   function phoneCountryCodeAnswer(field, profile) {
-    const explicit = profile.answers?.phoneCountryCode || profile.phoneCountryCode || "Canada (+1)";
+    const explicit = profile.answers?.phoneCountryCode || profile.phoneCountryCode || "+1";
     const options = field.options || [];
     const canadaOption = options.find((option) => {
       const text = normalize(`${option.label || ""} ${option.value || ""}`);
       return /\bcanada\b/.test(text) && /(^|\s|\()\+?1(\)|\s|$)/.test(text);
     });
 
-    return canadaOption ? (canadaOption.label || canadaOption.value) : explicit;
+    return canadaOption ? (canadaOption.label || canadaOption.value) : normalizePhoneCountryFallback(explicit);
+  }
+
+  function normalizePhoneCountryFallback(value) {
+    const text = normalize(value);
+    if (/canada|\+?1/.test(text)) {
+      return "+1";
+    }
+
+    return value;
   }
 
   function isPhoneExtensionField(haystack) {
@@ -1354,7 +1500,7 @@
     return [
       /(18 years of age|at least 18|proof of age|minimum age)/,
       isWorkEligibilityQuestion,
-      /(sponsor|sponsorship|visa|h-?1b|f-?1|opt|cpt|tn|ead|work permit)/,
+      hasSponsorshipTerms,
       /(now|ever|previously|formerly|current|directly).*(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2)/,
       /(employed|worked|work|contractor|dealer|affiliate|subsidiar|paycheck|w-?2).*(now|ever|previously|formerly|current|directly)/,
       /(relatives?|family member|spouse|domestic partner).*(employed|work|working|military|armed forces|served|service)/,
@@ -1369,6 +1515,11 @@
     return /(legally\s+)?(authorized|eligible|permitted|allowed).*(work|employment)/.test(haystack)
       || /(work|employment).*(authorized|eligible|authorization|eligibility)/.test(haystack)
       || /work authorization|proof of authorization|legally eligible/.test(haystack);
+  }
+
+  function hasSponsorshipTerms(haystack) {
+    return /\b(sponsor|sponsorship|visa|work permit)\b/.test(haystack)
+      || /\b(h-?1b|f-?1|opt|cpt|tn|ead)\b/.test(haystack);
   }
 
   function shouldAskForField(field) {
@@ -1441,7 +1592,7 @@
   }
 
   function mapWorkQuestion(field, profile, haystack) {
-    if (/(sponsor|visa|h-?1b|work permit)/.test(haystack)) {
+    if (hasSponsorshipTerms(haystack)) {
       return buildMapping(field, sponsorshipAnswer(field, profile), "rule", 0.9);
     }
 
@@ -1523,7 +1674,7 @@
       return buildMapping(field, profile.answers?.spouseMilitaryService || "No", "rule", 0.88);
     }
 
-    if (/(relatives?|family member|spouse|domestic partner).*(employed|work|working)|((employed|work|working).*(relatives?|family member|spouse|domestic partner))/.test(haystack)) {
+    if (isFamilyOrRelationshipConflictQuestion(haystack)) {
       return buildMapping(field, profile.answers?.relativesAtCompany || "No", "rule", 0.88);
     }
 
@@ -1602,6 +1753,27 @@
     }
 
     return null;
+  }
+
+  function mapDependentNoDetailField(field, haystack) {
+    if (isDependentNoDetailQuestion(haystack)) {
+      return buildMapping(field, "N/A", "rule", 0.86);
+    }
+
+    return null;
+  }
+
+  function isDependentNoDetailQuestion(haystack) {
+    const asksForDetails = /(if yes|if applicable|please enter|please provide|please state|state their name|provide their name|name and department|name department|details?)/.test(haystack);
+    return asksForDetails && (isFamilyOrRelationshipConflictQuestion(haystack) || isCompanyAffiliationQuestion(haystack));
+  }
+
+  function isFamilyOrRelationshipConflictQuestion(haystack) {
+    return /(relatives?|family members?|spouse|domestic partner|close personal relationship|significant other|parent|sibling|child)/.test(haystack);
+  }
+
+  function isCompanyAffiliationQuestion(haystack) {
+    return /(authorized dealer|dealer|contractor|affiliate|subsidiary|business unit|vendor|supplier|partner company)/.test(haystack);
   }
 
   function mapGovernmentSelfIdField(field, profile, primaryHaystack, fullHaystack) {
@@ -1906,9 +2078,6 @@
     return candidates.find((item) => {
       const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
       return /add another/.test(text) && /(employment|experience|work|job)/.test(employmentSectionText(item));
-    }) || candidates.find((item) => {
-      const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
-      return /^add another$/.test(text);
     });
   }
 
@@ -1921,6 +2090,10 @@
   }
 
   async function ensureEducationRows(targetCount) {
+    if (targetCount <= 1) {
+      return;
+    }
+
     await ensureRowsForSection(targetCount, countEducationRows, () => findAddButtonForSection(/education|school|university/));
   }
 
@@ -2104,9 +2277,9 @@
         buckets.degree.push(field);
       } else if (/field of study|discipline|major|program/.test(primaryHaystack)) {
         buckets.field.push(field);
-      } else if (/^from\b|start|begin/.test(primaryHaystack)) {
+      } else if (/^from\b|start.*year|begin.*year/.test(primaryHaystack)) {
         buckets.startYear.push(field);
-      } else if (/^to\b|actual or expected|expected|end|graduation/.test(primaryHaystack)) {
+      } else if (/^to\b|actual or expected|expected.*year|end.*year|graduation/.test(primaryHaystack)) {
         buckets.endYear.push(field);
       }
     }
@@ -2155,7 +2328,9 @@
   }
 
   function isEmploymentField(field, haystack) {
-    if (/(school|education|degree|discipline)/.test(haystack)) {
+    const fullText = `${haystack} ${normalize(field.surroundingText)}`;
+
+    if (/(school|education|degree|discipline)/.test(fullText)) {
       return false;
     }
 
@@ -2171,13 +2346,35 @@
       return false;
     }
 
-    return /(employment|experience|work history|\bcompany\b|company name|employer|\btitle\b|job title|current role|currently work|start date|end date|position|\blocation\b|\bfrom\b|\bto\b|role description|responsibilities|achievements)/.test(
-      `${haystack} ${normalize(field.surroundingText)}`
-    );
+    const hasEmploymentContext = employmentContextForField(field, fullText);
+    const isGenericEmploymentField = /(\bcompany\b|company name|employer|\btitle\b|job title|current role|currently work|start date|end date|position|\blocation\b|\bfrom\b|\bto\b|role description|responsibilities|achievements)/.test(haystack);
+
+    if (isGenericEmploymentField && !hasEmploymentContext) {
+      return false;
+    }
+
+    return /(employment|experience|work history|\bcompany\b|company name|employer|\btitle\b|job title|current role|currently work|start date|end date|position|\blocation\b|\bfrom\b|\bto\b|role description|responsibilities|achievements)/.test(fullText);
+  }
+
+  function employmentContextForField(field, text) {
+    if (/(employment|work experience|work history|professional experience|job history)/.test(text)) {
+      return true;
+    }
+
+    const element = field.elementRef?.deref?.();
+    if (!element) {
+      return false;
+    }
+
+    return /(employment|work experience|work history|professional experience|job history)/.test(nearestSectionHeadingText(element));
   }
 
   function isEducationField(field, haystack) {
     if (/work experience|employment|company|job title|role description|resume|websites?|social network/.test(haystack)) {
+      return false;
+    }
+
+    if (/start date month|start month|end date month|end month/.test(haystack)) {
       return false;
     }
 
@@ -2217,7 +2414,7 @@
       .filter((item) => hasValue(item.school) || hasValue(item.degree));
 
     if (items.length) {
-      return items;
+      return uniqueEducationEntries(items);
     }
 
     const resumeEducation = Array.isArray(profile.resumeFacts?.education) ? profile.resumeFacts.education : [];
@@ -2227,6 +2424,23 @@
     const merged = mergeEducationEntry(fallback, parsedResumeEducation);
 
     return hasValue(merged.school) || hasValue(merged.degree) ? [merged] : [];
+  }
+
+  function uniqueEducationEntries(items) {
+    const seen = new Set();
+    const uniqueItems = [];
+
+    for (const item of items) {
+      const key = normalize([item.school, item.degree, item.fieldOfStudy].join(" "));
+      if (seen.has(key)) {
+        continue;
+      }
+
+      seen.add(key);
+      uniqueItems.push(item);
+    }
+
+    return uniqueItems;
   }
 
   function normalizeEducationEntry(entry, profile) {
@@ -2321,9 +2535,11 @@
 
   function normalizedProfileLinks(profile) {
     const links = [
-      profile.linkedin,
       profile.portfolio,
-      profile.github
+      profile.website,
+      profile.personalWebsite,
+      profile.github,
+      profile.linkedin
     ];
 
     const projectLinks = profile.resumeFacts?.projectLinks;
@@ -2949,7 +3165,7 @@
       return null;
     }
 
-    if (!field.options?.length && isOptionLikeField(field)) {
+    if (!field.options?.length && isOptionLikeField(field) && !canAttemptUnoptionedOptionLikeMapping(field, normalizedValue, source)) {
       return null;
     }
 
@@ -2961,12 +3177,40 @@
     };
   }
 
+  function canAttemptUnoptionedOptionLikeMapping(field, value, source = "") {
+    const haystack = fullFieldHaystack(field);
+    const normalizedValue = normalize(value);
+
+    if (isPhoneCountryCodeField(haystack) && /^(\+?1|canada|canada 1|canada \+1)$/.test(normalizedValue)) {
+      return true;
+    }
+
+    if (!/rule|policy|llm|ai|saved/.test(normalize(source))) {
+      return false;
+    }
+
+    if (!/^(yes|no|n\/a|na|not applicable|none of the above|i do not wish to answer|i prefer not to answer)$/.test(normalizedValue)) {
+      return false;
+    }
+
+    return isPolicyLikeQuestion(haystack);
+  }
+
+  function isPolicyLikeQuestion(haystack) {
+    return isAiOnlyQuestion(haystack)
+      || isWorkEligibilityQuestion(haystack)
+      || /(sponsor|sponsorship|visa|work permit|relative|family member|spouse|domestic partner|contractor|dealer|affiliate|subsidiary|certify|true and correct|terms|privacy policy|subscribe|newsletter|email alert|job alert|minimum age|18 years of age)/.test(haystack);
+  }
+
   function isOptionLikeField(field) {
+    const haystack = fullFieldHaystack(field);
     return field.tag === "select"
       || field.tag === "button"
       || field.type === "combobox"
       || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "))
-      || /selectwidget|selectshowall/i.test(field.dataAutomationId || "");
+      || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
+      || /select one|select\.\.\.|choose/.test(haystack)
+      || (/(degree|discipline|field of study|major|qualification)/.test(haystack) && /select/.test(haystack));
   }
 
   function normalizedMappingValue(field, value) {
@@ -2987,7 +3231,7 @@
     const haystack = fullFieldHaystack(field);
     const desired = normalize(value);
 
-    if (/(sponsor|sponsorship|visa|h-?1b|f-?1|opt|cpt|tn|ead|work permit)/.test(haystack)) {
+    if (hasSponsorshipTerms(haystack)) {
       return normalizeSponsorshipValue(value);
     }
 
@@ -3043,7 +3287,7 @@
     if (
       text === "yes"
       || /(require|need).*(sponsor|visa|work permit)/.test(text)
-      || /(h-?1b|f-?1|opt|cpt|tn|ead)/.test(text)
+      || /\b(h-?1b|f-?1|opt|cpt|tn|ead)\b/.test(text)
     ) {
       return "Yes";
     }
@@ -3130,6 +3374,13 @@
 
     if (!field) {
       return mapping;
+    }
+
+    if (!field.options?.length && isOptionLikeField(field) && !canAttemptUnoptionedOptionLikeMapping(field, mapping.value, mapping.source)) {
+      return {
+        ...mapping,
+        value: ""
+      };
     }
 
     return {
@@ -3266,7 +3517,7 @@
         return false;
       }
 
-      return fillCombobox(element, mapping.value);
+      return fillCombobox(element, mapping.value, field);
     }
 
     if (field.options?.length && dropdownTrigger(element)) {
@@ -3275,7 +3526,7 @@
         return false;
       }
 
-      const filled = await fillCombobox(element, mapping.value);
+      const filled = await fillCombobox(element, mapping.value, field);
       if (filled) {
         return true;
       }
@@ -3353,7 +3604,7 @@
     return clicked > 0;
   }
 
-  async function fillCombobox(element, desiredValue) {
+  async function fillCombobox(element, desiredValue, field = null) {
     const trigger = dropdownTrigger(element) || element;
     const previousValue = getCurrentValue(trigger);
     const mustClickOption = requiresDropdownOptionClick();
@@ -3401,6 +3652,17 @@
         }
       }
 
+      if (canConfirmTypedDropdownValue(field, typedOptionValue)) {
+        dispatchEnterOrEscape(trigger, "Enter");
+        await sleep(250);
+        dispatchFormEvents(trigger);
+        dispatchFormEvents(element);
+
+        if (dropdownSelectionLooksConfirmed(trigger, previousValue, typedOptionValue)) {
+          return true;
+        }
+      }
+
       if (!mustClickOption && optionMatches(getCurrentValue(trigger), "", typedOptionValue)) {
         confirmFilledElement(trigger);
         await sleep(250);
@@ -3421,6 +3683,26 @@
     dispatchFormEvents(trigger);
     dispatchFormEvents(element);
     return false;
+  }
+
+  function canConfirmTypedDropdownValue(field, value) {
+    if (!field) {
+      return false;
+    }
+
+    const haystack = fullFieldHaystack(field);
+    const desired = normalize(value);
+    return isPhoneCountryCodeField(haystack) && /^(\+?1|canada|canada 1|canada \+1)$/.test(desired);
+  }
+
+  function dropdownSelectionLooksConfirmed(trigger, previousValue, desiredValue) {
+    const current = getCurrentValue(trigger);
+
+    if (valueMatches(current, previousValue)) {
+      return false;
+    }
+
+    return optionMatches(current, "", desiredValue) || /\+?\s*1\b|\bcanada\b/i.test(current);
   }
 
   function dropdownSearchValue(desiredValue) {

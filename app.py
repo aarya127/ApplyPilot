@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 import urllib.request
 import urllib.parse
 import json
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 from extract_jobs import extract_newgrad_jobs
 
@@ -25,20 +25,52 @@ def index() -> str:
 _newgrad_cache: Dict[str, Any] = {"jobs": [], "errors": [], "updated_at": None}
 _newgrad_cache_lock = threading.Lock()
 _newgrad_cache_loading = False
+_newgrad_progress: Dict[str, Any] = {
+    "percent": 0,
+    "message": "Idle",
+    "detail": {},
+    "started_at": None,
+    "updated_at": None,
+}
 NEWGRAD_CACHE_TTL = timedelta(minutes=30)   # Airtable doesn't change as fast
+
+
+def _set_newgrad_progress(percent: int, message: str, detail: Optional[Dict[str, Any]] = None) -> None:
+    with _newgrad_cache_lock:
+        _newgrad_progress["percent"] = max(0, min(int(percent), 100))
+        _newgrad_progress["message"] = message
+        _newgrad_progress["detail"] = detail or {}
+        _newgrad_progress["updated_at"] = datetime.now()
+
+
+def _newgrad_progress_snapshot() -> Dict[str, Any]:
+    progress = dict(_newgrad_progress)
+    for key in ["started_at", "updated_at"]:
+        value = progress.get(key)
+        if isinstance(value, datetime):
+            progress[key] = value.isoformat()
+    return progress
 
 
 def _run_newgrad_fetch() -> None:
     global _newgrad_cache_loading
     try:
-        result = extract_newgrad_jobs()
+        _set_newgrad_progress(1, "Starting new-grad job refresh")
+        result = extract_newgrad_jobs(progress_callback=_set_newgrad_progress)
         with _newgrad_cache_lock:
             _newgrad_cache["jobs"] = result["jobs"]
             _newgrad_cache["errors"] = result["errors"]
             _newgrad_cache["updated_at"] = datetime.now()
+            _newgrad_progress["percent"] = 100
+            _newgrad_progress["message"] = f"Loaded {len(result['jobs'])} jobs"
+            _newgrad_progress["detail"] = {"phase": "complete"}
+            _newgrad_progress["updated_at"] = datetime.now()
     except Exception as exc:
         with _newgrad_cache_lock:
             _newgrad_cache["errors"] = [str(exc)]
+            _newgrad_progress["message"] = f"Refresh failed: {exc}"
+            _newgrad_progress["detail"] = {"phase": "error"}
+            _newgrad_progress["updated_at"] = datetime.now()
     finally:
         with _newgrad_cache_lock:
             _newgrad_cache_loading = False
@@ -50,7 +82,26 @@ def start_newgrad_fetch() -> None:
         if _newgrad_cache_loading:
             return
         _newgrad_cache_loading = True
+        _newgrad_progress["percent"] = 0
+        _newgrad_progress["message"] = "Queued new-grad job refresh"
+        _newgrad_progress["detail"] = {"phase": "queued"}
+        _newgrad_progress["started_at"] = datetime.now()
+        _newgrad_progress["updated_at"] = datetime.now()
     threading.Thread(target=_run_newgrad_fetch, daemon=True).start()
+
+
+@app.route("/newgrad/status")
+def newgrad_status():
+    with _newgrad_cache_lock:
+        return jsonify(
+            {
+                "loading": _newgrad_cache_loading,
+                "progress": _newgrad_progress_snapshot(),
+                "jobCount": len(_newgrad_cache["jobs"]),
+                "errorCount": len(_newgrad_cache["errors"]),
+                "updatedAt": _newgrad_cache["updated_at"].isoformat() if _newgrad_cache["updated_at"] else None,
+            }
+        )
 
 
 @app.route("/newgrad")
@@ -66,6 +117,7 @@ def newgrad() -> str:
         loading = _newgrad_cache_loading
         jobs = list(_newgrad_cache["jobs"])
         errors = list(_newgrad_cache["errors"])
+        progress = _newgrad_progress_snapshot()
 
     triggered_fetch = False
     if (refresh or not jobs or expired) and not loading:
@@ -96,7 +148,8 @@ def newgrad() -> str:
         jobs=filtered_jobs,
         errors=errors,
         updated_at=updated_at,
-        loading=_newgrad_cache_loading or triggered_fetch,
+        loading=loading or triggered_fetch,
+        progress=progress,
         total_job_count=len(jobs),
         all_categories=all_categories,
         category_filter=category_filter,

@@ -286,6 +286,65 @@ def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
     ]
 
 
+@pytest.mark.parametrize(
+    ("label", "expected"),
+    [
+        ("Are you legally eligible to work in the U.S.?", "Yes"),
+        ("Are you authorized to work in the country where this role is based?", "Yes"),
+        ("Will you now or in the future require visa sponsorship for employment at Example Energy?", "No"),
+        ("Do you now or later need employer sponsorship for a work permit?", "No"),
+        (
+            "Do you have any close relatives who work at Example Energy? For this purpose, close relatives include spouse, domestic partner, parent, child, or sibling.",
+            "No",
+        ),
+        (
+            "Are you related to, or in a close personal relationship with, anyone currently employed by Example Studios?",
+            "No",
+        ),
+        (
+            "Please enter the Name and Department of any of your close relatives who work at Example Energy.",
+            "N/A",
+        ),
+        (
+            "If yes, please provide the relative's name, department, and relationship.",
+            "N/A",
+        ),
+    ],
+)
+def test_backend_policy_answers_generic_application_policy_questions(label, expected):
+    assert server.policy_mappings([{"index": 0, "label": label}], {}) == [
+        {"index": 0, "value": expected, "confidence": 0.78, "source": "policy"}
+    ]
+
+
+def test_backend_policy_answers_generic_policy_questions_without_visible_options_together():
+    fields = [
+        {"index": 0, "label": "Are you legally eligible to work in the U.S.?"},
+        {"index": 1, "label": "Will you now or in the future require visa sponsorship for employment at Example Energy?"},
+        {
+            "index": 2,
+            "label": (
+                "Do you have any close relatives who work at Example Energy? For this purpose, "
+                "close relatives include spouse, domestic partner, parent, child, or sibling, and each of their respective spouses or domestic partners."
+            ),
+        },
+        {
+            "index": 3,
+            "label": (
+                "Please enter the Name and Department of any of your close relatives who work at Example Energy? "
+                "For this purpose, close relatives include spouse, domestic partner, parent, child, or sibling, and each of their respective spouses or domestic partners"
+            ),
+        },
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {"index": 0, "value": "Yes", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 2, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 3, "value": "N/A", "confidence": 0.78, "source": "policy"},
+    ]
+
+
 def test_backend_policy_matches_long_no_dropdown_options():
     fields = [
         {
@@ -333,21 +392,21 @@ def test_backend_policy_uses_surrounding_text_only_for_low_information_labels():
             "index": 0,
             "label": "Yes",
             "surroundingText": (
-                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.? "
                 "Yes No"
             ),
             "options": [{"label": "Yes"}, {"label": "No"}],
         },
         {
             "index": 1,
-            "label": "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank?",
+            "label": "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.?",
             "surroundingText": "Resume context Example Labs Engineer",
             "options": [{"label": "Yes"}, {"label": "No"}],
         },
         {
             "index": 2,
             "label": (
-                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.? "
                 "(i.e. have you received a paycheck or W-2 directly from one of these companies?)."
             ),
             "options": [{"label": "Yes"}, {"label": "No"}],
@@ -356,7 +415,7 @@ def test_backend_policy_uses_surrounding_text_only_for_low_information_labels():
             "index": 3,
             "label": "Yes",
             "questionText": (
-                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.? "
                 "(i.e. have you received a paycheck or W-2 directly from one of these companies?)."
             ),
             "options": [{"label": "Yes"}, {"label": "No"}],
@@ -365,7 +424,7 @@ def test_backend_policy_uses_surrounding_text_only_for_low_information_labels():
             "index": 4,
             "label": "Yes Required",
             "questionText": (
-                "Have you previously been DIRECTLY employed with Deutsche Telekom AG or Softbank? "
+                "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.? "
                 "(i.e. have you received a paycheck or W-2 directly from one of these companies?)."
             ),
             "options": [{"label": "Yes"}, {"label": "No"}],
@@ -482,6 +541,29 @@ def test_backend_drops_non_option_wording_for_optioned_fields():
             "source": "llm",
         }
     ]
+
+
+def test_backend_drops_non_option_education_dropdown_answers():
+    fields = [
+        {
+            "index": 0,
+            "label": "Degree",
+            "options": [{"label": "Select..."}, {"label": "High School"}, {"label": "Associate Degree"}],
+        },
+        {
+            "index": 1,
+            "label": "Discipline",
+            "options": [{"label": "Select..."}, {"label": "Computer Science"}, {"label": "Mathematics"}],
+        },
+    ]
+
+    assert server.enforce_option_values(
+        [
+            {"index": 0, "value": "Bachelor of Science", "confidence": 0.8, "source": "llm"},
+            {"index": 1, "value": "Statistics", "confidence": 0.8, "source": "llm"},
+        ],
+        fields,
+    ) == []
 
 
 def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
@@ -742,7 +824,7 @@ def test_content_script_uses_usa_target_country_for_stripe_style_fields():
               <label>Location (City)*<input name="locationCity"></label>
               <label>Please select the country where you currently reside. *<input name="currentlyReside"></label>
               <label>Are you authorized to work in the location(s) you selected in your previous response?*<input name="authorized"></label>
-              <label>Will you require Stripe to sponsor you for a work permit now or in the future for the location(s) you selected in in your previous response? *<input name="sponsorship"></label>
+              <label>Will you require ExampleCo to sponsor you for a work permit now or in the future for the location(s) you selected in your previous response? *<input name="sponsorship"></label>
               <label>If this role offers the option to work from a remote location, do you plan to work remotely?*<input name="remote"></label>
               <label>What is the most recent school you attended?<input name="school"></label>
             </form>
@@ -1020,8 +1102,8 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
               <label>Do you have experience with Kubernetes?<input name="k8s"></label>
               <label>Who is your current or previous employer?<input name="employer"></label>
               <label>What is your current or previous job title?<input name="jobTitle"></label>
-              <label>Have you ever been employed by Stripe or a Stripe affiliate?<select name="stripeAffiliate"><option></option><option>Yes</option><option>No</option></select></label>
-              <label>Do you opt-in to receive WhatsApp messages from Stripe Recruiting?<select name="whatsapp"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Have you ever been employed by ExampleCo or an ExampleCo affiliate?<select name="companyAffiliate"><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Do you opt-in to receive WhatsApp messages from ExampleCo Recruiting?<select name="whatsapp"><option></option><option>Yes</option><option>No</option></select></label>
               <label>Gender<select name="gender"><option></option><option>Female</option><option>Male</option><option>I do not wish to answer</option></select></label>
               <label>Are you Hispanic/Latino?<select name="hispanic"><option></option><option>Yes, I am Hispanic or Latino</option><option>No, I am not Hispanic or Latino</option><option>I do not wish to answer</option></select></label>
               <label>Race<select name="race"><option></option><option>Black or African American</option><option>Asian (Not Hispanic or Latino)</option><option>I do not wish to answer</option></select></label>
@@ -1061,7 +1143,7 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         k8s_mapping = next(mapping for mapping in mappings if "Kubernetes" in mapping["label"])
         employer_mapping = next(mapping for mapping in mappings if "current or previous employer" in mapping["label"])
         title_mapping = next(mapping for mapping in mappings if "current or previous job title" in mapping["label"])
-        stripe_mapping = next(mapping for mapping in mappings if "Stripe affiliate" in mapping["label"])
+        affiliate_mapping = next(mapping for mapping in mappings if "ExampleCo affiliate" in mapping["label"])
         whatsapp_mapping = next(mapping for mapping in mappings if "WhatsApp messages" in mapping["label"])
         gender_mapping = next(mapping for mapping in mappings if mapping["label"] == "Gender")
         hispanic_mapping = next(mapping for mapping in mappings if "Hispanic/Latino" in mapping["label"])
@@ -1070,7 +1152,7 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         assert k8s_mapping["value"] == "Yes"
         assert employer_mapping["value"] == "Example Labs"
         assert title_mapping["value"] == "Software Engineer"
-        assert stripe_mapping["value"] == "No"
+        assert affiliate_mapping["value"] == "No"
         assert whatsapp_mapping["value"] == "No"
         assert gender_mapping["value"] == "Male"
         assert hispanic_mapping["value"] == "No, I am not Hispanic or Latino"
@@ -1331,7 +1413,7 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
             <form>
               <label>Zip / postal code<input name="zip"></label>
               <label>May we contact your current employer?<select name="contactEmployer"><option></option><option>Yes</option><option>No</option></select></label>
-              <label>This position is based in the United States. Do you currently reside in commutable proximity to a Lyft Office located in San Francisco or are you open to relocating?<input name="commutable"></label>
+              <label>This position is based in the United States. Do you currently reside in commutable proximity to an ExampleCo office located in San Francisco or are you open to relocating?<input name="commutable"></label>
               <label>What is your current or previous job title?<input name="jobTitle"></label>
               <section id="employment">
                 <h2>Employment</h2>
@@ -1409,6 +1491,107 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         assert page.locator("[name='location[]']").nth(1).input_value() == "Waterloo, ON"
         assert page.locator("[name='to[]']").nth(1).input_value() == "4/2025"
         assert page.locator("[name='description[]']").nth(1).input_value() == "Published efficient transformer research"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_does_not_use_education_add_button_for_work_experience():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "school": "Sample University",
+        "degree": "Bachelor's Degree",
+        "fieldOfStudy": "Computer Science",
+        "workExperience": [
+            {
+                "company": f"Company {index}",
+                "title": "Engineer",
+                "startMonth": "September",
+                "startYear": "2025",
+                "endMonth": "December",
+                "endYear": "2025",
+            }
+            for index in range(6)
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <section id="education">
+                <h2>Education</h2>
+                <div class="education-row">
+                  <label>School<input name="school[]"></label>
+                  <label>Degree<select name="degree[]"><option>Select...</option><option>Bachelor's Degree</option></select></label>
+                  <label>Discipline<input name="discipline[]"></label>
+                  <label>Start date month<input name="start_date_month[]"></label>
+                  <label>Start date year<input name="start_date_year[]"></label>
+                  <label>End date month<input name="end_date_month[]"></label>
+                  <label>End date year<input name="end_date_year[]"></label>
+                </div>
+                <button id="addEducation" type="button">Add another</button>
+              </section>
+            </form>
+            <script>
+              document.getElementById('addEducation').addEventListener('click', () => {
+                const row = document.querySelector('.education-row').cloneNode(true);
+                row.querySelectorAll('input').forEach((input) => { input.value = ''; });
+                row.querySelectorAll('select').forEach((select) => { select.value = 'Select...'; });
+                document.getElementById('education').insertBefore(row, document.getElementById('addEducation'));
+              });
+            </script>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+
+        assert preview["ok"] is True
+        assert page.locator(".education-row").count() == 1
+        assert page.locator("[name='school[]']").input_value() == ""
+        assert page.locator("[name='start_date_month[]']").input_value() == ""
+        assert page.locator("[name='start_date_year[]']").input_value() == ""
+        assert page.locator("[name='end_date_month[]']").input_value() == ""
+        assert page.locator("[name='end_date_year[]']").input_value() == ""
 
         browser.close()
 

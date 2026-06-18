@@ -1229,7 +1229,7 @@ _NEWGRAD_CATEGORY_LABELS: dict[str, str] = {
 }
 
 
-def _scrape_newgrad_category(category: str, embed_url: str) -> list[dict[str, Any]]:
+def _scrape_newgrad_category(category: str, embed_url: str, progress_callback: Any = None) -> list[dict[str, Any]]:
     """Render one Airtable embed page and extract all job rows via virtual-scroll traversal.
 
     Column indexes are read dynamically from the header row because different embed views
@@ -1248,6 +1248,9 @@ def _scrape_newgrad_category(category: str, embed_url: str) -> list[dict[str, An
         ) from exc
 
     label = _NEWGRAD_CATEGORY_LABELS.get(category, category)
+    if progress_callback:
+        progress_callback(category, "starting", 0, 1, f"Starting {label}")
+
     # keyed by rowindex to avoid duplicates at step boundaries
     rows_by_index: dict[int, dict] = {}
 
@@ -1309,6 +1312,8 @@ def _scrape_newgrad_category(category: str, embed_url: str) -> list[dict[str, An
             viewport={"width": 1400, "height": 900},
         )
         page = context.new_page()
+        if progress_callback:
+            progress_callback(category, "loading", 0, 1, f"Loading {label}")
         # Use "commit" so goto returns as soon as the response is received rather
         # than waiting for DOMContentLoaded (which Airtable's SPA fires late).
         # The actual readiness gate is wait_for_selector below.
@@ -1343,8 +1348,9 @@ def _scrape_newgrad_category(category: str, embed_url: str) -> list[dict[str, An
         scroll_pos = 0
         scroll_step = 600   # px per step — keeps ~15 new rows visible each step
         max_iterations = 300
+        total_steps = max(1, min(max_iterations, (scroll_height // scroll_step) + 2))
 
-        for _ in range(max_iterations):
+        for iteration in range(max_iterations):
             page.evaluate(f"""() => {{
                 const c = document.querySelector('.antiscroll-inner');
                 if (c) c.scrollTop = {scroll_pos};
@@ -1356,6 +1362,15 @@ def _scrape_newgrad_category(category: str, embed_url: str) -> list[dict[str, An
                 ri = row.get("ri")
                 if ri is not None and ri not in rows_by_index and row.get("href"):
                     rows_by_index[ri] = row
+
+            if progress_callback:
+                progress_callback(
+                    category,
+                    "scrolling",
+                    min(iteration + 1, total_steps),
+                    total_steps,
+                    f"Scanning {label}: {len(rows_by_index)} rows found",
+                )
 
             scroll_pos += scroll_step
             if scroll_pos > scroll_height + scroll_step:
@@ -1378,24 +1393,66 @@ def _scrape_newgrad_category(category: str, embed_url: str) -> list[dict[str, An
     return jobs
 
 
-def extract_newgrad_jobs() -> dict[str, Any]:
+def extract_newgrad_jobs(progress_callback: Any = None) -> dict[str, Any]:
     """Scrape all four newgrad-jobs.com categories and deduplicate by job URL."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     all_jobs: list[dict[str, Any]] = []
     errors: list[str] = []
+    categories = dict(_NEWGRAD_CATEGORY_EMBEDS)
+    category_progress = {cat: 0.0 for cat in categories}
+
+    def report_category_progress(category: str, phase: str, current: int, total: int, message: str = "") -> None:
+        total = max(total, 1)
+        if phase == "starting":
+            fraction = 0.02
+        elif phase == "loading":
+            fraction = 0.08
+        elif phase == "complete":
+            fraction = 1.0
+        else:
+            fraction = min(max(current / total, 0.0), 0.98)
+
+        category_progress[category] = max(category_progress.get(category, 0.0), fraction)
+        if progress_callback:
+            percent = int((sum(category_progress.values()) / max(len(category_progress), 1)) * 95)
+            progress_callback(
+                max(1, min(percent, 95)),
+                message or f"Fetching {_NEWGRAD_CATEGORY_LABELS.get(category, category)}",
+                {
+                    "category": category,
+                    "phase": phase,
+                    "current": current,
+                    "total": total,
+                    "categories": category_progress.copy(),
+                },
+            )
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
-            pool.submit(_scrape_newgrad_category, cat, url): cat
-            for cat, url in _NEWGRAD_CATEGORY_EMBEDS.items()
+            pool.submit(_scrape_newgrad_category, cat, url, report_category_progress): cat
+            for cat, url in categories.items()
         }
         for future in as_completed(futures):
             cat = futures[future]
             try:
                 all_jobs.extend(future.result())
+                report_category_progress(
+                    cat,
+                    "complete",
+                    1,
+                    1,
+                    f"Finished {_NEWGRAD_CATEGORY_LABELS.get(cat, cat)}",
+                )
             except Exception as exc:
                 errors.append(f"{cat}: {exc}")
+                report_category_progress(
+                    cat,
+                    "complete",
+                    1,
+                    1,
+                    f"Skipped {_NEWGRAD_CATEGORY_LABELS.get(cat, cat)} after an error",
+                )
 
     # Deduplicate by canonical job URL (strip UTM params)
     seen: set[str] = set()
@@ -1405,6 +1462,9 @@ def extract_newgrad_jobs() -> dict[str, Any]:
         if canonical not in seen:
             seen.add(canonical)
             unique.append(job)
+
+    if progress_callback:
+        progress_callback(100, f"Loaded {len(unique)} jobs", {"phase": "complete"})
 
     return {"jobs": unique, "errors": errors}
 

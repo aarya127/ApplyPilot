@@ -260,6 +260,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
                 "If the best semantic answer is not an exact option, choose the closest supplied option label. "
                 "Never return profile wording for an optioned field unless it exactly equals one supplied option. "
+                "For Degree, Discipline, Field of Study, Major, and Qualification dropdowns, never answer with a free-text degree or major; use only a supplied option label, or skip if options are missing. "
                 "For disability, demographic, veteran, work authorization, sponsorship, relocation, consent, and yes/no fields, compare the meaning of every supplied option and return the single closest option label exactly. "
                 "Prefer explicit profile facts and resume facts over inference. "
                 "Use savedAnswers only when they clearly match the same current question; ignore generic or low-information saved answers for policy questions. "
@@ -449,7 +450,7 @@ def policy_answer_for_field(
     if any(term in haystack for term in ["18 years of age", "at least 18", "proof of age", "minimum age"]):
         return best_available_option("Yes", options) or "Yes"
 
-    if any(term in haystack for term in ["sponsor", "sponsorship", "visa", "h 1b", "f 1 opt", "cpt", "tn", "ead"]):
+    if has_sponsorship_terms(haystack):
         return best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
 
     if is_work_eligibility_question(haystack):
@@ -471,13 +472,16 @@ def policy_answer_for_field(
     if "veteran" in haystack:
         return best_available_option(policies["veteranStatus"], options) or policies["veteranStatus"]
 
-    if any(term in haystack for term in ["relative", "family member", "spouse", "domestic partner"]):
+    if is_dependent_no_detail_question(haystack):
+        return best_available_option("N/A", options) or "N/A"
+
+    if is_family_or_relationship_conflict_question(haystack):
         return best_available_option("No", options) or "No"
 
     if any(term in haystack for term in ["group", "community", "communities", "affiliation", "affiliated", "membership", "member of", "belong to"]):
         return best_available_option(policies["groupAffiliations"], options) or best_available_option("None of the above", options) or policies["groupAffiliations"]
 
-    if any(term in haystack for term in ["authorized dealer", "dealer", "contractor", "affiliate", "subsidiary"]):
+    if is_company_affiliation_question(haystack):
         return best_available_option("No", options) or "No"
 
     if is_previous_company_question(haystack):
@@ -520,6 +524,69 @@ def is_work_eligibility_question(haystack: str) -> bool:
         or "work authorization" in haystack
         or "proof of authorization" in haystack
         or "legally eligible" in haystack
+    )
+
+
+def has_sponsorship_terms(haystack: str) -> bool:
+    return bool(
+        re.search(r"\b(sponsor|sponsorship|visa|work permit)\b", haystack)
+        or re.search(r"\b(h\s*1b|f\s*1|opt|cpt|tn|ead)\b", haystack)
+    )
+
+
+def is_dependent_no_detail_question(haystack: str) -> bool:
+    asks_for_details = any(
+        term in haystack
+        for term in [
+            "if yes",
+            "if applicable",
+            "please enter",
+            "please provide",
+            "please state",
+            "state their name",
+            "provide their name",
+            "name and department",
+            "name department",
+            "details",
+        ]
+    )
+    conflict_context = is_family_or_relationship_conflict_question(haystack) or is_company_affiliation_question(haystack)
+    return asks_for_details and conflict_context
+
+
+def is_family_or_relationship_conflict_question(haystack: str) -> bool:
+    return any(
+        term in haystack
+        for term in [
+            "relative",
+            "relatives",
+            "family member",
+            "family members",
+            "spouse",
+            "domestic partner",
+            "close personal relationship",
+            "significant other",
+            "parent",
+            "sibling",
+            "child",
+        ]
+    )
+
+
+def is_company_affiliation_question(haystack: str) -> bool:
+    return any(
+        term in haystack
+        for term in [
+            "authorized dealer",
+            "dealer",
+            "contractor",
+            "affiliate",
+            "subsidiary",
+            "business unit",
+            "vendor",
+            "supplier",
+            "partner company",
+        ]
     )
 
 
