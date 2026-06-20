@@ -347,7 +347,12 @@ function aggregateFillResponses(successful, frameCount) {
     filled: 0,
     frameCount,
     accessibleFrameCount: successful.length,
-    failures: []
+    failures: [],
+    verification: {
+      matched: 0,
+      mismatched: [],
+      unreadable: []
+    }
   };
 
   for (const { response } of successful) {
@@ -356,7 +361,13 @@ function aggregateFillResponses(successful, frameCount) {
     result.mapped += Number(frameResult.mapped || 0);
     result.filled += Number(frameResult.filled || 0);
     result.failures.push(...(frameResult.failures || []));
+    result.verification.matched += Number(frameResult.verification?.matched || 0);
+    result.verification.mismatched.push(...(frameResult.verification?.mismatched || []));
+    result.verification.unreadable.push(...(frameResult.verification?.unreadable || []));
   }
+
+  result.verification.mismatched = result.verification.mismatched.slice(0, 25);
+  result.verification.unreadable = result.verification.unreadable.slice(0, 25);
 
   return { ok: true, result };
 }

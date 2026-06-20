@@ -3,9 +3,12 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from application_agent.agent.field_kinds import classify_field_kind, resolve_field_kind
+
 
 def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str] | None:
     text = field_text(field)
+    primary_text = primary_field_text(field)
 
     if should_skip(text):
         return None
@@ -19,23 +22,39 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if re.search(r"certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true", text):
         return profile.get("answers", {}).get("certifyApplicationTruth", "Yes"), "rule"
 
+    if re.search(r"country.*phone.*code|phone.*country.*code|country code|phone\s+country|country\s+phone", text):
+        return profile.get("answers", {}).get("phoneCountryCode") or profile.get("phone_country_code") or "+1", "rule"
+
+    field_kind = classify_field_kind(field)
+    field_value = resolve_field_kind(field_kind, profile)
+    if has_value(field_value):
+        return field_value, "field-kind"
+
     policy_like = is_policy_question(text)
     saved = saved_answer(field, profile)
     if has_value(saved) and not policy_like:
         return saved, "saved"
 
-    rules = [
+    primary_rules = [
         (r"\bfirst\b.*\bname\b|\bgiven\b.*\bname\b|fname", profile.get("first_name")),
         (r"\blast\b.*\bname\b|\bfamily\b.*\bname\b|lname|surname", profile.get("last_name")),
         (r"\bfull\b.*\bname\b|\blegal name\b", profile.get("full_name") or full_name(profile)),
-        (r"email|e-mail", profile.get("email")),
-        (r"phone|mobile|cell|telephone", profile.get("phone")),
-        (r"linkedin", profile.get("linkedin")),
-        (r"github", profile.get("github")),
-        (r"portfolio|website|personal site", profile.get("portfolio")),
+        (r"\bemail\b|e-mail", profile.get("email")),
+        (r"\bphone\b|mobile|cell|telephone", profile.get("phone")),
         (r"school|university|college", profile.get("school")),
         (r"degree|major|program", profile.get("degree")),
         (r"graduation|grad date|expected completion", profile.get("graduation_date")),
+    ]
+
+    for pattern, value in primary_rules:
+        if re.search(pattern, primary_text) and has_value(value):
+            return value, "rule"
+
+    profile_link = map_profile_link_field(primary_text, profile)
+    if profile_link:
+        return profile_link, "rule"
+
+    rules = [
         (
             r"(current|previous|most recent).*(employer|company)|(employer|company).*(current|previous|most recent)",
             profile.get("current_or_previous_employer"),
@@ -112,6 +131,45 @@ def field_text(field: dict[str, Any]) -> str:
     )
 
 
+def primary_field_text(field: dict[str, Any]) -> str:
+    return normalize(
+        " ".join(
+            [
+                field.get("label", ""),
+                field.get("question_text", ""),
+                field.get("name", ""),
+                field.get("id", ""),
+                field.get("placeholder", ""),
+                field.get("aria_label", ""),
+            ]
+        )
+    )
+
+
+def map_profile_link_field(text: str, profile: dict[str, Any]) -> str | None:
+    if is_work_or_education_identity_field(text):
+        return None
+
+    if re.search(r"linkedin|linked in", text):
+        return profile.get("linkedin")
+
+    if re.search(r"github|git hub", text):
+        return profile.get("github")
+
+    if re.search(r"portfolio|website|personal site|\burl\b", text):
+        return profile.get("portfolio") or profile.get("website")
+
+    return None
+
+
+def is_work_or_education_identity_field(text: str) -> bool:
+    return bool(
+        re.search(r"(current|previous|most recent|last).*(employer|company|school|university|college|education|job title|title|position|role)", text)
+        or re.search(r"(employer|company|school|university|college|education|job title|title|position|role).*(current|previous|most recent|last|attended)", text)
+        or re.search(r"work experience|employment history|last university attended|current/previous employer", text)
+    )
+
+
 def is_work_eligibility_question(text: str) -> bool:
     return bool(
         re.search(r"(legally\s+)?(authorized|eligible|permitted|allowed).*(work|employment)", text)
@@ -142,6 +200,10 @@ def map_address(text: str, profile: dict[str, Any]) -> str | None:
     if not address:
         return None
 
+    if re.search(r"(what|which).{0,20}u\.?s\.?\s*state|state.{0,60}(currently reside|current residence)|currently reside.{0,60}state", text):
+        state = address.get("state") or address.get("province")
+        return state_name_or_value(state) if has_value(state) else None
+
     rules = [
         (r"address line 1|street address|street", address.get("line1")),
         (r"address line 2|apt|apartment|suite|unit", address.get("line2")),
@@ -160,6 +222,64 @@ def map_address(text: str, profile: dict[str, Any]) -> str | None:
         return profile["location"]
 
     return None
+
+
+def state_name_or_value(value: Any) -> str:
+    states = {
+        "al": "Alabama",
+        "ak": "Alaska",
+        "az": "Arizona",
+        "ar": "Arkansas",
+        "ca": "California",
+        "co": "Colorado",
+        "ct": "Connecticut",
+        "de": "Delaware",
+        "fl": "Florida",
+        "ga": "Georgia",
+        "hi": "Hawaii",
+        "id": "Idaho",
+        "il": "Illinois",
+        "in": "Indiana",
+        "ia": "Iowa",
+        "ks": "Kansas",
+        "ky": "Kentucky",
+        "la": "Louisiana",
+        "me": "Maine",
+        "md": "Maryland",
+        "ma": "Massachusetts",
+        "mi": "Michigan",
+        "mn": "Minnesota",
+        "ms": "Mississippi",
+        "mo": "Missouri",
+        "mt": "Montana",
+        "ne": "Nebraska",
+        "nv": "Nevada",
+        "nh": "New Hampshire",
+        "nj": "New Jersey",
+        "nm": "New Mexico",
+        "ny": "New York",
+        "nc": "North Carolina",
+        "nd": "North Dakota",
+        "oh": "Ohio",
+        "ok": "Oklahoma",
+        "or": "Oregon",
+        "pa": "Pennsylvania",
+        "ri": "Rhode Island",
+        "sc": "South Carolina",
+        "sd": "South Dakota",
+        "tn": "Tennessee",
+        "tx": "Texas",
+        "ut": "Utah",
+        "vt": "Vermont",
+        "va": "Virginia",
+        "wa": "Washington",
+        "wv": "West Virginia",
+        "wi": "Wisconsin",
+        "wy": "Wyoming",
+        "dc": "District of Columbia",
+    }
+    text = normalize(str(value or ""))
+    return states.get(text, str(value or ""))
 
 
 def map_sensitive(text: str, profile: dict[str, Any]) -> str | None:

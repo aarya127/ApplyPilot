@@ -5,8 +5,10 @@ from pathlib import Path
 from typing import Any
 
 from application_agent.agent.answer_generator import answer_option_question, answer_question
-from application_agent.agent.field_mapper import map_field, normalize
+from application_agent.agent.field_mapper import normalize
 from application_agent.agent.form_scanner import scan_fields
+from application_agent.agent.planner import build_fill_plan
+from application_agent.agent.verifier import verify_fill_plan
 
 
 FINAL_SUBMIT_TEXT = [
@@ -35,28 +37,26 @@ class BaseAdapter:
         uploads = self.upload_resume(page, profile)
         employment_filled = self.fill_employment_history(page, profile)
         fields = scan_fields(page)
+        plan = build_fill_plan(
+            fields,
+            profile,
+            option_answerer=self.custom_option_answer,
+            text_answerer=self.custom_text_answer,
+            constrain_value=value_allowed_by_field_options,
+        )
 
-        for field in fields:
-            mapping = map_field(field, profile)
-            if not mapping:
-                custom_mapping = self.custom_option_answer(field, profile) or self.custom_text_answer(field, profile)
-                if custom_mapping:
-                    mapping = custom_mapping
-                else:
-                    skipped.append(field.get("label") or field.get("name") or f"field-{field.get('index')}")
-                    continue
-
-            value, source = mapping
+        for item in plan["items"]:
+            field = item["field"]
+            value = item["value"]
+            source = item["source"]
             if source == "generated_review_required":
                 generated_review_required += 1
 
-            value = value_allowed_by_field_options(field, value)
-            if value is None:
-                skipped.append(field.get("label") or field.get("name") or f"field-{field.get('index')}")
-                continue
-
             if self.fill_field(field, value):
                 filled += 1
+
+        skipped.extend(item["label"] for item in plan["skipped"])
+        verification = verify_fill_plan(plan["items"])
 
         return {
             "ats": self.name,
@@ -66,6 +66,11 @@ class BaseAdapter:
             "generatedReviewRequired": generated_review_required,
             "uploads": uploads,
             "unmapped": skipped[:25],
+            "verification": {
+                "matched": verification["matched"],
+                "mismatched": verification["mismatched"][:25],
+                "unreadable": verification["unreadable"][:25],
+            },
         }
 
     def custom_text_answer(self, field: dict[str, Any], profile: dict[str, Any]) -> tuple[str, str] | None:
@@ -177,6 +182,14 @@ class BaseAdapter:
 
         if self.wait_and_click_visible_option(locator, desired):
             return True
+
+        if can_confirm_typed_dropdown_value(field, desired):
+            try:
+                locator.press("Enter", timeout=1_000)
+                locator.page.wait_for_timeout(250)
+                return True
+            except Exception:
+                pass
 
         if requires_dropdown_option_click(field):
             return False
@@ -406,7 +419,48 @@ def is_typeahead_field(field: dict[str, Any]) -> bool:
 
 
 def dropdown_search_value(field: dict[str, Any], desired: str) -> str:
+    if is_phone_country_code_field(field) and re.search(r"canada|\+?1", normalize(str(desired))):
+        return "+1"
+
     return str(desired or "").strip()
+
+
+def can_confirm_typed_dropdown_value(field: dict[str, Any], desired: Any) -> bool:
+    text = field_full_text(field)
+    value = normalize(str(desired or ""))
+    if is_phone_country_code_field(field) and re.search(r"^(\+?1|canada|canada 1|canada \+1)$", value):
+        return True
+
+    try:
+        url = field["locator"].page.url
+    except Exception:
+        url = ""
+
+    return bool(
+        re.search(r"greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse", url, re.I)
+        and re.search(r"gender|race|racial|ethnic|ethnicity|veteran|protected veteran|disability status|have a disability|u\.?s\.?\s*state|state.*currently reside|currently reside.*state", text)
+        and value
+    )
+
+
+def is_phone_country_code_field(field: dict[str, Any]) -> bool:
+    return bool(re.search(r"country.*phone.*code|phone.*country.*code|country code|phone\s+country|country\s+phone", field_full_text(field)))
+
+
+def field_full_text(field: dict[str, Any]) -> str:
+    return normalize(
+        " ".join(
+            [
+                str(field.get("label") or ""),
+                str(field.get("question_text") or ""),
+                str(field.get("name") or ""),
+                str(field.get("id") or ""),
+                str(field.get("placeholder") or ""),
+                str(field.get("aria_label") or ""),
+                str(field.get("surrounding_text") or ""),
+            ]
+        )
+    )
 
 
 def requires_dropdown_option_click(field: dict[str, Any]) -> bool:

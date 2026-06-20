@@ -104,6 +104,37 @@ Workflow:
 7. The agent detects the ATS, scans the page, fills known fields, uploads your resume when possible, and handles safe Next/Continue buttons.
 8. Review everything before submitting. The agent should stop before final Submit.
 
+## Internal Workflow
+
+ApplyPilot now uses a plan-first pipeline:
+
+```text
+scan fields
+  -> classify field kinds
+  -> discover options
+  -> resolve profile answers
+  -> ask AI only for unresolved fields
+  -> build fill plan
+  -> fill the DOM
+  -> verify filled values
+  -> report skipped/mismatched fields
+```
+
+The key improvement is the canonical field-kind layer. The agent first decides
+what a field is, such as `links.linkedin`, `education.school`, or
+`work.current_or_previous_employer`, before choosing an answer. This prevents
+nearby labels like "Website" from leaking into unrelated fields like employer
+or university.
+
+Process documentation lives in:
+
+```text
+docs/applypilot_skills/
+```
+
+Start with `docs/applypilot_skills/README.md`, then read the skill file for the
+subprocess you are debugging.
+
 ## Current Adapters
 
 - Greenhouse: direct known selectors plus generic scanner fallback.

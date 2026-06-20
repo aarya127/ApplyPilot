@@ -708,6 +708,61 @@ def test_backend_deterministic_audit_corrects_wrong_policy_answers():
     ]
 
 
+def test_backend_deterministic_audit_corrects_contact_and_location_mismatches():
+    profile = {
+        "email": "candidate@example.com",
+        "phone": "555-0100",
+        "linkedin": "https://linkedin.example/candidate",
+        "portfolio": "https://portfolio.example",
+        "website": "https://website.example",
+        "usaLocation": "Chicago, IL",
+        "answers": {"authorizedCountries": "Canada and United States"},
+    }
+    fields = [
+        {"index": 0, "label": "LinkedIn URL *"},
+        {"index": 1, "label": "Phone number *"},
+        {"index": 2, "label": "Location *"},
+        {"index": 3, "label": "In what country/countries are you legally permitted to work? *"},
+    ]
+    mappings = [
+        {"index": 0, "value": "candidate@example.com", "source": "rule"},
+        {"index": 1, "value": "candidate@example.com", "source": "rule"},
+        {"index": 2, "value": "https://portfolio.example", "source": "rule"},
+        {"index": 3, "value": "Yes", "source": "rule"},
+    ]
+
+    assert server.deterministic_audit_corrections(fields, mappings, profile) == [
+        {
+            "index": 0,
+            "value": "https://linkedin.example/candidate",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        },
+        {
+            "index": 1,
+            "value": "555-0100",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        },
+        {
+            "index": 2,
+            "value": "Chicago, IL",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        },
+        {
+            "index": 3,
+            "value": "Canada and United States",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        },
+    ]
+
+
 def test_backend_audit_endpoint_works_without_llm(monkeypatch, tmp_path):
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
@@ -1140,13 +1195,16 @@ def test_content_script_disambiguates_location_typeahead_with_saved_usa_location
             pytest.skip(f"Chromium could not launch in this environment: {exc}")
 
         page = browser.new_page()
-        page.set_content(
-            """
+        page.route("https://job-boards.greenhouse.io/**", lambda route: route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="""
             <form>
               <label>Location (City)*<input name="locationCity" aria-autocomplete="list" placeholder="Start typing..."></label>
             </form>
             """
-        )
+        ))
+        page.goto("https://job-boards.greenhouse.io/example/jobs/1")
         page.evaluate(
             f"""() => {{
               const profile = {json.dumps(profile)};
@@ -1176,6 +1234,93 @@ def test_content_script_disambiguates_location_typeahead_with_saved_usa_location
         assert preview["ok"] is True
         mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Location (City)*")
         assert mapping["value"] == "Chicago, IL"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_does_not_cross_fill_gem_contact_fields():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "email": "candidate@example.com",
+        "phone": "555-0100",
+        "linkedin": "https://linkedin.example/candidate",
+        "portfolio": "https://portfolio.example",
+        "usaLocation": "Chicago, IL",
+        "answers": {"authorizedCountries": "Canada and United States"},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form class="gem-style">
+              <div class="field"><div>First name *</div><input name="first_name"></div>
+              <div class="field"><div>Last name *</div><input name="last_name"></div>
+              <div class="field"><div>Email *</div><input name="email"></div>
+              <div class="field"><div>LinkedIn URL *</div><input name="linkedin"></div>
+              <div class="field"><div>Phone number *</div><input name="phone"></div>
+              <div class="field"><div>Location *</div><input name="location"></div>
+              <div class="field"><div>In what country/countries are you legally permitted to work? *</div><input name="authorizedCountries"></div>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='email']").input_value() == "candidate@example.com"
+        assert page.locator("[name='linkedin']").input_value() == "https://linkedin.example/candidate"
+        assert page.locator("[name='phone']").input_value() == "555-0100"
+        assert page.locator("[name='location']").input_value() == "Chicago, IL"
+        assert page.locator("[name='authorizedCountries']").input_value() == "Canada and United States"
 
         browser.close()
 
@@ -1898,6 +2043,27 @@ def test_content_script_does_not_use_education_add_button_for_work_experience():
         assert page.locator("[name='end_date_month[]']").input_value() == ""
         assert page.locator("[name='end_date_year[]']").input_value() == ""
 
+        mapped_labels = [mapping["label"] for mapping in preview["result"]["mappings"]]
+        assert "Start date month" not in mapped_labels
+        assert "Start date year" not in mapped_labels
+        assert "End date month" not in mapped_labels
+        assert "End date year" not in mapped_labels
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator(".education-row").count() == 1
+        assert page.locator("[name='school[]']").input_value() == "Sample University"
+        assert page.locator("[name='start_date_month[]']").input_value() == ""
+        assert page.locator("[name='start_date_year[]']").input_value() == ""
+        assert page.locator("[name='end_date_month[]']").input_value() == ""
+        assert page.locator("[name='end_date_year[]']").input_value() == ""
+
         browser.close()
 
 
@@ -1989,5 +2155,120 @@ def test_content_script_discovers_custom_dropdown_options_before_mapping():
         )
         assert fill_response["ok"] is True
         assert page.locator("#veteran").get_attribute("data-selected") == "I am not a protected veteran"
+
+        browser.close()
+
+
+def test_content_script_greenhouse_uses_typed_dropdown_fallbacks_when_options_are_hidden():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "phoneCountryCode": "+1",
+        "veteranStatus": "No",
+        "answers": {
+            "disabilityStatus": "No, I do not have a disability and have not had one in the past",
+        },
+        "addresses": {
+            "usa": {
+                "state": "IL",
+            }
+        },
+        "demographics": {
+            "gender": "Male",
+            "race": "Asian",
+        },
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "targetCountry": "usa",
+        "requireReviewBeforeSubmit": True,
+    }
+
+    html = """
+      <form>
+        <label id="country-label">Country*</label>
+        <input id="country" role="combobox" aria-labelledby="country-label" aria-haspopup="listbox" value="Select...">
+        <label>Phone*<input id="phone" name="phone"></label>
+
+        <label id="state-label">What U.S State do you currently reside in? *</label>
+        <input id="state" role="combobox" aria-labelledby="state-label" aria-haspopup="listbox" value="Select...">
+
+        <label id="gender-label">Gender*</label>
+        <input id="gender" role="combobox" aria-labelledby="gender-label" aria-haspopup="listbox" value="Select...">
+
+        <label id="race-label">Race/Ethnicity*</label>
+        <input id="race" role="combobox" aria-labelledby="race-label" aria-haspopup="listbox" value="Select...">
+
+        <label id="veteran-label">Veteran Status*</label>
+        <input id="veteran" role="combobox" aria-labelledby="veteran-label" aria-haspopup="listbox" value="Select...">
+
+        <label id="disability-label">Disability Status*</label>
+        <input id="disability" role="combobox" aria-labelledby="disability-label" aria-haspopup="listbox" value="Select...">
+      </form>
+      <script>
+        document.querySelectorAll('[role="combobox"]').forEach((input) => {
+          input.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter') {
+              input.setAttribute('data-selected', input.value);
+            }
+          });
+        });
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.route("https://job-boards.greenhouse.io/**", lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto("https://job-boards.greenhouse.io/embed/job_app?for=pinterest")
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        selected = {mapping["label"]: mapping["value"] for mapping in preview["result"]["mappings"]}
+        assert selected["Country*"] == "+1"
+        assert selected["What U.S State do you currently reside in? *"] == "Illinois"
+        assert selected["Gender*"] == "Male"
+        assert selected["Race/Ethnicity*"] == "Asian"
+        assert selected["Veteran Status*"] == "No"
+        assert selected["Disability Status*"] == "No, I do not have a disability and have not had one in the past"
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True
+        assert page.locator("#country").get_attribute("data-selected") == "+1"
+        assert page.locator("#state").get_attribute("data-selected") == "Illinois"
 
         browser.close()

@@ -2,8 +2,11 @@ from pathlib import Path
 
 from application_agent.agent.answer_generator import answer_option_question, parse_option_answer
 from application_agent.agent.detector import detect_ats
+from application_agent.agent.field_kinds import classify_field_kind, resolve_field_kind
 from application_agent.agent.field_mapper import map_field
+from application_agent.agent.planner import build_fill_plan
 from application_agent.agent.profile_loader import normalize_profile
+from application_agent.agent.verifier import verify_fill_plan
 from application_agent.ats.base import is_final_submit_text, option_matches, requires_dropdown_option_click, value_allowed_by_field_options
 from application_agent.ats.router import get_adapter
 
@@ -116,6 +119,9 @@ def test_field_mapper_handles_greenhouse_style_questions():
         "needs_sponsorship": "No",
         "work_authorization": "Yes",
         "veteran_status": "No",
+        "address": {
+            "state": "IL",
+        },
         "answers": {
             "previouslyEmployedByCompany": "No",
             "recruitingMessages": "No",
@@ -129,9 +135,9 @@ def test_field_mapper_handles_greenhouse_style_questions():
         "auto_fill_sensitive_fields": True,
     }
 
-    assert map_field({"label": "First Name"}, profile) == ("Test", "rule")
-    assert map_field({"label": "Who is your current or previous employer?"}, profile) == ("Example Labs", "rule")
-    assert map_field({"label": "What is your current or previous job title?"}, profile) == ("Software Engineer", "rule")
+    assert map_field({"label": "First Name"}, profile) == ("Test", "field-kind")
+    assert map_field({"label": "Who is your current or previous employer?"}, profile) == ("Example Labs", "field-kind")
+    assert map_field({"label": "What is your current or previous job title?"}, profile) == ("Software Engineer", "field-kind")
     assert map_field({"label": "Have you ever been employed by ExampleCo or an ExampleCo affiliate?"}, profile) == ("No", "rule")
     profile["needs_sponsorship"] = "I do not require sponsorship"
     assert map_field({"label": "Will you now, or in the future, require sponsorship to work in the United States?"}, profile) == ("No", "rule")
@@ -144,6 +150,8 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Race"}, profile) == ("Asian", "sensitive")
     assert map_field({"label": "Gender"}, profile) == ("Male", "sensitive")
     assert map_field({"label": "Sexual Orientation"}, profile) == ("Straight", "sensitive")
+    assert map_field({"label": "Country Phone Code"}, profile) == ("+1", "rule")
+    assert map_field({"label": "What U.S State do you currently reside in?"}, profile) == ("Illinois", "field-kind")
     assert map_field({"label": "If yes, please state their name and job title"}, profile) is None
     assert map_field({"label": "Subscribe to job alerts and marketing emails?"}, profile) == ("No", "rule")
     assert map_field({"label": "Do you accept the Terms and Conditions?"}, profile) == ("Yes", "rule")
@@ -159,6 +167,92 @@ def test_option_matching_handles_long_dropdown_labels_without_male_female_collis
     assert option_matches("Straight", "", "straight")
     assert option_matches("Canada (+1)", "", "Canada (+1)")
     assert option_matches("No", "", "I do not require sponsorship")
+
+
+def test_field_mapper_does_not_cross_fill_links_from_surrounding_text():
+    profile = {
+        "linkedin": "https://linkedin.example/candidate",
+        "github": "https://github.example/candidate",
+        "portfolio": "https://portfolio.example",
+        "school": "University of Waterloo",
+        "current_or_previous_employer": "Example Labs",
+    }
+
+    assert map_field(
+        {
+            "label": "Work Experience: Current/Previous Employer",
+            "surrounding_text": "LinkedIn Profile Website URL GitHub",
+        },
+        profile,
+    ) == ("Example Labs", "field-kind")
+    assert map_field(
+        {
+            "label": "Education: Last University Attended",
+            "surrounding_text": "LinkedIn Profile Website URL GitHub",
+        },
+        profile,
+    ) == ("University of Waterloo", "field-kind")
+    assert map_field(
+        {
+            "label": "Website",
+            "surrounding_text": "Education Work Experience",
+        },
+        profile,
+    ) == ("https://portfolio.example", "field-kind")
+
+
+def test_field_kind_classifier_resolves_core_profile_fields_before_heuristics():
+    profile = {
+        "linkedin": "https://linkedin.example/candidate",
+        "email": "candidate@example.com",
+        "address": {"state": "IL"},
+    }
+    linkedin_field = {"label": "LinkedIn Profile", "surrounding_text": "Website Email Phone"}
+    state_field = {"label": "What U.S State do you currently reside in?"}
+
+    assert classify_field_kind(linkedin_field) == "links.linkedin"
+    assert resolve_field_kind(classify_field_kind(linkedin_field), profile) == "https://linkedin.example/candidate"
+    assert classify_field_kind(state_field) == "address.state"
+    assert resolve_field_kind(classify_field_kind(state_field), profile) == "Illinois"
+
+
+def test_fill_plan_constrains_options_and_reports_skipped_fields():
+    fields = [
+        {"index": 0, "label": "First Name"},
+        {
+            "index": 1,
+            "label": "Are you a protected veteran?",
+            "options": [{"label": "I am not a protected veteran"}, {"label": "I decline to self-identify"}],
+        },
+        {"index": 2, "label": "Unmapped custom field"},
+    ]
+    profile = {"first_name": "Aarya", "veteran_status": "No"}
+    plan = build_fill_plan(fields, profile, constrain_value=value_allowed_by_field_options)
+
+    assert [(item["field"]["index"], item["value"], item["source"]) for item in plan["items"]] == [
+        (0, "Aarya", "field-kind"),
+        (1, "I am not a protected veteran", "rule"),
+    ]
+    assert plan["skipped"] == [{"index": 2, "label": "Unmapped custom field", "reason": "no_mapping"}]
+
+
+def test_verifier_reports_mismatched_filled_values():
+    class Locator:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def input_value(self, timeout: int = 500) -> str:
+            return self.value
+
+    plan_items = [
+        {"field": {"index": 0, "label": "Email", "locator": Locator("candidate@example.com")}, "value": "candidate@example.com", "fieldKind": "contact.email"},
+        {"field": {"index": 1, "label": "LinkedIn", "locator": Locator("https://portfolio.example")}, "value": "https://linkedin.example", "fieldKind": "links.linkedin"},
+    ]
+    verification = verify_fill_plan(plan_items)
+
+    assert verification["matched"] == 1
+    assert verification["mismatched"][0]["label"] == "LinkedIn"
+    assert verification["mismatched"][0]["fieldKind"] == "links.linkedin"
 
 
 def test_agent_only_allows_values_from_field_options():

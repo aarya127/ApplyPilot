@@ -19,6 +19,32 @@ This is a standalone Chrome extension for job application autofill. It is separa
 
 Dynamic refilling is off by default because some React/Greenhouse pages rerender after each input event. Turn it on only when a page loads additional steps after the first fill.
 
+## Internal Workflow
+
+The extension uses the same plan-first workflow as the Playwright agent:
+
+```text
+scan fields
+  -> classify canonical field kinds
+  -> discover dropdown options
+  -> resolve deterministic profile answers
+  -> ask AI only for unresolved/ambiguous fields
+  -> preview the fill plan
+  -> fill selected fields
+  -> verify actual page values
+```
+
+Canonical field kinds include values like `contact.email`, `links.linkedin`,
+`work.current_or_previous_employer`, and `education.school`. The point is to
+decide what a field is before choosing an answer. This prevents surrounding
+text from leaking values into the wrong field.
+
+Subprocess documentation lives in:
+
+```text
+docs/applypilot_skills/
+```
+
 ## Load It In Chrome
 
 1. Open `chrome://extensions`.

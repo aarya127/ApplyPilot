@@ -739,7 +739,7 @@ def deterministic_audit_corrections(
 
         index = mapping["index"]
         field = field_by_index.get(index)
-        policy = policy_by_index.get(index)
+        policy = policy_by_index.get(index) or deterministic_profile_mapping(field, profile)
 
         if not field or not policy:
             continue
@@ -760,6 +760,94 @@ def deterministic_audit_corrections(
         )
 
     return enforce_option_values(corrections, fields)
+
+
+def deterministic_profile_mapping(field: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any] | None:
+    value = deterministic_profile_answer(field, profile)
+    if value is None or str(value).strip() == "":
+        return None
+
+    return {
+        "index": field["index"],
+        "value": value,
+        "confidence": 0.9,
+        "source": "profile-audit",
+    }
+
+
+def deterministic_profile_answer(field: dict[str, Any], profile: dict[str, Any]) -> str | None:
+    haystack = field_policy_haystack(field)
+    answers = profile.get("answers", {}) if isinstance(profile.get("answers"), dict) else {}
+
+    if is_linkedin_field(haystack):
+        return profile.get("linkedin") or ""
+
+    if is_github_field(haystack):
+        return profile.get("github") or ""
+
+    if is_portfolio_field(haystack):
+        return profile.get("portfolio") or profile.get("website") or ""
+
+    if is_phone_number_profile_field(haystack):
+        return profile.get("phone") or ""
+
+    if is_email_profile_field(haystack):
+        return profile.get("email") or ""
+
+    if is_application_location_profile_field(haystack):
+        location = (
+            answers.get("usaLocation")
+            or profile.get("usaLocation")
+            or profile.get("usaPreferredLocation")
+            or answers.get("canadaLocation")
+            or profile.get("canadaLocation")
+            or profile.get("applicationLocation")
+            or profile.get("location")
+            or ""
+        )
+        return location
+
+    if is_work_authorized_countries_field(haystack):
+        return profile.get("answers", {}).get("authorizedCountries") or "Canada and United States"
+
+    return None
+
+
+def is_linkedin_field(haystack: str) -> bool:
+    return bool(re.search(r"\blinked\s*in\b|\blinkedin\b", haystack)) and not any(
+        term in haystack for term in ["cookie", "consent", "provider"]
+    )
+
+
+def is_github_field(haystack: str) -> bool:
+    return "github" in haystack or "git hub" in haystack
+
+
+def is_portfolio_field(haystack: str) -> bool:
+    return any(term in haystack for term in ["portfolio", "personal website", "personal site", "website url"])
+
+
+def is_phone_number_profile_field(haystack: str) -> bool:
+    return any(term in haystack for term in ["phone number", "mobile", "cell", "telephone"]) and not any(
+        term in haystack for term in ["phone code", "country code", "extension", "device type"]
+    )
+
+
+def is_email_profile_field(haystack: str) -> bool:
+    return bool(re.search(r"\bemail\b|e mail", haystack)) and not is_linkedin_field(haystack)
+
+
+def is_application_location_profile_field(haystack: str) -> bool:
+    return bool(re.search(r"^location\b|location city|city location", haystack)) and not any(
+        term in haystack for term in ["phone", "country code", "currently reside", "current residence"]
+    )
+
+
+def is_work_authorized_countries_field(haystack: str) -> bool:
+    return bool(
+        re.search(r"\b(in\s+)?(what|which|list|specify|identify|provide).{0,50}\b(country|countries)\b.{0,120}\b(legally\s+)?(permitted|authorized|eligible)\b.{0,80}\bwork\b", haystack)
+        or re.search(r"\b(country|countries)\b.{0,80}\b(legally\s+)?(permitted|authorized|eligible)\b.{0,80}\bwork\b", haystack)
+    )
 
 
 def values_equivalent_for_field(current_value: Any, desired_value: Any, field: dict[str, Any]) -> bool:
@@ -832,6 +920,10 @@ def policy_answer_for_field(
 
     if has_sponsorship_terms(haystack):
         return best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
+
+    if is_work_authorized_countries_field(haystack):
+        answer = profile.get("answers", {}).get("authorizedCountries") or "Canada and United States"
+        return best_available_option(answer, options) or answer
 
     if is_work_eligibility_question(haystack):
         return best_authorization_option(options) or best_available_option("Yes", options) or "Yes"
