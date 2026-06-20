@@ -114,6 +114,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "AUDIT_FIELDS_WITH_BACKEND") {
+    auditFieldsWithBackend(message.payload)
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+
+    return true;
+  }
+
   if (message?.type === "TRACK_APPLICATION") {
     trackApplication(message.payload)
       .then((payload) => sendResponse({ ok: true, payload }))
@@ -154,6 +162,27 @@ async function mapFieldsWithBackend(payload) {
 
   if (!response.ok) {
     throw new Error(`Mapper failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function auditFieldsWithBackend(payload) {
+  const { settings } = await chrome.storage.local.get("settings");
+  const endpoint = joinUrl(settings?.backendBaseUrl, "/audit-fields");
+
+  if (!endpoint) {
+    return { corrections: [], issues: [] };
+  }
+
+  const response = await fetchWithLocalhostFallback(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Audit failed with ${response.status}`);
   }
 
   return response.json();

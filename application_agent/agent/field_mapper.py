@@ -58,7 +58,7 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if address_answer:
         return address_answer, "rule"
 
-    if re.search(r"sponsor|visa|h-?1b|work permit", text):
+    if has_sponsorship_terms(text):
         return sponsorship_answer(profile.get("needs_sponsorship") or profile.get("answers", {}).get("sponsorship") or "No"), "rule"
 
     if is_work_eligibility_question(text):
@@ -119,6 +119,21 @@ def is_work_eligibility_question(text: str) -> bool:
         or "work authorization" in text
         or "proof of authorization" in text
         or "legally eligible" in text
+    )
+
+
+def has_sponsorship_terms(text: str) -> bool:
+    return bool(
+        has_work_authorization_assistance_terms(text)
+        or re.search(r"\b(sponsor|sponsorship|visa|work permit)\b", text)
+        or re.search(r"\b(h-?1b|f-?1|opt|cpt|tn|ead)\b", text)
+    )
+
+
+def has_work_authorization_assistance_terms(text: str) -> bool:
+    return bool(
+        re.search(r"\b(require|need|request|want|seek|seeking).{0,80}\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit)\b", text)
+        or re.search(r"\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit).{0,80}\b(now|future|later)\b", text)
     )
 
 

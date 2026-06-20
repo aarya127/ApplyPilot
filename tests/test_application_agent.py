@@ -135,6 +135,7 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Have you ever been employed by ExampleCo or an ExampleCo affiliate?"}, profile) == ("No", "rule")
     profile["needs_sponsorship"] = "I do not require sponsorship"
     assert map_field({"label": "Will you now, or in the future, require sponsorship to work in the United States?"}, profile) == ("No", "rule")
+    assert map_field({"label": "Will you require our assistance with work authorization now or in the future?"}, profile) == ("No", "rule")
     assert map_field({"label": "Are you legally eligible to work in the country of employment?"}, profile) == ("Yes", "rule")
     assert map_field({"question_text": "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.?"}, profile) == ("No", "rule")
     assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("No", "rule")

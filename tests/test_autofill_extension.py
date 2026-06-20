@@ -286,6 +286,26 @@ def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
     ]
 
 
+def test_backend_policy_treats_work_authorization_assistance_as_sponsorship():
+    fields = [
+        {
+            "index": 0,
+            "label": "Will you require our assistance with work authorization now or in the future?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Do you need employer help with employment authorization now or later?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+    ]
+
+    assert server.policy_mappings(fields, {}) == [
+        {"index": 0, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
+    ]
+
+
 @pytest.mark.parametrize(
     ("label", "expected"),
     [
@@ -629,6 +649,100 @@ def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
     assert "Personal AI agent project" in prompt
 
 
+def test_backend_retrieves_relevant_context_for_each_field():
+    profile = {
+        "workAuthorization": "Yes",
+        "needsSponsorship": "No",
+        "usPermanentResident": "Yes",
+        "resumeFacts": {
+            "experience": ["Example Labs May 2025 - August 2025"],
+            "projects": ["Built a production AI agent"],
+        },
+    }
+    field = {
+        "index": 0,
+        "label": "Will you require our assistance with work authorization now or in the future?",
+        "options": [{"label": "Yes"}, {"label": "No"}],
+    }
+
+    context = server.retrieved_context_for_field(field, profile, {"targetCountry": "usa"})
+
+    assert context["category"] == "sponsorship"
+    assert context["defaultPolicies"]["needsSponsorship"] == "No"
+    assert context["profileFacts"]["usPermanentResident"] == "Yes"
+
+
+def test_backend_deterministic_audit_corrects_wrong_policy_answers():
+    fields = [
+        {
+            "index": 0,
+            "label": "Will you require our assistance with work authorization now or in the future?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Are you legally eligible to work in the country of employment?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+    ]
+    mappings = [
+        {"index": 0, "value": "Yes", "source": "autofill", "confidence": 0.9},
+        {"index": 1, "value": "No", "source": "autofill", "confidence": 0.9},
+    ]
+
+    assert server.deterministic_audit_corrections(fields, mappings, {}) == [
+        {
+            "index": 0,
+            "value": "No",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        },
+        {
+            "index": 1,
+            "value": "Yes",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        },
+    ]
+
+
+def test_backend_audit_endpoint_works_without_llm(monkeypatch, tmp_path):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+
+    client = server.app.test_client()
+    response = client.post(
+        "/audit-fields",
+        json={
+            "fields": [
+                {
+                    "index": 0,
+                    "label": "Do you now or will you in the future require visa sponsorship?",
+                    "options": [{"label": "Yes"}, {"label": "No"}],
+                }
+            ],
+            "mappings": [{"index": 0, "value": "Yes", "source": "autofill"}],
+            "profile": {},
+            "page": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["corrections"] == [
+        {
+            "index": 0,
+            "value": "No",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        }
+    ]
+    assert "deterministic audit" in response.json["warning"]
+
+
 def test_backend_tracks_applications(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
     monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
@@ -787,6 +901,86 @@ def test_content_script_previews_and_fills_sample_form():
         assert page.locator("[name='conditionalCountry']").input_value() == ""
         assert page.locator("[name='adrAgree']").is_checked() is True
         assert page.locator("[name='linkedinCookieConsent']").input_value() == ""
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_saved_answers_do_not_override_core_identity_fields():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "fullName": "Test Candidate",
+        "email": "test@example.com",
+        "phone": "5550100000",
+        "answers": {
+            "custom:first-name": "No",
+            "first name": "No",
+            "firstName": "No",
+            "firstname": "No",
+            "custom:last-name": "No",
+            "last name": "No",
+            "lastName": "No",
+            "lastname": "No",
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>First name *<input name="firstName"></label>
+              <label>Last name *<input name="lastName"></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+
+        assert preview["ok"] is True
+        mappings = {mapping["label"]: mapping for mapping in preview["result"]["mappings"]}
+        assert mappings["First name *"]["value"] == "Test"
+        assert mappings["First name *"]["source"] == "rule"
+        assert mappings["Last name *"]["value"] == "Candidate"
+        assert mappings["Last name *"]["source"] == "rule"
 
         browser.close()
 

@@ -1428,7 +1428,12 @@
   function findSavedAnswer(field, profile) {
     const haystack = fieldHaystack(field);
 
-    if (isLowInformationChoiceLabel(field) || isAiOnlyQuestion(haystack) || isCompanyHistoryQuestion(haystack)) {
+    if (
+      isCoreProfileField(field)
+      || isLowInformationChoiceLabel(field)
+      || isAiOnlyQuestion(haystack)
+      || isCompanyHistoryQuestion(haystack)
+    ) {
       return "";
     }
 
@@ -1520,8 +1525,14 @@
   }
 
   function hasSponsorshipTerms(haystack) {
-    return /\b(sponsor|sponsorship|visa|work permit)\b/.test(haystack)
+    return hasWorkAuthorizationAssistanceTerms(haystack)
+      || /\b(sponsor|sponsorship|visa|work permit)\b/.test(haystack)
       || /\b(h-?1b|f-?1|opt|cpt|tn|ead)\b/.test(haystack);
+  }
+
+  function hasWorkAuthorizationAssistanceTerms(haystack) {
+    return /\b(require|need|request|want|seek|seeking).{0,80}\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit)\b/.test(haystack)
+      || /\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit).{0,80}\b(now|future|later)\b/.test(haystack);
   }
 
   function shouldAskForField(field) {

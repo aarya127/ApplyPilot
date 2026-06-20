@@ -212,13 +212,20 @@ async function askAiForMissingAnswers() {
   lastPreview = freshPreview.result;
   renderReview(lastPreview);
 
+  const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
+  const profile = candidateProfile || {};
+  const pageContext = {
+    ...(lastPreview?.page || {}),
+    targetCountry: settings?.targetCountry || ""
+  };
+  const auditMappings = await auditCurrentAutofillAnswers(lastPreview, profile, pageContext);
   const missingFields = (lastPreview?.unmappedFields || []).filter(isAiAskableField);
   const skippedOptionFields = (lastPreview?.unmappedFields || []).filter((field) => (
     isOptionLikeField(field) && !(field.options || []).length
   ));
 
-  if (!missingFields.length) {
-    addMessage("agent", "I do not see any unanswered fields for AI to handle.");
+  if (!missingFields.length && !auditMappings.length) {
+    addMessage("agent", "I do not see any unanswered fields for AI to handle, and the filled answers passed the audit.");
     if (skippedOptionFields.length) {
       addMessage("agent", `I skipped ${skippedOptionFields.length} dropdown-like field(s) because I could not read their options. Type \`debug dropdowns\` to test option discovery.`);
     }
@@ -229,71 +236,48 @@ async function askAiForMissingAnswers() {
     addMessage("agent", `I will not ask AI to fill ${skippedOptionFields.length} dropdown-like field(s) without options. Type \`debug dropdowns\` to see what I can read.`);
   }
 
-  const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
-  const profile = candidateProfile || {};
-  const fieldsForModel = missingFields.map((field, index) => ({
-    ...field,
-    index,
-    originalIndex: field.index,
-    frameId: field.frameId
-  }));
-
-  setBusy(`Asking AI for ${missingFields.length} missing answer(s) in one structured request...`);
-  const response = await chrome.runtime.sendMessage({
-    type: "MAP_FIELDS_WITH_BACKEND",
-    payload: {
-      fields: fieldsForModel,
-      profile,
-      page: {
-        ...(lastPreview?.page || {}),
-        targetCountry: settings?.targetCountry || ""
-      }
-    }
-  });
-
-  if (!response?.ok) {
-    showError(response?.error || "The AI answer request failed.");
-    return;
-  }
-
-  const mappings = response.payload?.mappings || [];
   const answers = {};
-  const aiMappings = [];
+  const aiMappings = [...auditMappings];
 
-  for (const mapping of mappings) {
-    const field = fieldsForModel.find((item) => item.index === mapping.index);
-    const value = String(mapping.value ?? "").trim();
+  if (missingFields.length) {
+    setBusy(`Asking AI for ${missingFields.length} unanswered required/askable field(s), one at a time...`);
+  }
 
-    if (field?.answerKey && value) {
+  for (let index = 0; index < missingFields.length; index += 1) {
+    const field = missingFields[index];
+    const fieldForModel = toBackendField(field, 0);
+    const response = await chrome.runtime.sendMessage({
+      type: "MAP_FIELDS_WITH_BACKEND",
+      payload: {
+        fields: [fieldForModel],
+        profile,
+        page: pageContext
+      }
+    });
+
+    if (!response?.ok) {
+      addMessage("agent", `AI could not answer "${field.label}": ${response?.error || "request failed"}`);
+      continue;
+    }
+
+    const mapping = (response.payload?.mappings || []).find((item) => item.index === 0);
+    const value = String(mapping?.value ?? "").trim();
+
+    if (field.answerKey && value) {
       answers[field.answerKey] = value;
-      aiMappings.push({
-        index: field.originalIndex,
-        label: field.label,
-        name: field.name || "",
-        id: field.id || "",
-        placeholder: field.placeholder || "",
-        ariaLabel: field.ariaLabel || "",
-        tag: field.tag || "",
-        type: field.type || "",
-        options: field.options || [],
-        value,
-        source: mapping.source || "llm",
-        confidence: Number(mapping.confidence || 0.8),
-        frameId: field.frameId,
-        frameUrl: field.frameUrl || "",
-        reviewId: `${Number.isInteger(field.frameId) ? field.frameId : 0}:${field.originalIndex}`
-      });
+      aiMappings.push(toPreviewMapping(fieldForModel, mapping));
     }
   }
 
-  if (!Object.keys(answers).length) {
-    const warning = response.payload?.warning ? ` ${response.payload.warning}.` : "";
-    showError(`AI did not return safe answers for the missing fields.${warning}`);
+  if (!aiMappings.length) {
+    showError("AI did not return safe answers or audit corrections for the visible fields.");
     return;
   }
 
-  profile.answers = { ...(profile.answers || {}), ...answers };
-  await chrome.storage.local.set({ candidateProfile: profile });
+  if (Object.keys(answers).length) {
+    profile.answers = { ...(profile.answers || {}), ...answers };
+    await chrome.storage.local.set({ candidateProfile: profile });
+  }
 
   lastPreview = mergeAiMappingsIntoPreview(lastPreview, aiMappings);
   renderReview(lastPreview);
@@ -305,13 +289,102 @@ async function askAiForMissingAnswers() {
   if (fillResponse?.ok) {
     lastFillResult = fillResponse.result;
     trackButton.disabled = false;
-    addMessage("agent", `Added and filled ${fillResponse.result.filled} AI answer(s). Please review them before continuing.`);
+    addMessage("agent", `Audited, added, and filled ${fillResponse.result.filled} answer(s). Please review them before continuing.`);
     await refreshPreviewAfterAiFill();
     reportRemainingRequiredFields(lastPreview);
   } else {
     addMessage("agent", `Added ${aiMappings.length} AI answer(s) to the review list, but I could not fill them automatically. Keep them checked and click Fill selected.`);
     reportRemainingRequiredFields(lastPreview);
   }
+}
+
+async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
+  const currentMappings = (preview?.mappings || []).filter((mapping) => (
+    mapping && mapping.value !== undefined && mapping.value !== null && String(mapping.value).trim()
+  ));
+
+  if (!currentMappings.length) {
+    return [];
+  }
+
+  const fieldsForAudit = currentMappings.map((mapping, index) => toBackendField(mapping, index));
+  const auditPayloadMappings = currentMappings.map((mapping, index) => ({
+    index,
+    value: mapping.value,
+    source: mapping.source,
+    confidence: mapping.confidence
+  }));
+
+  setBusy(`Auditing ${currentMappings.length} filled answer(s) before asking AI...`);
+  const response = await chrome.runtime.sendMessage({
+    type: "AUDIT_FIELDS_WITH_BACKEND",
+    payload: {
+      fields: fieldsForAudit,
+      mappings: auditPayloadMappings,
+      profile,
+      page: pageContext
+    }
+  });
+
+  if (!response?.ok) {
+    addMessage("agent", `Audit skipped: ${response?.error || "request failed"}`);
+    return [];
+  }
+
+  const corrections = response.payload?.corrections || [];
+  const auditMappings = [];
+  for (const correction of corrections) {
+    const field = fieldsForAudit.find((item) => item.index === correction.index);
+    const value = String(correction.value ?? "").trim();
+    if (field && value) {
+      auditMappings.push(toPreviewMapping(field, correction));
+    }
+  }
+
+  if (auditMappings.length) {
+    addMessage("agent", `Audit found ${auditMappings.length} filled answer(s) to correct before continuing.`);
+  }
+
+  const issues = response.payload?.issues || [];
+  for (const issue of issues.slice(0, 5)) {
+    if (issue?.reason) {
+      addMessage("agent", `Audit note: ${issue.reason}`);
+    }
+  }
+
+  return auditMappings;
+}
+
+function toBackendField(field, index) {
+  return {
+    ...field,
+    index,
+    originalIndex: Number.isInteger(field.originalIndex) ? field.originalIndex : field.index,
+    frameId: field.frameId
+  };
+}
+
+function toPreviewMapping(field, mapping) {
+  const value = String(mapping.value ?? "").trim();
+  const originalIndex = Number.isInteger(field.originalIndex) ? field.originalIndex : field.index;
+
+  return {
+    index: originalIndex,
+    label: field.label,
+    name: field.name || "",
+    id: field.id || "",
+    placeholder: field.placeholder || "",
+    ariaLabel: field.ariaLabel || "",
+    tag: field.tag || "",
+    type: field.type || "",
+    options: field.options || [],
+    value,
+    source: mapping.source || "llm",
+    confidence: Number(mapping.confidence || 0.8),
+    frameId: field.frameId,
+    frameUrl: field.frameUrl || "",
+    reviewId: `${Number.isInteger(field.frameId) ? field.frameId : 0}:${originalIndex}`
+  };
 }
 
 async function refreshPreviewAfterAiFill() {

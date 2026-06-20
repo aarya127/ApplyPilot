@@ -92,6 +92,35 @@ def map_fields():
     return jsonify({"mappings": mappings})
 
 
+@app.route("/audit-fields", methods=["POST", "OPTIONS"])
+def audit_fields():
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    payload = request.get_json(force=True) or {}
+    fields = payload.get("fields", [])
+    mappings = payload.get("mappings", [])
+    profile = payload.get("profile", {})
+    page = payload.get("page", {})
+
+    corrections = deterministic_audit_corrections(fields, mappings, profile)
+    issues: list[dict[str, Any]] = []
+    warning = None
+
+    if api_key():
+        try:
+            audit = call_nvidia_auditor(fields, mappings, profile, page)
+            corrections = merge_audit_corrections(corrections, audit.get("corrections", []))
+            issues = audit.get("issues", []) if isinstance(audit.get("issues"), list) else []
+        except Exception as exc:
+            app.logger.exception("Audit request failed")
+            warning = f"Audit request failed: {exc}"
+    else:
+        warning = "NVIDIA_API_KEY is not configured; used deterministic audit only"
+
+    return jsonify({"corrections": corrections, "issues": issues, "warning": warning})
+
+
 @app.route("/track-application", methods=["POST", "OPTIONS"])
 def track_application():
     if request.method == "OPTIONS":
@@ -185,6 +214,61 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
     return merge_backend_mappings(enforced_mappings, fallback_mappings)
 
 
+def call_nvidia_auditor(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+    page: dict[str, Any],
+) -> dict[str, Any]:
+    prompt = build_audit_prompt(fields, mappings, profile, page)
+    response = requests.post(
+        os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
+        headers={
+            "Authorization": f"Bearer {api_key()}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": model_name(),
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are ApplyPilot auditing answers on a job application for Aarya Shah. "
+                        "Return only strict JSON with no markdown. "
+                        "Do not overwrite correct answers. "
+                        "Only propose a correction when the current answer conflicts with supplied profile facts, "
+                        "retrieved context, default policies, or visible options. "
+                        "If a field has options, the correction value must be exactly one supplied option label. "
+                        "Never change name, email, phone, address, resume, experience, education, or link fields unless "
+                        "the retrieved profile facts explicitly show the visible value is wrong."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.05,
+            "max_tokens": 3200,
+            "response_format": {"type": "json_object"},
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    content = response.json()["choices"][0]["message"]["content"]
+    data = parse_json_object(content)
+    corrections = data.get("corrections", [])
+    issues = data.get("issues", [])
+
+    if not isinstance(corrections, list):
+        corrections = []
+    if not isinstance(issues, list):
+        issues = []
+
+    valid_corrections = [mapping for mapping in corrections if valid_mapping(mapping)]
+    return {
+        "corrections": enforce_option_values(valid_corrections, fields),
+        "issues": [issue for issue in issues if isinstance(issue, dict)],
+    }
+
+
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
     addresses = profile.get("addresses", {})
     minimized_profile = {
@@ -232,24 +316,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
         "candidateContext": candidate_context(profile),
         "savedAnswers": profile.get("answers", {}),
     }
-    serializable_fields = [
-        {
-            "index": field.get("index"),
-            "tag": field.get("tag"),
-            "type": field.get("type"),
-            "label": field.get("label"),
-            "name": field.get("name"),
-            "id": field.get("id"),
-            "placeholder": field.get("placeholder"),
-            "ariaLabel": field.get("ariaLabel"),
-            "questionText": field.get("questionText"),
-            "surroundingText": field.get("surroundingText"),
-            "nearbyText": field.get("nearbyText"),
-            "currentValue": field.get("value"),
-            "options": field.get("options", []),
-        }
-        for field in fields
-    ]
+    serializable_fields = [serialize_field_for_model(field, profile, page) for field in fields]
 
     return json.dumps(
         {
@@ -283,6 +350,248 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
         },
         ensure_ascii=False,
     )
+
+
+def build_audit_prompt(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+    page: dict[str, Any],
+) -> str:
+    field_by_index = {
+        field.get("index"): field
+        for field in fields
+        if isinstance(field, dict) and isinstance(field.get("index"), int)
+    }
+    mapped_answers = []
+
+    for mapping in mappings:
+        if not isinstance(mapping, dict) or not isinstance(mapping.get("index"), int):
+            continue
+
+        field = field_by_index.get(mapping.get("index"), {"index": mapping.get("index")})
+        mapped_answers.append(
+            {
+                "index": mapping.get("index"),
+                "currentAnswer": mapping.get("value"),
+                "source": mapping.get("source"),
+                "confidence": mapping.get("confidence"),
+                "field": serialize_field_for_model(field, profile, page),
+            }
+        )
+
+    return json.dumps(
+        {
+            "instructions": (
+                "Return JSON in this shape: "
+                "{\"corrections\":[{\"index\":0,\"value\":\"corrected answer\",\"confidence\":0.0,\"source\":\"audit\",\"reason\":\"short reason\"}],"
+                "\"issues\":[{\"index\":0,\"severity\":\"warning\",\"reason\":\"short reason\"}]}. "
+                "Audit every currentAnswer against the retrievedContext, candidateContext, defaultPolicies, and visible options. "
+                "Only include corrections for wrong or unsafe answers. "
+                "If options are supplied, correction.value must be one exact option label from field.options. "
+                "For unanswered required fields, add an issue rather than a correction unless a safe exact option is obvious. "
+                "Do not change identity/contact/address/education/experience/link fields unless the supplied profile fact is explicit. "
+                "Work authorization/eligibility is Yes/authorized for both the United States and Canada. "
+                "Visa sponsorship, employer work-authorization assistance, relocation assistance, relatives at company, "
+                "contractor/dealer/affiliate status, military service, veteran protected status, subscriptions, and marketing messages default to No. "
+                "Terms/conditions acceptance and certification that the application is true/correct default to Yes."
+            ),
+            "page": page,
+            "candidateContext": candidate_context(profile),
+            "defaultPolicies": default_answer_policies(profile),
+            "answersToAudit": mapped_answers,
+        },
+        ensure_ascii=False,
+    )
+
+
+def serialize_field_for_model(field: dict[str, Any], profile: dict[str, Any], page: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "index": field.get("index"),
+        "tag": field.get("tag"),
+        "type": field.get("type"),
+        "label": field.get("label"),
+        "name": field.get("name"),
+        "id": field.get("id"),
+        "placeholder": field.get("placeholder"),
+        "ariaLabel": field.get("ariaLabel"),
+        "questionText": field.get("questionText"),
+        "surroundingText": field.get("surroundingText"),
+        "nearbyText": field.get("nearbyText"),
+        "currentValue": field.get("value"),
+        "required": field.get("required"),
+        "options": field.get("options", []),
+        "retrievedContext": retrieved_context_for_field(field, profile, page),
+    }
+
+
+def retrieved_context_for_field(field: dict[str, Any], profile: dict[str, Any], page: dict[str, Any] | None = None) -> dict[str, Any]:
+    haystack = field_policy_haystack(field)
+    category = field_context_category(haystack)
+    return prune_large_values(
+        {
+            "category": category,
+            "profileFacts": relevant_profile_facts(category, profile, page or {}),
+            "defaultPolicies": relevant_default_policies(category, profile),
+            "savedAnswers": relevant_saved_answers(field, profile),
+            "resumeFacts": relevant_resume_facts(field, profile),
+        },
+        max_text=1200,
+        max_items=12,
+    )
+
+
+def field_context_category(haystack: str) -> str:
+    if has_sponsorship_terms(haystack):
+        return "sponsorship"
+    if is_work_eligibility_question(haystack):
+        return "work_authorization"
+    if any(term in haystack for term in ["relocation assistance", "relocation support", "need relocation assistance"]):
+        return "relocation_assistance"
+    if "relocat" in haystack:
+        return "relocation_preference"
+    if is_family_or_relationship_conflict_question(haystack):
+        return "family_or_relationship"
+    if is_company_affiliation_question(haystack) or is_previous_company_question(haystack):
+        return "company_affiliation"
+    if any(term in haystack for term in ["military", "armed forces", "served", "veteran"]):
+        return "military_veteran"
+    if any(term in haystack for term in ["gender", "hispanic", "latino", "race", "ethnicity", "sexual orientation", "disability"]):
+        return "demographics"
+    if any(term in haystack for term in ["certify", "true and correct", "terms", "conditions", "privacy policy", "consent"]):
+        return "consent_certification"
+    if any(term in haystack for term in ["school", "university", "degree", "field of study", "discipline", "major"]):
+        return "education"
+    if any(term in haystack for term in ["company", "job title", "employment", "work experience", "role description"]):
+        return "work_experience"
+    if any(term in haystack for term in ["project", "built", "experience with", "tell us about", "describe"]):
+        return "custom_question"
+    return "general"
+
+
+def relevant_profile_facts(category: str, profile: dict[str, Any], page: dict[str, Any]) -> dict[str, Any]:
+    base = {
+        "fullName": profile.get("fullName"),
+        "targetCountry": page.get("targetCountry"),
+    }
+    if category in {"sponsorship", "work_authorization"}:
+        base.update(
+            {
+                "workAuthorization": profile.get("workAuthorization"),
+                "needsSponsorship": profile.get("needsSponsorship"),
+                "canadianCitizen": profile.get("canadianCitizen"),
+                "usPermanentResident": profile.get("usPermanentResident"),
+            }
+        )
+    if category in {"relocation_assistance", "relocation_preference"}:
+        base.update({"relocation": profile.get("relocation"), "relocationAssistance": profile.get("answers", {}).get("relocationAssistance")})
+    if category in {"family_or_relationship", "company_affiliation", "military_veteran"}:
+        base.update(
+            {
+                "workExperience": profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience"),
+                "militaryService": profile.get("militaryService"),
+                "veteranStatus": profile.get("veteranStatus"),
+            }
+        )
+    if category == "demographics":
+        base.update({"demographics": profile.get("demographics"), "veteranStatus": profile.get("veteranStatus"), "disabilityStatus": profile.get("disabilityStatus")})
+    if category in {"education", "work_experience", "custom_question"}:
+        base.update(
+            {
+                "education": profile.get("education"),
+                "school": profile.get("school"),
+                "degree": profile.get("degree"),
+                "workExperience": profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience"),
+                "links": profile.get("links"),
+                "resumeFacts": profile.get("resumeFacts"),
+            }
+        )
+
+    return {key: value for key, value in base.items() if value not in (None, "", [], {})}
+
+
+def relevant_default_policies(category: str, profile: dict[str, Any]) -> dict[str, Any]:
+    policies = default_answer_policies(profile)
+    keys_by_category = {
+        "sponsorship": ["needsSponsorship"],
+        "work_authorization": ["usWorkAuthorization", "canadaWorkAuthorization"],
+        "relocation_assistance": ["relocation"],
+        "relocation_preference": ["relocation"],
+        "family_or_relationship": ["relativesAtCompany", "familyAtCompany"],
+        "company_affiliation": ["previousCompanyEmployment", "contractorDealerAffiliate"],
+        "military_veteran": ["militaryService", "spouseMilitaryService", "veteranStatus"],
+        "demographics": ["veteranStatus"],
+        "consent_certification": ["acceptTerms", "certifyApplicationTruth", "subscribeEmails", "recruitingMessages"],
+    }
+    keys = keys_by_category.get(category, list(policies))
+    return {key: policies[key] for key in keys if key in policies}
+
+
+def relevant_saved_answers(field: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
+    answers = profile.get("answers", {})
+    if not isinstance(answers, dict):
+        return {}
+
+    field_tokens = context_tokens(field_policy_haystack(field))
+    ranked = []
+    for key, value in answers.items():
+        key_tokens = context_tokens(key)
+        if not key_tokens:
+            continue
+        score = len(field_tokens & key_tokens)
+        if score:
+            ranked.append((score, str(key), value))
+
+    ranked.sort(reverse=True, key=lambda item: item[0])
+    return {key: value for _, key, value in ranked[:6]}
+
+
+def relevant_resume_facts(field: dict[str, Any], profile: dict[str, Any]) -> list[str]:
+    transcript = resume_transcript(profile)
+    if not transcript:
+        return []
+
+    tokens = context_tokens(field_policy_haystack(field))
+    lines = [line.strip() for line in transcript.splitlines() if line.strip()]
+    ranked = []
+    for line in lines:
+        line_tokens = context_tokens(line)
+        score = len(tokens & line_tokens)
+        if score:
+            ranked.append((score, line))
+
+    ranked.sort(reverse=True, key=lambda item: item[0])
+    return [line for _, line in ranked[:10]]
+
+
+def context_tokens(value: Any) -> set[str]:
+    stop_words = {
+        "the",
+        "and",
+        "or",
+        "for",
+        "with",
+        "you",
+        "your",
+        "are",
+        "have",
+        "has",
+        "will",
+        "now",
+        "future",
+        "this",
+        "that",
+        "from",
+        "into",
+        "one",
+        "select",
+        "required",
+    }
+    return {
+        token
+        for token in normalize_for_option(value).split()
+        if len(token) > 2 and token not in stop_words
+    }
 
 
 def safe_location(location: Any, keys: list[str]) -> dict[str, Any]:
@@ -405,6 +714,77 @@ def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
         "certifyApplicationTruth": profile.get("answers", {}).get("certifyApplicationTruth", "Yes"),
         "relocation": profile.get("relocation") or profile.get("answers", {}).get("relocation") or "Anywhere",
     }
+
+
+def deterministic_audit_corrections(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    field_by_index = {
+        field.get("index"): field
+        for field in fields
+        if isinstance(field, dict) and isinstance(field.get("index"), int)
+    }
+    policy_by_index = {
+        mapping.get("index"): mapping
+        for mapping in policy_mappings(fields, profile)
+        if isinstance(mapping.get("index"), int)
+    }
+    corrections: list[dict[str, Any]] = []
+
+    for mapping in mappings:
+        if not isinstance(mapping, dict) or not isinstance(mapping.get("index"), int):
+            continue
+
+        index = mapping["index"]
+        field = field_by_index.get(index)
+        policy = policy_by_index.get(index)
+
+        if not field or not policy:
+            continue
+
+        current_value = mapping.get("value")
+        policy_value = policy.get("value")
+        if values_equivalent_for_field(current_value, policy_value, field):
+            continue
+
+        corrections.append(
+            {
+                "index": index,
+                "value": policy_value,
+                "confidence": 0.9,
+                "source": "policy-audit",
+                "reason": "Current answer conflicts with stored profile policy.",
+            }
+        )
+
+    return enforce_option_values(corrections, fields)
+
+
+def values_equivalent_for_field(current_value: Any, desired_value: Any, field: dict[str, Any]) -> bool:
+    options = normalized_options(field)
+    if options:
+        current_option = value_from_options(current_value, options)
+        desired_option = value_from_options(desired_value, options)
+        return current_option is not None and desired_option is not None and current_option == desired_option
+
+    return normalize_for_option(current_value) == normalize_for_option(desired_value)
+
+
+def merge_audit_corrections(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_index = {
+        mapping.get("index"): mapping
+        for mapping in primary
+        if isinstance(mapping.get("index"), int)
+    }
+
+    for mapping in secondary:
+        index = mapping.get("index")
+        if isinstance(index, int) and index not in by_index:
+            by_index[index] = mapping
+
+    return list(by_index.values())
 
 
 def policy_mappings(fields: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -533,8 +913,17 @@ def is_work_eligibility_question(haystack: str) -> bool:
 
 def has_sponsorship_terms(haystack: str) -> bool:
     return bool(
+        has_work_authorization_assistance_terms(haystack)
+        or
         re.search(r"\b(sponsor|sponsorship|visa|work permit)\b", haystack)
         or re.search(r"\b(h\s*1b|f\s*1|opt|cpt|tn|ead)\b", haystack)
+    )
+
+
+def has_work_authorization_assistance_terms(haystack: str) -> bool:
+    return bool(
+        re.search(r"\b(require|need|request|want|seek|seeking).{0,80}\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit)\b", haystack)
+        or re.search(r"\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit).{0,80}\b(now|future|later)\b", haystack)
     )
 
 
