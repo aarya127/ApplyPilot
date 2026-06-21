@@ -52,6 +52,9 @@ def classify_field_kind(field: dict[str, Any]) -> str:
     primary = primary_field_text(field)
     full = field_text(field)
 
+    if is_repeatable_employment_detail_field(primary, full):
+        return ""
+
     if is_work_or_education_identity_field(primary):
         if re.search(r"employer|company", primary):
             return WORK_CURRENT_EMPLOYER
@@ -76,6 +79,8 @@ def classify_field_kind(field: dict[str, Any]) -> str:
         return LINK_GITHUB
     if re.search(r"portfolio|personal website|personal site|website url|^website$", primary):
         return LINK_PORTFOLIO
+    if is_generic_standalone_url_field(primary):
+        return ""
 
     if re.search(r"school|university|college|institution", primary) and not re.search(r"website|url|link", full):
         return EDUCATION_SCHOOL
@@ -103,6 +108,37 @@ def classify_field_kind(field: dict[str, Any]) -> str:
         return WORK_CURRENT_TITLE
 
     return ""
+
+
+def is_repeatable_employment_detail_field(primary: str, full: str) -> bool:
+    if is_work_or_education_identity_field(primary):
+        return False
+
+    is_employment_detail = is_generic_repeatable_employment_detail_label(primary)
+    has_employment_context = bool(re.search(r"work experience|employment|work history|professional experience|job history", full))
+    return is_employment_detail and (has_employment_context or is_strict_repeatable_employment_detail_label(primary))
+
+
+def is_generic_repeatable_employment_detail_label(primary: str) -> bool:
+    return bool(
+        re.search(
+            r"(^|\b)(company|company name|employer|job title|title|position|role|location|from|to|start date|end date|month|year|current role|currently work|description|role description|responsibilities|achievements)\b",
+            primary,
+        )
+    )
+
+
+def is_strict_repeatable_employment_detail_label(primary: str) -> bool:
+    return bool(
+        re.search(
+            r"^(company|company name|employer|job title|title|position|role|location i currently work here|location month|location year|from|to|from month|from year|to month|to year|start date|end date|start date month|start date year|end date month|end date year|month|year|current role|currently work here|i currently work here|description|role description|responsibilities|achievements)\s*\*?$",
+            primary,
+        )
+    )
+
+
+def is_generic_standalone_url_field(primary: str) -> bool:
+    return bool(re.search(r"^(url|link)\s*\*?$", primary))
 
 
 def resolve_field_kind(kind: str, profile: dict[str, Any]) -> Any:

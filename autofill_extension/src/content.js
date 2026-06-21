@@ -228,7 +228,8 @@
     const backendMappings = settings?.autoMapAmbiguousFields === true
       ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field)), profile)
       : [];
-    const mappings = mergeMappings([...canonicalMappings, ...localMappings, ...repeatableMappings], backendMappings, fields);
+    const mappings = mergeMappings([...canonicalMappings, ...localMappings, ...repeatableMappings], backendMappings, fields)
+      .filter((mapping) => !isAlreadyCorrectlyFilledMapping(mapping, fields));
 
     return { fields, mappings, profile };
   }
@@ -312,6 +313,10 @@
         }
 
         if (shouldSkipMappingForExistingCoreField(mapping, field, element)) {
+          continue;
+        }
+
+        if (isAlreadyCorrectlyFilledElement(element, mapping, field)) {
           continue;
         }
 
@@ -1238,6 +1243,10 @@
     const primary = primaryFieldHaystack(field);
     const full = fullFieldHaystack(field);
 
+    if (isRepeatableEmploymentDetailField(field, primary, full)) {
+      return "";
+    }
+
     if (isWorkOrEducationIdentityField(primary)) {
       if (/employer|company/.test(primary)) {
         return FIELD_KIND.CURRENT_EMPLOYER;
@@ -1273,6 +1282,9 @@
     }
     if (isPortfolioProfileField(primary) || /^website\s*\*?$/.test(primary)) {
       return FIELD_KIND.PORTFOLIO;
+    }
+    if (isGenericStandaloneUrlField(primary)) {
+      return "";
     }
 
     if (/(school|university|college|institution)/.test(primary) && !/(website|url|link)/.test(full)) {
@@ -1312,6 +1324,40 @@
     }
 
     return "";
+  }
+
+  function isRepeatableEmploymentDetailField(field, primary, full) {
+    if (isWorkOrEducationIdentityField(primary)) {
+      return false;
+    }
+
+    const isEmploymentDetail = isGenericRepeatableEmploymentDetailLabel(primary);
+    const hasEmploymentContext = /(work experience|employment|work history|professional experience|job history)/.test(full);
+    return isEmploymentDetail && (hasEmploymentContext || isStrictRepeatableEmploymentDetailLabel(primary));
+  }
+
+  function isGenericRepeatableEmploymentDetailLabel(primary) {
+    return /(^|\b)(company|company name|employer|job title|title|position|role|location|from|to|start date|end date|month|year|current role|currently work|description|role description|responsibilities|achievements)\b/.test(primary);
+  }
+
+  function isStrictRepeatableEmploymentDetailLabel(primary) {
+    return /^(company|company name|employer|job title|title|position|role|location i currently work here|location month|location year|from|to|from month|from year|to month|to year|start date|end date|start date month|start date year|end date month|end date year|month|year|current role|currently work here|i currently work here|description|role description|responsibilities|achievements)\s*\*?$/.test(primary);
+  }
+
+  function isGenericStandaloneUrlField(primary) {
+    return /^(url|link)\s*\*?$/.test(primary);
+  }
+
+  function isGenericRowDetailFieldForScopedMappers(field, primary, full) {
+    if (isGenericStandaloneUrlField(primary)) {
+      return true;
+    }
+
+    if (isRepeatableEmploymentDetailField(field, primary, full)) {
+      return true;
+    }
+
+    return /^(location month|location year|from month|from year|to month|to year|start date month|start date year|end date month|end date year|month|year|role description|current role|currently work here|i currently work here)\s*\*?$/.test(primary);
   }
 
   function answerForFieldKind(kind, field, profile, settings) {
@@ -1397,6 +1443,10 @@
     const haystack = fieldHaystack(field);
     const fullHaystack = fullFieldHaystack(field);
     const phoneContextHaystack = normalize([primaryHaystack, field.surroundingText, field.nearbyText].join(" "));
+
+    if (isGenericRowDetailFieldForScopedMappers(field, primaryHaystack, fullHaystack)) {
+      return null;
+    }
 
     const dependentNoDetailMapping = mapDependentNoDetailField(field, fullHaystack);
     if (dependentNoDetailMapping) {
@@ -2601,7 +2651,8 @@
     const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button']"));
     return candidates.find((item) => {
       const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
-      return /add another/.test(text) && /(employment|experience|work|job)/.test(employmentSectionText(item));
+      const sectionText = normalize(`${employmentSectionText(item)} ${nearestSectionHeadingText(item)}`);
+      return /^(add|add another)$/.test(text) && /(employment|experience|work|job)/.test(sectionText);
     });
   }
 
@@ -2614,7 +2665,7 @@
   }
 
   async function ensureEducationRows(targetCount) {
-    if (targetCount <= 1) {
+    if (targetCount < 1) {
       return;
     }
 
@@ -2647,7 +2698,10 @@
     const candidates = Array.from(document.querySelectorAll("button, a, [role='button'], input[type='button']"));
     return candidates.find((item) => {
       const text = normalize(item.innerText || item.textContent || item.value || item.getAttribute("aria-label") || "");
-      return /^(add|add another)$/.test(text) && sectionPattern.test(nearestSectionHeadingText(item));
+      const explicitHeading = nearestExplicitSectionHeadingText(item);
+      const nearestHeading = nearestSectionHeadingText(item);
+      const sectionText = explicitHeading || nearestHeading || sectionTextAround(item);
+      return /^(add|add another)$/.test(text) && sectionPattern.test(sectionText);
     });
   }
 
@@ -2830,11 +2884,11 @@
     const urlFields = fields.filter((field) => {
       const primaryHaystack = normalize([field.label, field.name, field.id, field.placeholder, field.ariaLabel].join(" "));
       const haystack = normalize([primaryHaystack, field.surroundingText].join(" "));
-      if (isWorkOrEducationIdentityField(haystack) || isWorkOrEducationIdentityField(primaryHaystack)) {
+      if (isWorkOrEducationIdentityField(primaryHaystack)) {
         return false;
       }
 
-      return isWebsiteField(field, haystack) && !isProfileContactOrLocationField(haystack);
+      return isWebsiteField(field, haystack) && !isProfileContactOrLocationField(primaryHaystack);
     });
 
     const mappings = [];
@@ -2906,41 +2960,56 @@
 
   function isEducationField(field, haystack) {
     const element = field.elementRef?.deref?.();
-    const sectionHeading = element ? nearestExplicitSectionHeadingText(element) : "";
+    const sectionHeading = element ? normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`) : "";
+    const primaryHaystack = normalize([field.label, field.name, field.id, field.placeholder, field.ariaLabel].join(" "));
 
     if (/work experience|employment|professional experience|job history/.test(sectionHeading)) {
       return false;
     }
 
-    if (/work experience|employment|company|job title|role description|resume|websites?|social network/.test(haystack)) {
+    if (/websites?|social network|resume/.test(sectionHeading)) {
       return false;
     }
 
-    if (/start date month|start month|end date month|end month/.test(haystack)) {
+    if (/start date month|start month|end date month|end month/.test(primaryHaystack)) {
       return false;
     }
 
-    return /(education|school|university|degree|field of study|discipline|major|qualification|actual or expected)/.test(
-      `${haystack} ${normalize(field.surroundingText)}`
-    );
+    const educationLabel = /(school|university|institution|degree|field of study|discipline|major|qualification|actual or expected|^from\b|^to\b|start.*year|end.*year|graduation)/.test(primaryHaystack);
+
+    if (/education|school|university/.test(sectionHeading)) {
+      return educationLabel;
+    }
+
+    if (/work experience|employment|company|job title|role description/.test(haystack)) {
+      return false;
+    }
+
+    return educationLabel || /(education|school|university|degree|field of study|discipline|major|qualification|actual or expected)/.test(haystack);
   }
 
   function isWebsiteField(field, haystack) {
     const primaryHaystack = normalize([field.label, field.name, field.id, field.placeholder, field.ariaLabel].join(" "));
+    const element = field.elementRef?.deref?.();
+    const sectionHeading = element ? normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`) : "";
 
     if (
-      /social network|linkedin|linked in|github|git hub|facebook|twitter|phone|email|location/.test(haystack)
-      || isWorkOrEducationIdentityField(haystack)
+      /social network|linkedin|linked in|github|git hub|facebook|twitter|phone|email|location/.test(primaryHaystack)
       || isWorkOrEducationIdentityField(primaryHaystack)
     ) {
       return false;
     }
 
+    if (/websites?|urls?|links?/.test(sectionHeading)) {
+      return /(websites?|urls?|links?|\burl\b)/.test(primaryHaystack);
+    }
+
+    if (/work experience|employment|education|school|university|resume|social network/.test(sectionHeading)) {
+      return false;
+    }
+
     return /(websites?|urls?|links?|\burl\b)/.test(primaryHaystack)
-      || (
-        /(websites?|urls?|links?|\burl\b)/.test(`${haystack} ${normalize(field.surroundingText)}`)
-        && !primaryHaystack
-      );
+      || (!primaryHaystack && /(websites?|urls?|links?|\burl\b)/.test(haystack));
   }
 
   function isWorkOrEducationIdentityField(haystack) {
@@ -3778,6 +3847,18 @@
 
   function isOptionLikeField(field) {
     const haystack = fullFieldHaystack(field);
+    const primary = primaryFieldHaystack(field);
+
+    if (
+      isLinkedinProfileField(primary)
+      || isGithubProfileField(primary)
+      || isPortfolioProfileField(primary)
+      || isEmailProfileField(primary)
+      || isPhoneNumberField(primary)
+    ) {
+      return false;
+    }
+
     return field.tag === "select"
       || field.tag === "button"
       || field.type === "combobox"
@@ -3935,6 +4016,17 @@
     return Array.from(byIndex.values());
   }
 
+  function isAlreadyCorrectlyFilledMapping(mapping, fields) {
+    const field = resolveFieldForMapping(mapping, fields);
+    const current = field?.value;
+
+    if (!hasValue(current) || isPlaceholderValue(current)) {
+      return false;
+    }
+
+    return mappingValueMatchesField(current, mapping.value);
+  }
+
   function shouldKeepExistingMapping(existing, candidate, fields) {
     if (!existing || !hasValue(existing.value)) {
       return false;
@@ -4059,6 +4151,25 @@
     }
 
     return !valueMatches(current, mapping.value) && !optionMatches(current, "", mapping.value);
+  }
+
+  function isAlreadyCorrectlyFilledElement(element, mapping, field) {
+    const current = compactText(getCurrentValue(element));
+    if (!current || isPlaceholderValue(current)) {
+      return false;
+    }
+
+    if (mappingValueMatchesField(current, mapping.value)) {
+      return true;
+    }
+
+    if (!field?.options?.length) {
+      return false;
+    }
+
+    const currentOption = bestOptionValue(field, current);
+    const desiredOption = bestOptionValue(field, mapping.value);
+    return Boolean(currentOption && desiredOption && normalize(currentOption) === normalize(desiredOption));
   }
 
   function isAiMapping(mapping) {

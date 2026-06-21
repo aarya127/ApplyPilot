@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from flask import Flask, jsonify, request
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIR = ROOT / "generated"
 DB_PATH = GENERATED_DIR / "applications.sqlite3"
+LLM_TRACE_PATH = GENERATED_DIR / "llm_trace.private.jsonl"
 PRIVATE_ENV_PATH = Path(__file__).resolve().parent / "env.private"
 NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
@@ -103,7 +105,9 @@ def audit_fields():
     profile = payload.get("profile", {})
     page = payload.get("page", {})
 
-    corrections = deterministic_audit_corrections(fields, mappings, profile)
+    deterministic_report = deterministic_audit_report(fields, mappings, profile)
+    corrections = deterministic_report["corrections"]
+    decisions = deterministic_report["decisions"]
     issues: list[dict[str, Any]] = []
     warning = None
 
@@ -111,6 +115,7 @@ def audit_fields():
         try:
             audit = call_nvidia_auditor(fields, mappings, profile, page)
             corrections = merge_audit_corrections(corrections, audit.get("corrections", []))
+            decisions = merge_audit_decisions(decisions, audit.get("decisions", []))
             issues = audit.get("issues", []) if isinstance(audit.get("issues"), list) else []
         except Exception as exc:
             app.logger.exception("Audit request failed")
@@ -118,7 +123,7 @@ def audit_fields():
     else:
         warning = "NVIDIA_API_KEY is not configured; used deterministic audit only"
 
-    return jsonify({"corrections": corrections, "issues": issues, "warning": warning})
+    return jsonify({"corrections": corrections, "decisions": decisions, "issues": issues, "warning": warning})
 
 
 @app.route("/track-application", methods=["POST", "OPTIONS"])
@@ -169,35 +174,67 @@ def applications():
     return jsonify({"applications": [dict(row) for row in rows]})
 
 
+@app.route("/llm-traces", methods=["GET"])
+def llm_traces():
+    limit = min(max(int(request.args.get("limit", "20") or 20), 1), 200)
+    if not LLM_TRACE_PATH.exists():
+        return jsonify({"tracePath": str(LLM_TRACE_PATH), "traces": []})
+
+    lines = LLM_TRACE_PATH.read_text(encoding="utf-8").splitlines()[-limit:]
+    traces = []
+    for line in lines:
+        try:
+            traces.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+
+    return jsonify({"tracePath": str(LLM_TRACE_PATH), "traces": traces})
+
+
 def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> list[dict[str, Any]]:
     prompt = build_mapper_prompt(fields, profile, page)
+    trace_id = new_trace_id()
+    request_json = {
+        "model": model_name(),
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are ApplyPilot acting for Aarya Shah on job application forms. "
+                    "Return only strict JSON with no markdown or reasoning. "
+                    "For each field, produce the most accurate truthful answer using the supplied profile, "
+                    "resume facts, saved answers, default policies, retrieved field context, and visible options. "
+                    "Choose answers from supplied dropdown, radio, checkbox, and combobox options exactly. "
+                    "For optioned fields, infer the intended meaning from the profile and choose the closest supplied option label verbatim. "
+                    "For legal eligibility or authorization to work in the country of employment, choose the positive authorized/eligible option. "
+                    "Use the profile, resume facts, saved answers, and default policies. "
+                    "Do not invent experience. Skip unknown fields."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 3200,
+        "response_format": {"type": "json_object"},
+    }
+    write_llm_trace(
+        "mapper.request",
+        {
+            "traceId": trace_id,
+            "page": page,
+            "fieldCount": len(fields),
+            "fields": fields,
+            "request": request_json,
+        },
+    )
+
     response = requests.post(
         os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
         headers={
             "Authorization": f"Bearer {api_key()}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": model_name(),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are ApplyPilot acting for Aarya Shah on job application forms. "
-                        "Return only strict JSON with no markdown or reasoning. "
-                        "Choose answers from supplied dropdown, radio, checkbox, and combobox options exactly. "
-                        "For optioned fields, infer the intended meaning from the profile and choose the closest supplied option label verbatim. "
-                        "For legal eligibility or authorization to work in the country of employment, choose the positive authorized/eligible option. "
-                        "Use the profile, resume facts, saved answers, and default policies. "
-                        "Do not invent experience. Skip unknown fields."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.1,
-            "max_tokens": 3200,
-            "response_format": {"type": "json_object"},
-        },
+        json=request_json,
         timeout=45,
     )
     response.raise_for_status()
@@ -211,7 +248,20 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
     valid_mappings = [mapping for mapping in mappings if valid_mapping(mapping)]
     enforced_mappings = enforce_option_values(valid_mappings, fields)
     fallback_mappings = policy_mappings(fields, profile)
-    return merge_backend_mappings(enforced_mappings, fallback_mappings)
+    merged = merge_backend_mappings(enforced_mappings, fallback_mappings)
+    write_llm_trace(
+        "mapper.response",
+        {
+            "traceId": trace_id,
+            "statusCode": response.status_code,
+            "rawContent": content,
+            "parsed": data,
+            "enforcedMappings": enforced_mappings,
+            "fallbackMappings": fallback_mappings,
+            "mergedMappings": merged,
+        },
+    )
+    return merged
 
 
 def call_nvidia_auditor(
@@ -221,52 +271,85 @@ def call_nvidia_auditor(
     page: dict[str, Any],
 ) -> dict[str, Any]:
     prompt = build_audit_prompt(fields, mappings, profile, page)
+    trace_id = new_trace_id()
+    request_json = {
+        "model": model_name(),
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are ApplyPilot auditing answers on a job application for Aarya Shah. "
+                    "Return only strict JSON with no markdown. "
+                    "Follow the audit protocol exactly: keep correct answers, correct wrong answers, fill safe unanswered required questions, "
+                    "and skip anything unsafe with a reason. "
+                    "The goal is the most accurate truthful answer for each question, not a generic positive answer. "
+                    "Do not overwrite correct answers. "
+                    "Only propose a correction when the current answer conflicts with supplied profile facts, "
+                    "retrieved context, default policies, or visible options. "
+                    "If a field has options, the correction value must be exactly one supplied option label. "
+                    "Never change name, email, phone, address, resume, experience, education, or link fields unless "
+                    "the retrieved profile facts explicitly show the visible value is wrong."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.05,
+        "max_tokens": 3200,
+        "response_format": {"type": "json_object"},
+    }
+    write_llm_trace(
+        "auditor.request",
+        {
+            "traceId": trace_id,
+            "page": page,
+            "fieldCount": len(fields),
+            "mappingCount": len(mappings),
+            "fields": fields,
+            "mappings": mappings,
+            "request": request_json,
+        },
+    )
+
     response = requests.post(
         os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
         headers={
             "Authorization": f"Bearer {api_key()}",
             "Content-Type": "application/json",
         },
-        json={
-            "model": model_name(),
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are ApplyPilot auditing answers on a job application for Aarya Shah. "
-                        "Return only strict JSON with no markdown. "
-                        "Do not overwrite correct answers. "
-                        "Only propose a correction when the current answer conflicts with supplied profile facts, "
-                        "retrieved context, default policies, or visible options. "
-                        "If a field has options, the correction value must be exactly one supplied option label. "
-                        "Never change name, email, phone, address, resume, experience, education, or link fields unless "
-                        "the retrieved profile facts explicitly show the visible value is wrong."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.05,
-            "max_tokens": 3200,
-            "response_format": {"type": "json_object"},
-        },
+        json=request_json,
         timeout=45,
     )
     response.raise_for_status()
     content = response.json()["choices"][0]["message"]["content"]
     data = parse_json_object(content)
     corrections = data.get("corrections", [])
+    decisions = data.get("decisions", [])
     issues = data.get("issues", [])
 
     if not isinstance(corrections, list):
         corrections = []
+    if not isinstance(decisions, list):
+        decisions = []
     if not isinstance(issues, list):
         issues = []
 
     valid_corrections = [mapping for mapping in corrections if valid_mapping(mapping)]
-    return {
+    result = {
         "corrections": enforce_option_values(valid_corrections, fields),
+        "decisions": normalize_audit_decisions(decisions, fields),
         "issues": [issue for issue in issues if isinstance(issue, dict)],
     }
+    write_llm_trace(
+        "auditor.response",
+        {
+            "traceId": trace_id,
+            "statusCode": response.status_code,
+            "rawContent": content,
+            "parsed": data,
+            "result": result,
+        },
+    )
+    return result
 
 
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
@@ -323,6 +406,8 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "instructions": (
                 "Return JSON in this shape: "
                 "{\"mappings\":[{\"index\":0,\"value\":\"answer\",\"confidence\":0.0,\"source\":\"llm\"}]}. "
+                "Return the most accurate truthful answer for each question. "
+                "When context is insufficient, skip the field instead of guessing. "
                 "Use exact option labels when a field has options. "
                 "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
                 "If the best semantic answer is not an exact option, choose the closest supplied option label. "
@@ -383,14 +468,20 @@ def build_audit_prompt(
     return json.dumps(
         {
             "instructions": (
-                "Return JSON in this shape: "
-                "{\"corrections\":[{\"index\":0,\"value\":\"corrected answer\",\"confidence\":0.0,\"source\":\"audit\",\"reason\":\"short reason\"}],"
+                "Return JSON in this exact shape: "
+                "{\"decisions\":[{\"index\":0,\"action\":\"keep|correct|fill|skip\",\"value\":\"answer or empty\","
+                "\"confidence\":0.0,\"reason\":\"short reason\",\"evidence\":\"profile|resume|policy|savedAnswer|options|insufficientContext\"}],"
+                "\"corrections\":[{\"index\":0,\"value\":\"corrected answer\",\"confidence\":0.0,\"source\":\"audit\",\"reason\":\"short reason\"}],"
                 "\"issues\":[{\"index\":0,\"severity\":\"warning\",\"reason\":\"short reason\"}]}. "
-                "Audit every currentAnswer against the retrievedContext, candidateContext, defaultPolicies, and visible options. "
-                "Only include corrections for wrong or unsafe answers. "
-                "If options are supplied, correction.value must be one exact option label from field.options. "
-                "For unanswered required fields, add an issue rather than a correction unless a safe exact option is obvious. "
-                "Do not change identity/contact/address/education/experience/link fields unless the supplied profile fact is explicit. "
+                "Audit every currentAnswer against retrievedContext, candidateContext, defaultPolicies, and visible options. "
+                "For each answer, decide exactly one action: keep when accurate, correct when wrong, fill when blank and safely answerable, "
+                "or skip when unsafe. "
+                "The answer must be the most accurate truthful answer for the specific question. "
+                "Do not guess, do not choose an optimistic answer, and do not prefer Yes unless profile/policy facts support Yes. "
+                "Only include corrections for actions correct or fill. "
+                "If options are supplied, decision.value and correction.value must be one exact option label from field.options. "
+                "For unanswered required fields, correct/fill only when a safe exact option or precise text answer is supported; otherwise skip and add an issue. "
+                "Do not change identity/contact/address/education/experience/link fields unless the supplied profile fact is explicit and the current value is wrong. "
                 "Work authorization/eligibility is Yes/authorized for both the United States and Canada. "
                 "Visa sponsorship, employer work-authorization assistance, relocation assistance, relatives at company, "
                 "contractor/dealer/affiliate status, military service, veteran protected status, subscriptions, and marketing messages default to No. "
@@ -721,6 +812,14 @@ def deterministic_audit_corrections(
     mappings: list[dict[str, Any]],
     profile: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    return deterministic_audit_report(fields, mappings, profile)["corrections"]
+
+
+def deterministic_audit_report(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
     field_by_index = {
         field.get("index"): field
         for field in fields
@@ -732,6 +831,7 @@ def deterministic_audit_corrections(
         if isinstance(mapping.get("index"), int)
     }
     corrections: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
 
     for mapping in mappings:
         if not isinstance(mapping, dict) or not isinstance(mapping.get("index"), int):
@@ -741,25 +841,117 @@ def deterministic_audit_corrections(
         field = field_by_index.get(index)
         policy = policy_by_index.get(index) or deterministic_profile_mapping(field, profile)
 
-        if not field or not policy:
+        if not field:
             continue
 
         current_value = mapping.get("value")
-        policy_value = policy.get("value")
-        if values_equivalent_for_field(current_value, policy_value, field):
+
+        if not policy:
+            decisions.append(
+                {
+                    "index": index,
+                    "action": "skip",
+                    "value": current_value,
+                    "confidence": 0.5,
+                    "source": "deterministic-audit",
+                    "reason": "No deterministic profile or policy fact was available for this field.",
+                    "evidence": "insufficientContext",
+                }
+            )
             continue
 
+        policy_value = policy.get("value")
+        if values_equivalent_for_field(current_value, policy_value, field):
+            decisions.append(
+                {
+                    "index": index,
+                    "action": "keep",
+                    "value": current_value,
+                    "confidence": 0.9,
+                    "source": "deterministic-audit",
+                    "reason": "Current answer matches stored profile policy.",
+                    "evidence": "policy",
+                }
+            )
+            continue
+
+        reason = "Current answer conflicts with stored profile policy."
+        decisions.append(
+            {
+                "index": index,
+                "action": "correct",
+                "value": policy_value,
+                "confidence": 0.9,
+                "source": "deterministic-audit",
+                "reason": reason,
+                "evidence": policy.get("source") or "policy",
+            }
+        )
         corrections.append(
             {
                 "index": index,
                 "value": policy_value,
                 "confidence": 0.9,
                 "source": "policy-audit",
-                "reason": "Current answer conflicts with stored profile policy.",
+                "reason": reason,
             }
         )
 
-    return enforce_option_values(corrections, fields)
+    return {
+        "corrections": enforce_option_values(corrections, fields),
+        "decisions": normalize_audit_decisions(decisions, fields),
+    }
+
+
+def normalize_audit_decisions(decisions: list[Any], fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    field_by_index = {
+        field.get("index"): field
+        for field in fields
+        if isinstance(field, dict) and isinstance(field.get("index"), int)
+    }
+    normalized: list[dict[str, Any]] = []
+
+    for decision in decisions:
+        if not isinstance(decision, dict) or not isinstance(decision.get("index"), int):
+            continue
+
+        action = str(decision.get("action") or "").strip().lower()
+        if action not in {"keep", "correct", "fill", "skip"}:
+            continue
+
+        index = decision["index"]
+        field = field_by_index.get(index)
+        value = decision.get("value")
+
+        if action in {"correct", "fill"}:
+            options = normalized_options(field)
+            if options:
+                option_value = value_from_options(value, options)
+                if option_value is None:
+                    action = "skip"
+                    value = ""
+                    reason = "Suggested answer did not match any visible option."
+                else:
+                    value = option_value
+                    reason = str(decision.get("reason") or "").strip()
+            else:
+                reason = str(decision.get("reason") or "").strip()
+        else:
+            reason = str(decision.get("reason") or "").strip()
+
+        normalized.append(
+            {
+                "index": index,
+                "action": action,
+                "value": value,
+                "confidence": safe_float(decision.get("confidence"), 0.0),
+                "source": str(decision.get("source") or "audit"),
+                "reason": reason or "Audited answer.",
+                "evidence": str(decision.get("evidence") or ""),
+            }
+        )
+
+    return normalized
 
 
 def deterministic_profile_mapping(field: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any] | None:
@@ -873,6 +1065,30 @@ def merge_audit_corrections(primary: list[dict[str, Any]], secondary: list[dict[
             by_index[index] = mapping
 
     return list(by_index.values())
+
+
+def merge_audit_decisions(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_index = {
+        decision.get("index"): decision
+        for decision in primary
+        if isinstance(decision.get("index"), int)
+    }
+
+    for decision in secondary:
+        index = decision.get("index") if isinstance(decision, dict) else None
+        if not isinstance(index, int):
+            continue
+
+        existing = by_index.get(index)
+        if not existing or audit_decision_priority(decision) >= audit_decision_priority(existing):
+            by_index[index] = decision
+
+    return list(by_index.values())
+
+
+def audit_decision_priority(decision: dict[str, Any]) -> int:
+    action = str(decision.get("action") or "").strip().lower()
+    return {"skip": 0, "keep": 1, "fill": 2, "correct": 3}.get(action, 0)
 
 
 def policy_mappings(fields: list[dict[str, Any]], profile: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1579,6 +1795,31 @@ def parse_json_object(content: str) -> dict[str, Any]:
             return json.loads(content[start:end + 1])
         except json.JSONDecodeError:
             return {}
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def new_trace_id() -> str:
+    return uuid.uuid4().hex
+
+
+def write_llm_trace(event: str, payload: dict[str, Any]) -> None:
+    if os.environ.get("APPLYPILOT_LLM_TRACE", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return
+
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        **payload,
+    }
+    with LLM_TRACE_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, default=str, sort_keys=True) + "\n")
 
 
 def valid_mapping(mapping: Any) -> bool:

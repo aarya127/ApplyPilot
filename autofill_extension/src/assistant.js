@@ -307,10 +307,11 @@ async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
     return [];
   }
 
-  const fieldsForAudit = currentMappings.map((mapping, index) => toBackendField(mapping, index));
+  const fieldsForAudit = currentMappings.map((mapping, index) => toBackendField(fieldForPreviewMapping(preview, mapping), index));
   const auditPayloadMappings = currentMappings.map((mapping, index) => ({
     index,
-    value: mapping.value,
+    value: currentAuditValue(preview, mapping),
+    plannedValue: mapping.value,
     source: mapping.source,
     confidence: mapping.confidence
   }));
@@ -352,7 +353,40 @@ async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
     }
   }
 
+  const decisions = response.payload?.decisions || [];
+  const corrected = decisions.filter((item) => item.action === "correct" || item.action === "fill").length;
+  const skipped = decisions.filter((item) => item.action === "skip").length;
+  if (decisions.length && (corrected || skipped)) {
+    addMessage("agent", `Audit protocol: ${decisions.length} checked, ${corrected} correction/fill decision(s), ${skipped} skipped as unsafe.`);
+  }
+
   return auditMappings;
+}
+
+function fieldForPreviewMapping(preview, mapping) {
+  const frameId = Number.isInteger(mapping.frameId) ? mapping.frameId : 0;
+  const debugField = (preview?.debugFields || []).find((field) => {
+    const fieldFrameId = Number.isInteger(field.frameId) ? field.frameId : 0;
+    return fieldFrameId === frameId && field.index === mapping.index;
+  });
+
+  return {
+    ...(debugField || {}),
+    ...mapping,
+    value: debugField?.value ?? mapping.value,
+    options: debugField?.options || mapping.options || []
+  };
+}
+
+function currentAuditValue(preview, mapping) {
+  const field = fieldForPreviewMapping(preview, mapping);
+  const currentValue = String(field.value ?? "").trim();
+
+  if (currentValue && !isPlaceholderValue(currentValue)) {
+    return currentValue;
+  }
+
+  return mapping.value;
 }
 
 function toBackendField(field, index) {
@@ -567,6 +601,10 @@ function aiFieldHaystack(field) {
 
 function isLowInformationText(value) {
   return /^(yes|required yes|yes required|no|required no|no required|yes\s*no|no\s*yes|select one|required select one|select one required|required|true false|false true)$/i.test(String(value || "").trim());
+}
+
+function isPlaceholderValue(value) {
+  return /^(select one|select|choose|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
 }
 
 function isAiPolicyQuestion(haystack) {

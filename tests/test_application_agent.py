@@ -216,6 +216,18 @@ def test_field_kind_classifier_resolves_core_profile_fields_before_heuristics():
     assert resolve_field_kind(classify_field_kind(state_field), profile) == "Illinois"
 
 
+def test_field_kind_classifier_skips_repeatable_work_experience_details():
+    surrounding = "Work Experience Work Experience 1 Job Title Company Location From Month Year To Month Year"
+
+    for label in ["Job Title*", "Company*", "Location", "Location I currently work here", "Location Month", "Location Year", "Start date month", "Role Description"]:
+        assert classify_field_kind({"label": label, "surrounding_text": surrounding}) == ""
+
+    for label in ["Job Title*", "Company*", "Location I currently work here", "Location Month", "Location Year", "Role Description"]:
+        assert classify_field_kind({"label": label}) == ""
+
+    assert classify_field_kind({"label": "Work Experience: Current/Previous Employer", "surrounding_text": surrounding}) == "work.current_or_previous_employer"
+
+
 def test_fill_plan_constrains_options_and_reports_skipped_fields():
     fields = [
         {"index": 0, "label": "First Name"},

@@ -708,6 +708,105 @@ def test_backend_deterministic_audit_corrects_wrong_policy_answers():
     ]
 
 
+def test_backend_deterministic_audit_report_explains_keep_correct_and_skip():
+    fields = [
+        {
+            "index": 0,
+            "label": "Are you legally eligible to work in the country of employment?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {
+            "index": 1,
+            "label": "Will you require our assistance with work authorization now or in the future?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        },
+        {"index": 2, "label": "Tell us why you want this role."},
+    ]
+    mappings = [
+        {"index": 0, "value": "Yes", "source": "autofill", "confidence": 0.9},
+        {"index": 1, "value": "Yes", "source": "autofill", "confidence": 0.9},
+        {"index": 2, "value": "I like this role.", "source": "llm", "confidence": 0.8},
+    ]
+
+    report = server.deterministic_audit_report(fields, mappings, {})
+
+    assert report["corrections"] == [
+        {
+            "index": 1,
+            "value": "No",
+            "confidence": 0.9,
+            "source": "policy-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+        }
+    ]
+    assert report["decisions"] == [
+        {
+            "index": 0,
+            "action": "keep",
+            "value": "Yes",
+            "confidence": 0.9,
+            "source": "deterministic-audit",
+            "reason": "Current answer matches stored profile policy.",
+            "evidence": "policy",
+        },
+        {
+            "index": 1,
+            "action": "correct",
+            "value": "No",
+            "confidence": 0.9,
+            "source": "deterministic-audit",
+            "reason": "Current answer conflicts with stored profile policy.",
+            "evidence": "policy",
+        },
+        {
+            "index": 2,
+            "action": "skip",
+            "value": "I like this role.",
+            "confidence": 0.5,
+            "source": "deterministic-audit",
+            "reason": "No deterministic profile or policy fact was available for this field.",
+            "evidence": "insufficientContext",
+        },
+    ]
+
+
+def test_backend_normalizes_audit_decisions_to_visible_options():
+    fields = [
+        {
+            "index": 0,
+            "label": "Do you have a disability?",
+            "options": [
+                {"label": "Yes, I have a disability, or have a history/record of having a disability"},
+                {"label": "No, I don't have a disability, or a history/record of having a disability"},
+            ],
+        }
+    ]
+
+    assert server.normalize_audit_decisions(
+        [
+            {
+                "index": 0,
+                "action": "correct",
+                "value": "No, I do not have a disability and have not had one in the past",
+                "confidence": 0.8,
+                "reason": "Profile says no disability.",
+                "evidence": "profile",
+            }
+        ],
+        fields,
+    ) == [
+        {
+            "index": 0,
+            "action": "skip",
+            "value": "",
+            "confidence": 0.8,
+            "source": "audit",
+            "reason": "Suggested answer did not match any visible option.",
+            "evidence": "profile",
+        }
+    ]
+
+
 def test_backend_deterministic_audit_corrects_contact_and_location_mismatches():
     profile = {
         "email": "candidate@example.com",
@@ -795,7 +894,29 @@ def test_backend_audit_endpoint_works_without_llm(monkeypatch, tmp_path):
             "reason": "Current answer conflicts with stored profile policy.",
         }
     ]
+    assert response.json["decisions"][0]["action"] == "correct"
     assert "deterministic audit" in response.json["warning"]
+
+
+def test_backend_llm_trace_writer_and_endpoint(monkeypatch, tmp_path):
+    trace_path = tmp_path / "llm_trace.private.jsonl"
+    monkeypatch.setattr(server, "LLM_TRACE_PATH", trace_path)
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.delenv("APPLYPILOT_LLM_TRACE", raising=False)
+
+    server.write_llm_trace("mapper.request", {"traceId": "abc", "request": {"messages": [{"role": "user", "content": "prompt"}]}})
+    server.write_llm_trace("mapper.response", {"traceId": "abc", "rawContent": '{"mappings":[]}'})
+
+    assert trace_path.exists()
+    lines = trace_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["event"] == "mapper.request"
+
+    client = server.app.test_client()
+    response = client.get("/llm-traces?limit=1")
+    assert response.status_code == 200
+    assert response.json["tracePath"] == str(trace_path)
+    assert response.json["traces"][0]["event"] == "mapper.response"
 
 
 def test_backend_tracks_applications(monkeypatch, tmp_path):
@@ -1919,6 +2040,16 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         )
         assert preview["ok"] is True
         assert page.locator(".employment-row").count() == 2
+        employment_row_mappings = [
+            mapping for mapping in preview["result"]["mappings"]
+            if mapping["name"] in {"company[]", "title[]", "location[]", "from[]", "to[]", "description[]"}
+        ]
+        assert employment_row_mappings
+        assert all(mapping["source"] == "experience" for mapping in employment_row_mappings)
+        assert not any(
+            mapping["source"] == "field-kind" and mapping["name"] in {"company[]", "title[]", "location[]", "from[]", "to[]", "description[]"}
+            for mapping in preview["result"]["mappings"]
+        )
 
         fill_response = page.evaluate(
             """(mappings) => new Promise((resolve) => {
@@ -1941,6 +2072,155 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         assert page.locator("[name='location[]']").nth(1).input_value() == "Waterloo, ON"
         assert page.locator("[name='to[]']").nth(1).input_value() == "4/2025"
         assert page.locator("[name='description[]']").nth(1).input_value() == "Published efficient transformer research"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_does_not_field_kind_map_generic_workday_experience_labels_or_refill_correct_values():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "currentOrPreviousEmployer": "Cognixion",
+        "currentOrPreviousJobTitle": "Machine Learning Software Engineer",
+        "addresses": {
+            "usa": {
+                "city": "Bartlett",
+                "state": "IL",
+                "zipCode": "60103",
+                "country": "United States",
+            }
+        },
+        "linkedin": "https://www.linkedin.com/in/example",
+        "portfolio": "https://portfolio.example",
+        "github": "https://github.com/example",
+        "education": [
+            {
+                "school": "University of Waterloo",
+                "degree": "Bachelor's Degree",
+                "fieldOfStudy": "Statistics",
+                "startYear": "2021",
+                "endYear": "2026",
+            }
+        ],
+        "workExperience": [
+            {
+                "company": "Cognixion",
+                "title": "Machine Learning Software Engineer",
+                "location": "Santa Barbara, CA",
+                "description": "Built production ML systems",
+                "startMonth": "September",
+                "startYear": "2025",
+                "endMonth": "December",
+                "endYear": "2025",
+                "currentRole": False,
+            }
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Job Title*<input name="genericTitle"></label>
+              <label>Company*<input name="genericCompany"></label>
+              <label>Location<input name="genericLocation"></label>
+              <label>Location Month<input name="genericMonth"></label>
+              <label>Location Year<input name="genericYear"></label>
+              <label>Role Description<textarea name="genericDescription"></textarea></label>
+
+              <section id="employment">
+                <h2>Work Experience</h2>
+                <label>Company<input name="company[]" value="Cognixion"></label>
+                <label>Job Title<input name="title[]" value="Machine Learning Software Engineer"></label>
+                <label>Location<input name="location[]" value="Santa Barbara, CA"></label>
+                <label>From<input name="from[]" value="9/2025"></label>
+                <label>To<input name="to[]" value="12/2025"></label>
+                <label>Role Description<textarea name="description[]">Built production ML systems</textarea></label>
+              </section>
+              <section id="education">
+                <h2>Education</h2>
+                <button id="addEducation" type="button">Add</button>
+              </section>
+              <section id="websites">
+                <h2>Websites</h2>
+                <label>URL*<input name="url[]"></label>
+                <label>URL*<input name="url[]"></label>
+                <label>URL*<input name="url[]"></label>
+              </section>
+            </form>
+            <script>
+              document.getElementById('addEducation').addEventListener('click', () => {
+                const section = document.getElementById('education');
+                const row = document.createElement('div');
+                row.className = 'education-row';
+                row.innerHTML = `
+                  <label>School<input name="school[]"></label>
+                  <label>Degree<input name="degree[]"></label>
+                  <label>Discipline<input name="discipline[]"></label>
+                `;
+                section.insertBefore(row, document.getElementById('addEducation'));
+              });
+            </script>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings = preview["result"]["mappings"]
+        generic_names = {"genericTitle", "genericCompany", "genericLocation", "genericMonth", "genericYear", "genericDescription"}
+        repeatable_names = {"company[]", "title[]", "location[]", "from[]", "to[]", "description[]"}
+        url_mappings = [mapping for mapping in mappings if mapping["name"] == "url[]"]
+
+        assert not any(mapping["source"] == "field-kind" and mapping["name"] in generic_names for mapping in mappings)
+        assert not any(mapping["name"] in {"genericMonth", "genericYear", "genericDescription"} for mapping in mappings)
+        assert not any(mapping["name"] in repeatable_names for mapping in mappings)
+        assert page.locator(".education-row").count() == 1
+        assert url_mappings
+        assert all(mapping["value"] != "Cognixion" for mapping in url_mappings)
+        assert set(mapping["value"] for mapping in url_mappings) == {
+            "https://www.linkedin.com/in/example",
+            "https://portfolio.example",
+            "https://github.com/example",
+        }
 
         browser.close()
 
