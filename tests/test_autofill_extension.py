@@ -329,6 +329,18 @@ def test_backend_policy_treats_work_authorization_assistance_as_sponsorship():
             "If yes, please provide the relative's name, department, and relationship.",
             "N/A",
         ),
+        (
+            "Are you currently, have you ever been, or has the government ever proposed that you be excluded, debarred, suspended or otherwise ineligible from participation in any federal or state health care program or other government procurement programs?",
+            "No",
+        ),
+        (
+            "Have you ever been employed by a federal, state or local government entity, including Military, Civil Service, or a VA Hospital?",
+            "No",
+        ),
+        (
+            "Have you ever had, or do you anticipate receiving, any disciplinary action taken on your professional license, certification, or credentials?",
+            "No",
+        ),
     ],
 )
 def test_backend_policy_answers_generic_application_policy_questions(label, expected):
@@ -1157,6 +1169,263 @@ def test_content_script_saved_answers_do_not_override_core_identity_fields():
         assert mappings["First name *"]["source"] == "rule"
         assert mappings["Last name *"]["value"] == "Candidate"
         assert mappings["Last name *"]["source"] == "rule"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_answers_compliance_questions_and_uses_saved_question_memory():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "fullName": "Test Candidate",
+        "email": "test@example.com",
+        "phone": "5550100000",
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Are you currently, have you ever been, or has the government ever proposed that you be excluded, debarred, suspended or otherwise ineligible from participation in any federal or state health care program or other government procurement programs (e.g., Medicare, Medicaid)?*
+                <select name="programExclusion"><option>Select One</option><option>Yes</option><option>No</option></select>
+              </label>
+              <label>Have you ever been employed by a federal, state or local government entity (e.g., Military, Civil Service, VA Hospital)?*
+                <select name="governmentEmployment"><option>Select One</option><option>Yes</option><option>No</option></select>
+              </label>
+              <label>Have you ever had, or do you anticipate receiving, any disciplinary action taken on your professional license, certification, or credentials?*
+                <select name="licenseDiscipline"><option>Select One</option><option>Yes</option><option>No</option></select>
+              </label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings_by_name = {mapping["name"]: mapping for mapping in preview["result"]["mappings"]}
+        assert mappings_by_name["programExclusion"]["value"] == "No"
+        assert mappings_by_name["governmentEmployment"]["value"] == "No"
+        assert mappings_by_name["licenseDiscipline"]["value"] == "No"
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='programExclusion']").input_value() == "No"
+        assert page.locator("[name='governmentEmployment']").input_value() == "No"
+        assert page.locator("[name='licenseDiscipline']").input_value() == "No"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_saved_answers_can_fill_remembered_company_history_question():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "fullName": "Test Candidate",
+        "email": "test@example.com",
+        "phone": "5550100000",
+        "answers": {
+            "custom:have-you-ever-been-employed-by-exampleco": "Yes",
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label>Have you ever been employed by ExampleCo?
+                <select name="exampleCo"><option>Select One</option><option>Yes</option><option>No</option></select>
+              </label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["name"] == "exampleCo")
+        assert mapping["value"] == "Yes"
+        assert mapping["source"] == "saved-answer"
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='exampleCo']").input_value() == "Yes"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_rejects_ai_free_text_for_hidden_gender_and_degree_dropdowns():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "degree": "Bachelor of Science",
+        "answers": {},
+        "demographics": {
+            "genderIdentity": "Cisgender man",
+            "gender": "Male",
+        },
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "autoMapAmbiguousFields": True,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <label id="gender-label">Gender</label>
+              <input id="gender" role="combobox" aria-labelledby="gender-label" aria-haspopup="listbox" value="Select...">
+              <label id="degree-label">Degree</label>
+              <input id="degree" role="combobox" aria-labelledby="degree-label" aria-haspopup="listbox" value="Select...">
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{
+                    addListener: (fn) => {{ window.__autofillListener = fn; }}
+                  }},
+                  sendMessage: async () => ({{
+                    ok: true,
+                    payload: {{
+                      mappings: [
+                        {{ index: 0, value: "Cisgender man", confidence: 0.8, source: "llm" }},
+                        {{ index: 1, value: "Bachelor of Science", confidence: 0.8, source: "llm" }}
+                      ]
+                    }}
+                  }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        selected = {mapping["label"]: mapping["value"] for mapping in preview["result"]["mappings"]}
+        assert "Gender" not in selected
+        assert "Degree" not in selected
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("#gender").input_value() == "Select..."
+        assert page.locator("#degree").input_value() == "Select..."
 
         browser.close()
 
@@ -2211,7 +2480,7 @@ def test_content_script_does_not_field_kind_map_generic_workday_experience_label
         url_mappings = [mapping for mapping in mappings if mapping["name"] == "url[]"]
 
         assert not any(mapping["source"] == "field-kind" and mapping["name"] in generic_names for mapping in mappings)
-        assert not any(mapping["name"] in {"genericMonth", "genericYear", "genericDescription"} for mapping in mappings)
+        assert not any(mapping["name"] in {"genericMonth", "genericYear", "genericDescription"} for mapping in mappings), json.dumps(mappings, indent=2)
         assert not any(mapping["name"] in repeatable_names for mapping in mappings)
         assert page.locator(".education-row").count() == 1
         assert url_mappings
@@ -2221,6 +2490,224 @@ def test_content_script_does_not_field_kind_map_generic_workday_experience_label
             "https://portfolio.example",
             "https://github.com/example",
         }
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_maps_workday_experience_locations_from_resume_not_home_address():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "addresses": {
+            "usa": {
+                "city": "Bartlett",
+                "state": "IL",
+                "zipCode": "60103",
+                "country": "United States",
+            }
+        },
+        "workExperience": [
+            {
+                "company": "Cognixion",
+                "title": "Machine Learning Software Engineer",
+                "location": "Santa Barbara, CA",
+                "startMonth": "September",
+                "startYear": "2025",
+                "endMonth": "December",
+                "endYear": "2025",
+                "description": "Built production ML systems",
+            },
+            {
+                "company": "University of Waterloo",
+                "title": "AI/ML Research Assistant",
+                "location": "Waterloo, ON",
+                "startMonth": "August",
+                "startYear": "2025",
+                "endMonth": "December",
+                "endYear": "2025",
+                "description": "Published efficient transformer research",
+            },
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <h2>My Experience</h2>
+              <section>
+                <h3>Work Experience 1</h3>
+                <label>Job Title*<input name="title1"></label>
+                <label>Company*<input name="company1"></label>
+                <label>Location<input name="location1"></label>
+                <label>Location Month<input name="startMonth1"></label>
+                <label>Location Year<input name="startYear1"></label>
+                <label>Role Description<textarea name="description1"></textarea></label>
+              </section>
+              <section>
+                <h3>Work Experience 2</h3>
+                <label>Job Title*<input name="title2"></label>
+                <label>Company*<input name="company2"></label>
+                <label>Location<input name="location2"></label>
+                <label>Location Month<input name="startMonth2"></label>
+                <label>Location Year<input name="startYear2"></label>
+                <label>Role Description<textarea name="description2"></textarea></label>
+              </section>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+
+        assert preview["ok"] is True
+        mappings_by_name = {mapping["name"]: mapping for mapping in preview["result"]["mappings"]}
+        assert mappings_by_name["location1"]["value"] == "Santa Barbara, CA"
+        assert mappings_by_name["location2"]["value"] == "Waterloo, ON"
+        assert mappings_by_name["location1"]["source"] == "experience"
+        assert not any(mapping["value"] == "Bartlett" for mapping in preview["result"]["mappings"])
+        assert "startMonth1" not in mappings_by_name
+        assert "startYear1" not in mappings_by_name
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_workday_education_dropdown_fallbacks():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "education": [
+            {
+                "school": "University of Waterloo",
+                "degree": "Bachelor's Degree",
+                "fieldOfStudy": "Statistics",
+                "startYear": "2021",
+                "endYear": "2026",
+            }
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <style>
+              [role='option'] { display: block; }
+            </style>
+            <form>
+              <h2>Education</h2>
+              <div data-automation-id="formField-school">
+                <div data-automation-id="formLabel">School or University*</div>
+                <button id="school" type="button" aria-haspopup="listbox">0 items selected</button>
+              </div>
+              <div data-automation-id="formField-degree">
+                <div data-automation-id="formLabel">Degree*</div>
+                <button id="degree" type="button" aria-haspopup="listbox">Select One</button>
+              </div>
+              <div data-automation-id="formField-field">
+                <div data-automation-id="formLabel">Field of Study</div>
+                <button id="field" type="button" aria-haspopup="listbox">0 items selected</button>
+              </div>
+              <div role="listbox">
+                <div role="option" data-target="school">University of Waterloo</div>
+                <div role="option" data-target="degree">Bachelor's Degree</div>
+                <div role="option" data-target="degree">Master's Degree</div>
+                <div role="option" data-target="field">Statistics</div>
+                <div role="option" data-target="field">Computer Science</div>
+              </div>
+            </form>
+            <script>
+              document.querySelectorAll('[role="option"]').forEach((option) => {
+                option.addEventListener('click', () => {
+                  const target = document.getElementById(option.dataset.target);
+                  target.textContent = option.textContent;
+                });
+              });
+            </script>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        fill_response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: [] }, null, (response) => resolve(response));
+            })"""
+        )
+
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("#school").inner_text() == "University of Waterloo"
+        assert page.locator("#degree").inner_text() == "Bachelor's Degree"
+        assert page.locator("#field").inner_text() == "Statistics"
 
         browser.close()
 
@@ -2536,10 +3023,15 @@ def test_content_script_greenhouse_uses_typed_dropdown_fallbacks_when_options_ar
         selected = {mapping["label"]: mapping["value"] for mapping in preview["result"]["mappings"]}
         assert selected["Country*"] == "+1"
         assert selected["What U.S State do you currently reside in? *"] == "Illinois"
-        assert selected["Gender*"] == "Male"
-        assert selected["Race/Ethnicity*"] == "Asian"
-        assert selected["Veteran Status*"] == "No"
-        assert selected["Disability Status*"] == "No, I do not have a disability and have not had one in the past"
+        assert "Gender*" not in selected
+        assert "Race/Ethnicity*" not in selected
+        assert "Veteran Status*" not in selected
+        assert "Disability Status*" not in selected
+        unresolved = {field["label"]: field["unfilledReason"] for field in preview["result"]["unmappedFields"]}
+        assert unresolved["Gender*"] == "Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet."
+        assert unresolved["Race/Ethnicity*"] == "Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet."
+        assert unresolved["Veteran Status*"] == "Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet."
+        assert unresolved["Disability Status*"] == "Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet."
 
         fill_response = page.evaluate(
             """(mappings) => new Promise((resolve) => {
@@ -2550,5 +3042,9 @@ def test_content_script_greenhouse_uses_typed_dropdown_fallbacks_when_options_ar
         assert fill_response["ok"] is True
         assert page.locator("#country").get_attribute("data-selected") == "+1"
         assert page.locator("#state").get_attribute("data-selected") == "Illinois"
+        assert page.locator("#gender").get_attribute("data-selected") is None
+        assert page.locator("#race").get_attribute("data-selected") is None
+        assert page.locator("#veteran").get_attribute("data-selected") is None
+        assert page.locator("#disability").get_attribute("data-selected") is None
 
         browser.close()

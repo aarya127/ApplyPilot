@@ -219,6 +219,8 @@
     await enrichDynamicDropdownOptions(fields);
     state.lastPreviewFields = fields.map(({ elementRef, choiceRefs, ...field }) => field);
     const canonicalMappings = buildCanonicalMappings(fields, profile, settings || {});
+    const profileContactMappings = buildProfileContactMappings(fields, profile, settings || {});
+    const structuralPolicyMappings = buildStructuralPolicyMappings(fields, profile);
     const localMappings = fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean);
     const repeatableMappings = [
       ...mapRepeatableEmploymentFields(fields, profile),
@@ -228,7 +230,9 @@
     const backendMappings = settings?.autoMapAmbiguousFields === true
       ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field)), profile)
       : [];
-    const mappings = mergeMappings([...canonicalMappings, ...localMappings, ...repeatableMappings], backendMappings, fields)
+    const mappings = mergeMappings([...canonicalMappings, ...profileContactMappings, ...structuralPolicyMappings, ...localMappings, ...repeatableMappings], backendMappings, fields)
+      .concat(buildRawStructuralPolicyMappings(fields, profile))
+      .filter((mapping, index, all) => all.findIndex((item) => item.index === mapping.index) === index)
       .filter((mapping) => !isAlreadyCorrectlyFilledMapping(mapping, fields));
 
     return { fields, mappings, profile };
@@ -904,8 +908,9 @@
     if (ariaLabelledBy) {
       for (const id of ariaLabelledBy.split(/\s+/)) {
         const labelledBy = document.getElementById(id);
-        if (labelledBy?.innerText) {
-          pieces.push(labelledBy.innerText);
+        const labelledByText = compactText(labelledBy?.innerText || labelledBy?.textContent || "");
+        if (labelledByText) {
+          pieces.push(labelledByText);
         }
       }
     }
@@ -924,11 +929,6 @@
       pieces.push(wrappingLabelText);
     }
 
-    const precedingSimple = precedingSimpleFieldLabel(element);
-    if (precedingSimple && (!pieces.length || shouldPreferPrecedingSimpleLabel(pieces.join(" "), precedingSimple))) {
-      pieces.unshift(precedingSimple);
-    }
-
     if (pieces.length === 0) {
       const formGroup = element.closest(
         "[data-automation-id^='formField-'], .form-group, .field, .question, .application-field, [data-qa], [data-testid], li, p, div"
@@ -938,18 +938,22 @@
       }
     }
 
+    const precedingSimple = precedingSimpleFieldLabel(element);
+    if (precedingSimple && pieces.length === 0) {
+      pieces.unshift(precedingSimple);
+    }
+
     return compactText(unique(pieces).join(" "));
   }
 
   function shouldPreferPrecedingSimpleLabel(currentLabel, precedingLabel) {
     const current = normalize(currentLabel);
-    const preceding = normalize(precedingLabel);
 
-    if (!current || current === preceding) {
+    if (!current || current === normalize(precedingLabel)) {
       return true;
     }
 
-    if (isSimpleFieldLabelLine(precedingLabel) && !isSimpleFieldLabelLine(currentLabel)) {
+    if (isLowInformationText(currentLabel) || /enter name|name as per national identifier|national identifier/.test(current)) {
       return true;
     }
 
@@ -1223,6 +1227,10 @@
   function buildCanonicalMappings(fields, profile, settings) {
     return fields
       .map((field) => {
+        if (isScopedRepeatableDetailField(field)) {
+          return null;
+        }
+
         const kind = classifyFieldKind(field);
         if (!kind) {
           return null;
@@ -1235,6 +1243,62 @@
 
         const mapping = buildMapping(field, value, "field-kind", 0.97);
         return mapping ? { ...mapping, fieldKind: kind } : null;
+      })
+      .filter(Boolean);
+  }
+
+  function buildProfileContactMappings(fields, profile, settings) {
+    return fields
+      .map((field) => (
+        isScopedRepeatableDetailField(field) || isAmbiguousRepeatableLocationDateLabel(primaryFieldHaystack(field))
+          ? null
+          : mapProfileContactField(field, profile, settings, primaryFieldHaystack(field))
+      ))
+      .filter(Boolean);
+  }
+
+  function buildStructuralPolicyMappings(fields, profile) {
+    return fields
+      .map((field) => {
+        const primary = primaryFieldHaystack(field);
+        const rawKey = `${field.name || ""} ${field.id || ""} ${field.autocomplete || ""}`;
+
+        if (/work[\s_-]*authorization/.test(primary) || /work[_-]?authorization/i.test(rawKey)) {
+          return buildMapping(field, workAuthorizationAnswer(field, profile), "rule", 0.9);
+        }
+
+        if (/canadian[\s_-]*citizen|citizen[\s_-]*of[\s_-]*canada|canada[\s_-]*citizenship/.test(primary) || /canadian[_-]?citizen/i.test(rawKey)) {
+          return buildMapping(field, profile.canadianCitizen || profile.answers?.canadianCitizen || "Yes", "rule", 0.9);
+        }
+
+        if (/(u[\s._-]*s|united states).*(permanent resident|green card)|us[\s_-]*permanent[\s_-]*resident/.test(primary) || /us[_-]?permanent[_-]?resident/i.test(rawKey)) {
+          return buildMapping(field, profile.usPermanentResident || profile.answers?.usPermanentResident || "Yes", "rule", 0.9);
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+  }
+
+  function buildRawStructuralPolicyMappings(fields, profile) {
+    return fields
+      .map((field) => {
+        const key = `${field.name || ""} ${field.id || ""} ${field.autocomplete || ""}`;
+        let value = "";
+
+        const normalizedKey = normalize(key);
+
+        if ((/work/i.test(key) && /authorization/i.test(key)) || (/work/.test(normalizedKey) && /authorization/.test(normalizedKey))) {
+          value = profile.workAuthorization || profile.answers?.workAuthorization || "Yes";
+        } else if ((/canadian/i.test(key) && /citizen/i.test(key)) || (/canadian/.test(normalizedKey) && /citizen/.test(normalizedKey))) {
+          value = profile.canadianCitizen || profile.answers?.canadianCitizen || "Yes";
+        } else if ((/us/i.test(key) && /permanent/i.test(key) && /resident/i.test(key)) || (/us/.test(normalizedKey) && /permanent/.test(normalizedKey) && /resident/.test(normalizedKey))) {
+          value = profile.usPermanentResident || profile.answers?.usPermanentResident || "Yes";
+        }
+
+        return hasValue(value)
+          ? { index: field.index, value: compactText(value), source: "rule", confidence: 0.9 }
+          : null;
       })
       .filter(Boolean);
   }
@@ -1316,13 +1380,6 @@
       return FIELD_KIND.COUNTRY;
     }
 
-    if (/(current|previous|most recent).*(employer|company)|((employer|company).*(current|previous|most recent))/.test(full)) {
-      return FIELD_KIND.CURRENT_EMPLOYER;
-    }
-    if (/(current|previous|most recent).*(job title|title|position|role)|((job title|title|position|role).*(current|previous|most recent))/.test(full)) {
-      return FIELD_KIND.CURRENT_TITLE;
-    }
-
     return "";
   }
 
@@ -1332,7 +1389,7 @@
     }
 
     const isEmploymentDetail = isGenericRepeatableEmploymentDetailLabel(primary);
-    const hasEmploymentContext = /(work experience|employment|work history|professional experience|job history)/.test(full);
+    const hasEmploymentContext = /(my experience|work experience|employment|work history|professional experience|job history)/.test(full);
     return isEmploymentDetail && (hasEmploymentContext || isStrictRepeatableEmploymentDetailLabel(primary));
   }
 
@@ -1357,7 +1414,41 @@
       return true;
     }
 
-    return /^(location month|location year|from month|from year|to month|to year|start date month|start date year|end date month|end date year|month|year|role description|current role|currently work here|i currently work here)\s*\*?$/.test(primary);
+    if (isAmbiguousRepeatableLocationDateLabel(primary)) {
+      return true;
+    }
+
+    if (isProfileContactOrLocationField(primary)) {
+      return false;
+    }
+
+    return /(location month|location year|from month|from year|to month|to year|start date month|start date year|end date month|end date year|role description|current role|currently work here|i currently work here)/.test(primary)
+      || /^(location\s+)?(month|year)\b/.test(primary);
+  }
+
+  function isScopedRepeatableDetailField(field) {
+    const primary = primaryFieldHaystack(field);
+    const element = field.elementRef?.deref?.();
+    const sectionHeading = element ? normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`) : "";
+    const name = normalize(field.name || "");
+
+    if (/\[\]$/.test(field.name || "") || /\b(company|title|location|from|to|description|school|degree|discipline|field|url)\s*\[\]/.test(name)) {
+      return true;
+    }
+
+    if (/(my experience|work experience|employment|work history|professional experience|job history)/.test(sectionHeading)) {
+      return isGenericRepeatableEmploymentDetailLabel(primary);
+    }
+
+    if (/education|school|university/.test(sectionHeading)) {
+      return /(school|university|institution|degree|field of study|discipline|major|qualification|actual or expected|^from\b|^to\b|start.*year|end.*year|graduation)/.test(primary);
+    }
+
+    if (/websites?|urls?|links?/.test(sectionHeading)) {
+      return /(url|link|website)/.test(primary);
+    }
+
+    return false;
   }
 
   function answerForFieldKind(kind, field, profile, settings) {
@@ -1444,6 +1535,10 @@
     const fullHaystack = fullFieldHaystack(field);
     const phoneContextHaystack = normalize([primaryHaystack, field.surroundingText, field.nearbyText].join(" "));
 
+    if (isScopedRepeatableDetailField(field)) {
+      return null;
+    }
+
     if (isGenericRowDetailFieldForScopedMappers(field, primaryHaystack, fullHaystack)) {
       return null;
     }
@@ -1457,7 +1552,11 @@
       return null;
     }
 
-    if (isPhoneCountryCodeField(primaryHaystack) || isGreenhousePhoneCountryField(field, primaryHaystack, phoneContextHaystack)) {
+    if (
+      isPhoneCountryCodeField(primaryHaystack)
+      || isGreenhousePhoneCountryField(field, primaryHaystack, phoneContextHaystack)
+      || isGreenhouseBarePhoneCountryFallbackField(field, primaryHaystack)
+    ) {
       return buildMapping(field, phoneCountryCodeAnswer(field, profile), "rule", 0.88);
     }
 
@@ -1482,9 +1581,38 @@
       return agreementMapping;
     }
 
+    if (/work[\s_-]*authorization/.test(primaryHaystack)) {
+      return buildMapping(field, workAuthorizationAnswer(field, profile), "rule", 0.9);
+    }
+
+    const profileContactMapping = mapProfileContactField(field, profile, settings, primaryHaystack);
+    if (profileContactMapping) {
+      return profileContactMapping;
+    }
+
+    const savedAnswer = findSavedAnswer(field, profile);
+    if (hasValue(savedAnswer)) {
+      return buildMapping(field, savedAnswer, "saved-answer", 0.95);
+    }
+
     const workQuestionMapping = mapWorkQuestion(field, profile, haystack);
     if (workQuestionMapping) {
       return workQuestionMapping;
+    }
+
+    if (
+      isDebarmentOrProgramExclusionQuestion(haystack)
+      || isGovernmentEmploymentQuestion(haystack)
+      || isProfessionalDisciplineQuestion(haystack)
+    ) {
+      const complianceMapping = mapCommonAtsQuestion(field, profile, haystack);
+      if (complianceMapping) {
+        return complianceMapping;
+      }
+    }
+
+    if (isCompanyHistoryQuestion(haystack)) {
+      return null;
     }
 
     const commonQuestionMapping = mapCommonAtsQuestion(field, profile, haystack);
@@ -1500,10 +1628,6 @@
       return buildMapping(field, profile.answers?.contactCurrentEmployer || "No", "rule", 0.9);
     }
 
-    if (isCompanyHistoryQuestion(haystack)) {
-      return null;
-    }
-
     const companyQuestionMapping = mapCompanyQuestion(field, profile, haystack);
     if (companyQuestionMapping) {
       return companyQuestionMapping;
@@ -1514,14 +1638,23 @@
       return governmentFormMapping;
     }
 
-    const profileContactMapping = mapProfileContactField(field, profile, settings, primaryHaystack);
-    if (profileContactMapping) {
-      return profileContactMapping;
-    }
+    if (settings.autoFillSensitiveFields === true) {
+      if (/(disability status|have a disability|had one in the past|self-identification of disability)/.test(primaryHaystack)) {
+        const disabilityAnswer = profile.answers?.disabilityStatus || profile.disabilityStatus;
+        if (hasValue(disabilityAnswer)) {
+          return buildMapping(field, disabilityAnswer, "sensitive-rule", 0.82);
+        }
+      }
 
-    const savedAnswer = findSavedAnswer(field, profile);
-    if (hasValue(savedAnswer)) {
-      return buildMapping(field, savedAnswer, "saved-answer", 0.95);
+      const demographicMapping = mapSensitiveField(field, profile, primaryHaystack);
+      if (demographicMapping) {
+        return demographicMapping;
+      }
+
+      const voluntaryFallback = mapVoluntarySensitiveFallback(field, primaryHaystack);
+      if (voluntaryFallback) {
+        return voluntaryFallback;
+      }
     }
 
     if (/(essential functions|reasonable accommodation)/.test(primaryHaystack) && !/describe|need for|documentation/.test(primaryHaystack)) {
@@ -1626,38 +1759,23 @@
       );
     }
 
-    if (settings.autoFillSensitiveFields === true) {
-      if (/(disability status|have a disability|had one in the past|self-identification of disability)/.test(primaryHaystack)) {
-        const disabilityAnswer = profile.answers?.disabilityStatus || profile.disabilityStatus;
-        if (hasValue(disabilityAnswer)) {
-          return buildMapping(field, disabilityAnswer, "sensitive-rule", 0.82);
-        }
-      }
-
-      const demographicMapping = mapSensitiveField(field, profile, primaryHaystack);
-      if (demographicMapping) {
-        return demographicMapping;
-      }
-
-      const voluntaryFallback = mapVoluntarySensitiveFallback(field, primaryHaystack);
-      if (voluntaryFallback) {
-        return voluntaryFallback;
-      }
-    }
-
     return null;
   }
 
   function mapProfileContactField(field, profile, settings, haystack) {
-    if (isLinkedinProfileField(haystack)) {
+    if (isAmbiguousRepeatableLocationDateLabel(haystack)) {
+      return null;
+    }
+
+    if (isLinkedinProfileField(haystack) || /\blinkedin\b|linked\s*in/.test(haystack)) {
       return hasValue(profile.linkedin) ? buildMapping(field, profile.linkedin, "rule", 0.92) : null;
     }
 
-    if (isGithubProfileField(haystack)) {
+    if (isGithubProfileField(haystack) || /\bgithub\b|git\s*hub/.test(haystack)) {
       return hasValue(profile.github) ? buildMapping(field, profile.github, "rule", 0.92) : null;
     }
 
-    if (isPortfolioProfileField(haystack)) {
+    if (isPortfolioProfileField(haystack) || /\bportfolio\b|personal\s+(website|site)/.test(haystack)) {
       const value = profile.portfolio || profile.website || profile.personalWebsite;
       return hasValue(value) ? buildMapping(field, value, "rule", 0.92) : null;
     }
@@ -1677,8 +1795,7 @@
     if (/^location\b|location city|city location/.test(haystack)) {
       const address = selectAddress(profile, settings, haystack);
       const applicationLocation = selectApplicationLocation(profile, settings, address || {});
-      const value = applicationLocation.full
-        || [applicationLocation.city, applicationLocation.region].filter(Boolean).join(", ")
+      const value = locationAnswerForField(field, applicationLocation, address || {})
         || profile.location;
       return hasValue(value) ? buildMapping(field, value, "rule", 0.9) : null;
     }
@@ -1718,10 +1835,9 @@
   }
 
   function isGreenhousePhoneCountryField(field, primaryHaystack, fullHaystack) {
-    return /^country\s*(required)?\s*\*?$|^required\s+country\s*\*?$/.test(primaryHaystack)
+    const label = normalize(field.label || "");
+    return (/^country\s*(required)?\s*\*?$|^required\s+country\s*\*?$/.test(primaryHaystack) || /^country\s*\*?$/.test(label))
       && isGreenhouseHost()
-      && isNearPhoneNumberField(field)
-      && (/\bphone\b/.test(fullHaystack) || hasPhoneCountryCodeOptions(field.options))
       && !/(currently reside|current residence|country.*reside|country region|country\/region|location|city)/.test(primaryHaystack)
       && (!field.options?.length || hasPhoneCountryCodeOptions(field.options));
   }
@@ -1740,6 +1856,14 @@
     const fullHaystack = fullFieldHaystack(field);
     return isPhoneCountryCodeField(fullHaystack)
       || isGreenhousePhoneCountryField(field, primaryHaystack, fullHaystack);
+  }
+
+  function isGreenhouseBarePhoneCountryFallbackField(field, primaryHaystack) {
+    const label = normalize(field.label || "");
+    return isGreenhouseHost()
+      && (/^country\s*(required)?\s*\*?$|^required\s+country\s*\*?$/.test(primaryHaystack) || /^country\s*\*?$/.test(label))
+      && !/(currently reside|current residence|country.*reside|country region|country\/region|location|city)/.test(primaryHaystack)
+      && (!field.options?.length || hasPhoneCountryCodeOptions(field.options));
   }
 
   function isNearPhoneNumberField(field) {
@@ -1813,12 +1937,11 @@
   function findSavedAnswer(field, profile) {
     const haystack = fieldHaystack(field);
 
-    if (
-      isCoreProfileField(field)
-      || isLowInformationChoiceLabel(field)
-      || isAiOnlyQuestion(haystack)
-      || isCompanyHistoryQuestion(haystack)
-    ) {
+    if (isCoreProfileField(field)) {
+      return "";
+    }
+
+    if (isLowInformationChoiceLabel(field) && !savedAnswerQuestionContext(field)) {
       return "";
     }
 
@@ -1841,6 +1964,17 @@
     }
 
     return "";
+  }
+
+  function savedAnswerQuestionContext(field) {
+    return firstMeaningfulQuestion([
+      field.questionText,
+      field.surroundingText,
+      field.nearbyText,
+      field.placeholder,
+      field.name,
+      field.id
+    ].join("\n"));
   }
 
   function isLowInformationChoiceLabel(field) {
@@ -1906,7 +2040,7 @@
   function isWorkEligibilityQuestion(haystack) {
     return /(legally\s+)?(authorized|eligible|permitted|allowed).*(work|employment)/.test(haystack)
       || /(work|employment).*(authorized|eligible|authorization|eligibility)/.test(haystack)
-      || /work authorization|proof of authorization|legally eligible/.test(haystack);
+      || /work[\s_-]*authorization|proof of authorization|legally eligible/.test(haystack);
   }
 
   function hasSponsorshipTerms(haystack) {
@@ -1994,7 +2128,7 @@
       return buildMapping(field, sponsorshipAnswer(field, profile), "rule", 0.9);
     }
 
-    if (isAuthorizedCountriesField(haystack)) {
+    if (isAuthorizedCountriesField(primaryFieldHaystack(field))) {
       return buildMapping(field, profile.answers?.authorizedCountries || "Canada and United States", "rule", 0.9);
     }
 
@@ -2076,6 +2210,22 @@
       return buildMapping(field, profile.answers?.spouseMilitaryService || "No", "rule", 0.88);
     }
 
+    if (/(veteran|protected veteran|armed forces|military service)/.test(haystack)) {
+      return buildMapping(field, profile.veteranStatus || profile.answers?.veteranStatus || "No", "rule", 0.88);
+    }
+
+    if (isDebarmentOrProgramExclusionQuestion(haystack)) {
+      return buildMapping(field, profile.answers?.governmentProgramExclusion || "No", "rule", 0.88);
+    }
+
+    if (isGovernmentEmploymentQuestion(haystack)) {
+      return buildMapping(field, profile.answers?.priorGovernmentEmployment || "No", "rule", 0.88);
+    }
+
+    if (isProfessionalDisciplineQuestion(haystack)) {
+      return buildMapping(field, profile.answers?.professionalDiscipline || "No", "rule", 0.88);
+    }
+
     if (isFamilyOrRelationshipConflictQuestion(haystack)) {
       return buildMapping(field, profile.answers?.relativesAtCompany || "No", "rule", 0.88);
     }
@@ -2107,6 +2257,21 @@
     return null;
   }
 
+  function isDebarmentOrProgramExclusionQuestion(haystack) {
+    return /(excluded|exclusion|debarred|debarment|suspended|ineligible).{0,140}(federal|state|health care|healthcare|medicare|medicaid|government|procurement|program)/.test(haystack)
+      || /(federal|state|health care|healthcare|medicare|medicaid|government|procurement|program).{0,140}(excluded|exclusion|debarred|debarment|suspended|ineligible)/.test(haystack);
+  }
+
+  function isGovernmentEmploymentQuestion(haystack) {
+    return /(employed|employment|worked).{0,120}(federal|state|local government|government entity|civil service|va hospital|military)/.test(haystack)
+      || /(federal|state|local government|government entity|civil service|va hospital|military).{0,120}(employed|employment|worked)/.test(haystack);
+  }
+
+  function isProfessionalDisciplineQuestion(haystack) {
+    return /(disciplinary action|discipline|fines?|citations?|penalties|reprimands?|reprovals?|probation|practice restrictions?|revocation|surrender|suspension).{0,180}(professional license|license|certification|credential)/.test(haystack)
+      || /(professional license|license|certification|credential).{0,180}(disciplinary action|discipline|fines?|citations?|penalties|reprimands?|reprovals?|probation|practice restrictions?|revocation|surrender|suspension)/.test(haystack);
+  }
+
   function previousCompanyAnswer(profile, haystack) {
     const companies = normalizedWorkExperience(profile)
       .map((item) => normalize(item.company))
@@ -2126,6 +2291,10 @@
   function relocationAnswer(field, profile) {
     const explicit = profile.relocation || profile.answers?.relocation;
     const options = field.options || [];
+    if (!options.length) {
+      return explicit || "Open to relocation";
+    }
+
     const preferred = options.find((option) => /anywhere/i.test(option.label || option.value || ""))
       || options.find((option) => /nationwide/i.test(option.label || option.value || ""))
       || options.find((option) => /yes/i.test(option.label || option.value || ""))
@@ -2179,19 +2348,21 @@
   }
 
   function mapGovernmentSelfIdField(field, profile, primaryHaystack, fullHaystack) {
-    if (!isCc305DisabilityFormContext(fullHaystack)) {
+    if (!isCc305DisabilityFormContext(contextForGovernmentSelfId(field, fullHaystack))) {
       return null;
     }
+
+    const label = normalize(field.label || "");
 
     if (/(employee id|employee number|worker id)/.test(primaryHaystack)) {
       return null;
     }
 
-    if (/^name\s*(required)?$|^full name\s*(required)?$/.test(primaryHaystack)) {
+    if (/^name\s*\*?$|^full name\s*\*?$/.test(label) || /^name\s*(required)?$|^full name\s*(required)?$/.test(primaryHaystack)) {
       return hasValue(profile.fullName) ? buildMapping(field, profile.fullName, "rule", 0.9) : null;
     }
 
-    if (/^date\s*(required)?$|^today s date\s*(required)?$/.test(primaryHaystack)) {
+    if (/^date\s*\*?$|^today s date\s*\*?$/.test(label) || /^date\s*(required)?$|^today s date\s*(required)?$/.test(primaryHaystack)) {
       return buildMapping(field, todayDateValue(), "rule", 0.9);
     }
 
@@ -2200,6 +2371,17 @@
 
   function isCc305DisabilityFormContext(haystack) {
     return /(cc-?305|omb control number 1250-0005|voluntary self-identification of disability|self identification of disability|please check one of the boxes below)/.test(haystack);
+  }
+
+  function contextForGovernmentSelfId(field, fullHaystack) {
+    const element = field.elementRef?.deref?.();
+    const section = element?.closest?.("section, fieldset, form, [role='group'], div");
+    return normalize([
+      fullHaystack,
+      section?.innerText || section?.textContent || "",
+      element ? nearestSectionHeadingText(element) : "",
+      element ? nearestExplicitSectionHeadingText(element) : ""
+    ].join(" "));
   }
 
   function isCompanyHistoryQuestion(haystack) {
@@ -2239,6 +2421,10 @@
 
   function mapLocationField(field, profile, settings, address, haystack) {
     if (!address) {
+      return null;
+    }
+
+    if (isAmbiguousRepeatableLocationDateLabel(haystack)) {
       return null;
     }
 
@@ -2585,9 +2771,9 @@
       return false;
     }
 
-    const haystack = fullFieldHaystack(field);
+    const haystack = primaryFieldHaystack(field);
     return isGreenhousePhoneCountryCodeLikeField(field)
-      || /(gender|race|racial|ethnic|ethnicity|veteran|protected veteran|disability status|have a disability|had one in the past|u\.?s\.?\s*state|state.*currently reside|currently reside.*state)/.test(haystack);
+      || /(u\.?s\.?\s*state|state.*currently reside|currently reside.*state)/.test(haystack);
   }
 
   function mapVoluntarySensitiveFallback(field, haystack) {
@@ -2778,33 +2964,47 @@
 
     for (const field of fields) {
       const haystack = normalize([field.label, field.name, field.id, field.placeholder].join(" "));
+      const fieldName = normalize(field.name || "");
+      const baseName = fieldName.replace(/\[\]$/, "");
 
       if (!isEmploymentField(field, haystack)) {
         continue;
       }
 
-      if (/^company\b|\bcompany name\b|\bemployer\b/.test(haystack) && !/website|url/.test(haystack)) {
+      if (baseName === "company") {
+        buckets.company.push(field);
+      } else if (["title", "job title"].includes(baseName)) {
+        buckets.title.push(field);
+      } else if (baseName === "location") {
+        buckets.location.push(field);
+      } else if (baseName === "from") {
+        buckets.startDate.push(field);
+      } else if (baseName === "to") {
+        buckets.endDate.push(field);
+      } else if (baseName === "description") {
+        buckets.description.push(field);
+      } else if (/^company\b|\bcompany name\b|\bemployer\b/.test(haystack) && !/website|url/.test(haystack)) {
         buckets.company.push(field);
       } else if (/(^|\b)title\b|job title/.test(haystack) || (/\bposition\b/.test(haystack) && /employment|experience|work history/.test(normalize(field.surroundingText)))) {
         buckets.title.push(field);
-      } else if (/\blocation\b/.test(haystack)) {
-        buckets.location.push(field);
       } else if (/^from\b|from date|date from/.test(haystack)) {
         buckets.startDate.push(field);
       } else if (/^to\b|to date|date to/.test(haystack)) {
         buckets.endDate.push(field);
-      } else if (/start date.*month|start month/.test(haystack)) {
+      } else if (/(start date.*month|start month)/.test(haystack)) {
         buckets.startMonth.push(field);
-      } else if (/start date.*year|start year/.test(haystack)) {
+      } else if (/(start date.*year|start year)/.test(haystack)) {
         buckets.startYear.push(field);
-      } else if (/end date.*month|end month/.test(haystack)) {
+      } else if (/(end date.*month|end month)/.test(haystack)) {
         buckets.endMonth.push(field);
-      } else if (/end date.*year|end year/.test(haystack)) {
+      } else if (/(end date.*year|end year)/.test(haystack)) {
         buckets.endYear.push(field);
       } else if (/current role|currently work|current position/.test(haystack)) {
         buckets.currentRole.push(field);
       } else if (/role description|description|responsibilities|achievements/.test(haystack)) {
         buckets.description.push(field);
+      } else if (/\blocation\b/.test(haystack) && !/\b(month|year|current role|currently work)\b/.test(haystack)) {
+        buckets.location.push(field);
       }
     }
 
@@ -2864,11 +3064,11 @@
 
     const mappings = [];
     education.forEach((item, index) => {
-      addRepeatableMapping(mappings, buckets.school[index], item.school);
-      addRepeatableMapping(mappings, buckets.degree[index], item.degree);
-      addRepeatableMapping(mappings, buckets.field[index], item.fieldOfStudy);
-      addRepeatableMapping(mappings, buckets.startYear[index], item.startYear);
-      addRepeatableMapping(mappings, buckets.endYear[index], item.endYear);
+      addRepeatableMapping(mappings, buckets.school[index], item.school, "education");
+      addRepeatableMapping(mappings, buckets.degree[index], item.degree, "education");
+      addRepeatableMapping(mappings, buckets.field[index], item.fieldOfStudy, "education");
+      addRepeatableMapping(mappings, buckets.startYear[index], item.startYear, "education");
+      addRepeatableMapping(mappings, buckets.endYear[index], item.endYear, "education");
     });
 
     return mappings;
@@ -2893,18 +3093,18 @@
 
     const mappings = [];
     links.forEach((url, index) => {
-      addRepeatableMapping(mappings, urlFields[index], url);
+      addRepeatableMapping(mappings, urlFields[index], url, "website");
     });
 
     return mappings;
   }
 
-  function addRepeatableMapping(mappings, field, value) {
+  function addRepeatableMapping(mappings, field, value, source = "experience") {
     if (!field || !hasValue(value)) {
       return;
     }
 
-    const mapping = buildMapping(field, value, "experience", 0.92);
+    const mapping = buildMapping(field, value, source, 0.92);
     if (mapping) {
       mappings.push(mapping);
     }
@@ -2942,20 +3142,24 @@
       return false;
     }
 
-    return /(employment|experience|work history|\bcompany\b|company name|employer|\btitle\b|job title|current role|currently work|start date|end date|position|\blocation\b|\bfrom\b|\bto\b|role description|responsibilities|achievements)/.test(fullText);
+    return /(my experience|employment|experience|work history|\bcompany\b|company name|employer|\btitle\b|job title|current role|currently work|start date|end date|position|\blocation\b|\bfrom\b|\bto\b|role description|responsibilities|achievements)/.test(fullText);
   }
 
   function employmentContextForField(field, text) {
-    if (/(employment|work experience|work history|professional experience|job history)/.test(text)) {
+    const element = field.elementRef?.deref?.();
+    if (!element) {
+      return /(my experience|work experience|employment|work history|professional experience|job history)/.test(text)
+        && text.length < 500;
+    }
+
+    const explicitHeading = nearestExplicitSectionHeadingText(element);
+    if (/(my experience|employment|work experience|work history|professional experience|job history)/.test(explicitHeading)) {
       return true;
     }
 
-    const element = field.elementRef?.deref?.();
-    if (!element) {
-      return false;
-    }
-
-    return /(employment|work experience|work history|professional experience|job history)/.test(nearestSectionHeadingText(element));
+    const localText = normalize(element.closest("section, fieldset, [role='group'], [data-automation-id*='formField'], div")?.innerText || "");
+    return /(my experience|employment|work experience|work history|professional experience|job history)/.test(localText)
+      && localText.length < 500;
   }
 
   function isEducationField(field, haystack) {
@@ -2963,7 +3167,7 @@
     const sectionHeading = element ? normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`) : "";
     const primaryHaystack = normalize([field.label, field.name, field.id, field.placeholder, field.ariaLabel].join(" "));
 
-    if (/work experience|employment|professional experience|job history/.test(sectionHeading)) {
+    if (/my experience|work experience|employment|professional experience|job history/.test(sectionHeading)) {
       return false;
     }
 
@@ -3697,7 +3901,7 @@
       .filter(isVisibleElement)
       .filter((item) => {
         const text = normalize(item.innerText || item.textContent || "");
-        return /^(education|websites?|work experience|employment|certifications?|languages?|social network urls?)$/.test(text);
+        return /^(education|websites?|my experience|work experience|employment|certifications?|languages?|social network urls?)$/.test(text);
       })
       .filter((heading) => followsNode(heading, element))
       .sort((left, right) => topOfElement(right) - topOfElement(left));
@@ -3710,7 +3914,7 @@
       .filter(isVisibleElement)
       .filter((item) => {
         const text = normalize(item.innerText || item.textContent || "");
-        return /^(education|websites?|work experience|employment|certifications?|languages?|social network urls?)$/.test(text);
+        return /^(education|websites?|my experience|work experience|employment|certifications?|languages?|social network urls?)$/.test(text);
       })
       .filter((heading) => followsNode(heading, element))
       .sort((left, right) => topOfElement(right) - topOfElement(left));
@@ -3800,6 +4004,10 @@
   function buildMapping(field, value, source, confidence) {
     const normalizedValue = normalizedMappingValue(field, value);
 
+    if (isSensitiveOptionFieldWithoutOptions(field)) {
+      return null;
+    }
+
     if (field.options?.length && !hasValue(normalizedValue)) {
       return null;
     }
@@ -3828,6 +4036,10 @@
       return true;
     }
 
+    if (isSensitiveOptionFieldWithoutOptions(field)) {
+      return false;
+    }
+
     if (!/rule|policy|llm|ai|saved/.test(normalize(source))) {
       return false;
     }
@@ -3839,6 +4051,15 @@
     return isPolicyLikeQuestion(haystack);
   }
 
+  function isSensitiveOptionFieldWithoutOptions(field) {
+    if (field.options?.length) {
+      return false;
+    }
+
+    const primary = primaryFieldHaystack(field);
+    return /(gender|race|racial|ethnic|ethnicity|veteran|protected veteran|disability status|have a disability|had one in the past|sexual orientation|orientation)/.test(primary);
+  }
+
   function isPolicyLikeQuestion(haystack) {
     return isAiOnlyQuestion(haystack)
       || isWorkEligibilityQuestion(haystack)
@@ -3848,6 +4069,15 @@
   function isOptionLikeField(field) {
     const haystack = fullFieldHaystack(field);
     const primary = primaryFieldHaystack(field);
+    const controlKind = normalize(`${field.tag || ""} ${field.type || ""}`);
+
+    if (
+      /^(input|textarea|contenteditable|textbox)\b/.test(controlKind)
+      && !/select|combobox|button|listbox/.test(controlKind)
+      && !/select one|select\.\.\.|choose/.test(primary)
+    ) {
+      return false;
+    }
 
     if (
       isLinkedinProfileField(primary)
@@ -3855,6 +4085,7 @@
       || isPortfolioProfileField(primary)
       || isEmailProfileField(primary)
       || isPhoneNumberField(primary)
+      || isWebsiteUrlTextField(field)
     ) {
       return false;
     }
@@ -3868,6 +4099,30 @@
       || (/(degree|discipline|field of study|major|qualification)/.test(haystack) && /select/.test(haystack));
   }
 
+  function isAmbiguousRepeatableLocationDateLabel(primary) {
+    return /^(location\s+)?(month|year)\s*\*?$/.test(primary)
+      || /^location\s+(month|year)\b/.test(primary);
+  }
+
+  function isWebsiteUrlTextField(field) {
+    const primary = primaryFieldHaystack(field);
+    const element = field.elementRef?.deref?.();
+    const sectionHeading = element ? normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`) : "";
+    const tag = normalize(field.tag || "");
+    const type = normalize(field.type || "");
+
+    if (!/^(url|link)\s*\*?$/.test(primary) && !/(website|url|link)/.test(primary)) {
+      return false;
+    }
+
+    if (/select|combobox|button|listbox/.test(`${tag} ${type}`)) {
+      return false;
+    }
+
+    return /websites?|urls?|links?/.test(sectionHeading)
+      || /^(url|link)\s*\*?$/.test(primary);
+  }
+
   function normalizedMappingValue(field, value) {
     const policyValue = normalizedPolicyValue(field, value);
     if (policyValue !== null) {
@@ -3876,7 +4131,8 @@
 
     const exactOption = bestOptionValue(field, value);
     if (field.options?.length) {
-      return exactOption || "";
+      const normalizedValue = normalize(value);
+      return exactOption || (/^(yes|no)$/.test(normalizedValue) ? compactText(value) : "");
     }
 
     return value;
@@ -3991,7 +4247,10 @@
         continue;
       }
 
-      if (!existing || Number(candidate.confidence || 0) >= Number(existing.confidence || 0)) {
+      if (!existing || mappingPriority(candidate) > mappingPriority(existing) || (
+        mappingPriority(candidate) === mappingPriority(existing)
+        && Number(candidate.confidence || 0) >= Number(existing.confidence || 0)
+      )) {
         byIndex.set(mapping.index, candidate);
       }
     }
@@ -4008,7 +4267,10 @@
         continue;
       }
 
-      if (!existing || Number(candidate.confidence || 0) >= Number(existing.confidence || 0)) {
+      if (!existing || mappingPriority(candidate) > mappingPriority(existing) || (
+        mappingPriority(candidate) === mappingPriority(existing)
+        && Number(candidate.confidence || 0) >= Number(existing.confidence || 0)
+      )) {
         byIndex.set(mapping.index, candidate);
       }
     }
@@ -4021,6 +4283,10 @@
     const current = field?.value;
 
     if (!hasValue(current) || isPlaceholderValue(current)) {
+      return false;
+    }
+
+    if (field && isPhoneCountryCodeField(primaryFieldHaystack(field))) {
       return false;
     }
 
@@ -4052,6 +4318,32 @@
     return false;
   }
 
+  function mappingPriority(mapping) {
+    const source = normalize(mapping?.source || "");
+
+    if (/^(experience|education|website)$/.test(source)) {
+      return 70;
+    }
+
+    if (/^(rule|sensitive-rule|saved-answer)$/.test(source)) {
+      return 60;
+    }
+
+    if (/audit|policy/.test(source)) {
+      return 55;
+    }
+
+    if (/llm|ai/.test(source)) {
+      return 50;
+    }
+
+    if (source === "field-kind") {
+      return 20;
+    }
+
+    return 40;
+  }
+
   function isProfileContactOrLocationField(haystack) {
     return isLinkedinProfileField(haystack)
       || isGithubProfileField(haystack)
@@ -4066,6 +4358,13 @@
 
     if (!field) {
       return mapping;
+    }
+
+    if (isSensitiveOptionFieldWithoutOptions(field)) {
+      return {
+        ...mapping,
+        value: ""
+      };
     }
 
     if (!field.options?.length && isOptionLikeField(field) && !canAttemptUnoptionedOptionLikeMapping(field, mapping.value, mapping.source)) {
@@ -4159,6 +4458,10 @@
       return false;
     }
 
+    if (field && isPhoneCountryCodeField(primaryFieldHaystack(field))) {
+      return false;
+    }
+
     if (mappingValueMatchesField(current, mapping.value)) {
       return true;
     }
@@ -4224,7 +4527,7 @@
 
     if (role === "combobox" || hasListboxPopup) {
       const current = getCurrentValue(element);
-      if (valueMatches(current, mapping.value) || optionMatches(current, "", mapping.value)) {
+      if (!isPhoneCountryCodeField(primaryFieldHaystack(field)) && (valueMatches(current, mapping.value) || optionMatches(current, "", mapping.value))) {
         return false;
       }
 
@@ -4233,7 +4536,7 @@
 
     if (field.options?.length && dropdownTrigger(element)) {
       const current = getCurrentValue(element);
-      if (valueMatches(current, mapping.value) || optionMatches(current, "", mapping.value)) {
+      if (!isPhoneCountryCodeField(primaryFieldHaystack(field)) && (valueMatches(current, mapping.value) || optionMatches(current, "", mapping.value))) {
         return false;
       }
 
@@ -4662,10 +4965,17 @@
     }
 
     let filled = 0;
-    const degree = education.degree || "Bachelor of Science";
+    const school = education.school || profile.school;
+    const schoolControl = findWorkdayDropdownByLabel(/^(school or university|school|university|college|institution)\s*\*?$/i);
+
+    if (schoolControl && hasValue(school) && !valueMatches(getCurrentValue(schoolControl), school)) {
+      filled += await fillCombobox(schoolControl, school) ? 1 : 0;
+    }
+
+    const degree = education.degree || profile.degree;
     const degreeControl = findWorkdayDropdownByLabel(/^degree\s*\*?$/i);
 
-    if (degreeControl && !valueMatches(getCurrentValue(degreeControl), degree)) {
+    if (degreeControl && hasValue(degree) && !valueMatches(getCurrentValue(degreeControl), degree)) {
       filled += await fillCombobox(degreeControl, degree) ? 1 : 0;
     }
 

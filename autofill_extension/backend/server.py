@@ -410,8 +410,10 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "When context is insufficient, skip the field instead of guessing. "
                 "Use exact option labels when a field has options. "
                 "For dropdown, radio, checkbox, and combobox fields, choose only from the supplied options. "
+                "If a dropdown, radio, checkbox, or combobox field has no supplied options, skip it unless it is a typed location/state field or phone-country-code field. "
                 "If the best semantic answer is not an exact option, choose the closest supplied option label. "
                 "Never return profile wording for an optioned field unless it exactly equals one supplied option. "
+                "For gender fields, never answer Cisgender man unless that exact option is supplied; choose the closest supplied option such as Male/Man when present, otherwise skip. "
                 "For Degree, Discipline, Field of Study, Major, and Qualification dropdowns, never answer with a free-text degree or major; use only a supplied option label, or skip if options are missing. "
                 "For disability, demographic, veteran, work authorization, sponsorship, relocation, consent, and yes/no fields, compare the meaning of every supplied option and return the single closest option label exactly. "
                 "Prefer explicit profile facts and resume facts over inference. "
@@ -1160,6 +1162,18 @@ def policy_answer_for_field(
     if "veteran" in haystack:
         return best_available_option(policies["veteranStatus"], options) or policies["veteranStatus"]
 
+    if is_debarment_or_program_exclusion_question(haystack):
+        answer = profile.get("answers", {}).get("governmentProgramExclusion") or "No"
+        return best_available_option(answer, options) or answer
+
+    if is_government_employment_question(haystack):
+        answer = profile.get("answers", {}).get("priorGovernmentEmployment") or "No"
+        return best_available_option(answer, options) or answer
+
+    if is_professional_discipline_question(haystack):
+        answer = profile.get("answers", {}).get("professionalDiscipline") or "No"
+        return best_available_option(answer, options) or answer
+
     demographic_answer = demographic_policy_answer(haystack, field, profile)
     if demographic_answer is not None:
         return demographic_answer
@@ -1206,6 +1220,27 @@ def is_previous_company_question(haystack: str) -> bool:
             any(term in haystack for term in ["previously", "currently", "directly", "ever"])
             and any(term in haystack for term in ["employed", "worked", "paycheck", "w 2"])
         )
+    )
+
+
+def is_debarment_or_program_exclusion_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"(excluded|exclusion|debarred|debarment|suspended|ineligible).{0,140}(federal|state|health care|healthcare|medicare|medicaid|government|procurement|program)", haystack)
+        or re.search(r"(federal|state|health care|healthcare|medicare|medicaid|government|procurement|program).{0,140}(excluded|exclusion|debarred|debarment|suspended|ineligible)", haystack)
+    )
+
+
+def is_government_employment_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"(employed|employment|worked).{0,120}(federal|state|local government|government entity|civil service|va hospital|military)", haystack)
+        or re.search(r"(federal|state|local government|government entity|civil service|va hospital|military).{0,120}(employed|employment|worked)", haystack)
+    )
+
+
+def is_professional_discipline_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"(disciplinary action|discipline|fines?|citations?|penalties|reprimands?|reprovals?|probation|practice restrictions?|revocation|surrender|suspension).{0,180}(professional license|license|certification|credential)", haystack)
+        or re.search(r"(professional license|license|certification|credential).{0,180}(disciplinary action|discipline|fines?|citations?|penalties|reprimands?|reprovals?|probation|practice restrictions?|revocation|surrender|suspension)", haystack)
     )
 
 
