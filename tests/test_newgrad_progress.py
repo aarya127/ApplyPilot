@@ -4,6 +4,7 @@ from datetime import datetime
 
 import app
 import extract_jobs
+from application_agent.agent.apply_queue import ApplyQueue
 
 
 def test_extract_newgrad_jobs_reports_progress(monkeypatch):
@@ -47,7 +48,7 @@ def test_newgrad_status_returns_serializable_progress():
         app._newgrad_cache_loading = True
         app._newgrad_cache["jobs"] = [{"title": "Example"}]
         app._newgrad_cache["errors"] = []
-        app._newgrad_cache["updated_at"] = datetime(2026, 6, 18, 0, 44, 56)
+        app._newgrad_cache["updated_at"] = datetime.now()
         app._newgrad_progress["percent"] = 42
         app._newgrad_progress["message"] = "Scanning Software Engineering"
         app._newgrad_progress["detail"] = {"phase": "scrolling"}
@@ -81,7 +82,7 @@ def test_newgrad_progress_panel_hidden_after_load_completes():
             }
         ]
         app._newgrad_cache["errors"] = []
-        app._newgrad_cache["updated_at"] = datetime(2026, 6, 18, 0, 44, 56)
+        app._newgrad_cache["updated_at"] = datetime.now()
         app._newgrad_progress["percent"] = 100
         app._newgrad_progress["message"] = "Loaded 1 jobs"
 
@@ -91,3 +92,51 @@ def test_newgrad_progress_panel_hidden_after_load_completes():
     assert response.status_code == 200
     assert 'id="progressPanel"' in html
     assert 'hidden style="display: none;"' in html
+
+
+def test_shortlist_routes_add_queue_and_render_reports(tmp_path, monkeypatch):
+    queue = ApplyQueue(tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(app, "apply_queue", queue)
+    client = app.app.test_client()
+
+    response = client.post(
+        "/shortlist",
+        data={
+            "source": "newgrad",
+            "title": "Backend Engineer",
+            "company": "Example",
+            "location": "Remote",
+            "url": "https://jobs.example.test/backend",
+            "category": "Software Engineering",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    jobs = queue.list_shortlist()
+    assert len(jobs) == 1
+    assert jobs[0]["title"] == "Backend Engineer"
+
+    status_response = client.post(
+        f"/shortlist/{jobs[0]['id']}/status",
+        json={"status": "queued"},
+    )
+    assert status_response.status_code == 200
+    assert status_response.json["job"]["status"] == "queued"
+
+    queue.log_report(
+        job_id=jobs[0]["id"],
+        url=jobs[0]["url"],
+        status="paused_before_submit",
+        report={"status": "paused_before_submit", "filled": 5, "skipped": 1, "confidence": 0.8},
+    )
+
+    page = client.get("/shortlist")
+    html = page.data.decode()
+    assert page.status_code == 200
+    assert "Backend Engineer" in html
+    assert "filled 5" in html
+
+    reports = client.get(f"/application-reports?job_id={jobs[0]['id']}")
+    assert reports.status_code == 200
+    assert reports.json["reports"][0]["status"] == "paused_before_submit"

@@ -9,10 +9,12 @@ import urllib.parse
 import json
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
+from application_agent.agent.apply_queue import ApplyQueue
 from extract_jobs import extract_newgrad_jobs
 
 app = Flask(__name__)
 app.secret_key = "hr-system-applied-tracker-key"
+apply_queue = ApplyQueue()
 @app.route("/")
 def index() -> str:
     return redirect(url_for("applied"))
@@ -142,6 +144,7 @@ def newgrad() -> str:
 
     # Sort newest first — posted is YYYY-MM-DD so lexicographic sort works
     filtered_jobs.sort(key=lambda j: j.get("posted") or "", reverse=True)
+    shortlisted_urls = apply_queue.shortlisted_urls()
 
     return render_template(
         "newgrad.html",
@@ -154,7 +157,78 @@ def newgrad() -> str:
         all_categories=all_categories,
         category_filter=category_filter,
         search_query=search_query,
+        shortlisted_urls=shortlisted_urls,
     )
+
+
+@app.route("/shortlist")
+def shortlist() -> str:
+    status_filter = request.args.get("status", "all").strip().lower()
+    jobs = apply_queue.list_shortlist(status_filter)
+    reports = apply_queue.list_reports(limit=100)
+    latest_report_by_job: dict[int, dict[str, Any]] = {}
+    for report in reports:
+        job_id = report.get("job_id")
+        if isinstance(job_id, int) and job_id not in latest_report_by_job:
+            latest_report_by_job[job_id] = report
+
+    counts = {
+        "all": len(apply_queue.list_shortlist("all")),
+        "shortlisted": len(apply_queue.list_shortlist("shortlisted")),
+        "queued": len(apply_queue.list_shortlist("queued")),
+        "running": len(apply_queue.list_shortlist("running")),
+        "paused": len(apply_queue.list_shortlist("paused")),
+        "submitted": len(apply_queue.list_shortlist("submitted")),
+        "failed": len(apply_queue.list_shortlist("failed")),
+    }
+
+    return render_template(
+        "shortlist.html",
+        jobs=jobs,
+        counts=counts,
+        status_filter=status_filter,
+        latest_report_by_job=latest_report_by_job,
+    )
+
+
+@app.route("/shortlist", methods=["POST"])
+def add_to_shortlist():
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    try:
+        job = apply_queue.add_shortlist(payload or {})
+    except ValueError as exc:
+        if request.is_json:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return redirect(url_for("newgrad"))
+
+    if request.is_json:
+        return jsonify({"ok": True, "job": job})
+
+    return redirect(request.referrer or url_for("shortlist"))
+
+
+@app.route("/shortlist/<int:job_id>/status", methods=["POST"])
+def update_shortlist_status(job_id: int):
+    payload = request.get_json(silent=True) if request.is_json else request.form.to_dict()
+    status = (payload or {}).get("status", "")
+    try:
+        job = apply_queue.update_status(job_id, status)
+    except ValueError as exc:
+        if request.is_json:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return redirect(request.referrer or url_for("shortlist"))
+
+    if request.is_json:
+        return jsonify({"ok": bool(job), "job": job})
+
+    return redirect(request.referrer or url_for("shortlist"))
+
+
+@app.route("/application-reports")
+def application_reports():
+    job_id = request.args.get("job_id", "").strip()
+    parsed_job_id = int(job_id) if job_id.isdigit() else None
+    return jsonify({"reports": apply_queue.list_reports(job_id=parsed_job_id)})
 
 
 # ---------------------------------------------------------------------------

@@ -29,11 +29,10 @@ def main() -> None:
         input()
 
         page = context.pages[-1] if context.pages else page
-        agent.complete_current_application(page)
-        print("Agent paused before final submit or manual review.")
+        report = agent.complete_current_application(page)
+        print(f"Agent finished with status: {report['status']}. Review before final submit.")
         page.pause()
 
 
 if __name__ == "__main__":
     main()
-

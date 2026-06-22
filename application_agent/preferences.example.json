@@ -1,0 +1,34 @@
+{
+  "positions": [
+    "software engineer",
+    "machine learning engineer",
+    "data engineer"
+  ],
+  "locations": [
+    "remote",
+    "chicago",
+    "new york",
+    "san francisco",
+    "toronto",
+    "waterloo"
+  ],
+  "remote": true,
+  "hybrid": true,
+  "onsite": true,
+  "apply_once_at_company": true,
+  "companyBlacklist": [
+    "Example Company To Avoid"
+  ],
+  "titleBlacklist": [
+    "sales",
+    "marketing",
+    "senior director"
+  ],
+  "automation": {
+    "submitMode": "review",
+    "minConfidenceForUnmonitoredSubmit": 0.98,
+    "maxUnansweredRequiredFields": 0,
+    "requireExactDropdownOptions": true,
+    "sendReportAfterEachApplication": true
+  }
+}

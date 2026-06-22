@@ -12,6 +12,7 @@ This repo also now contains two standalone application-assist tools:
 
 - **Chrome autofill extension** in `autofill_extension/` for in-browser form scanning and review-first filling.
 - **Post-apply Playwright agent** in `application_agent/` for taking over after an application page opens and safely filling ATS flows.
+- **ApplyPilot shortlist queue** in the Flask dashboard for saving jobs before running the post-apply agent and reviewing fill reports.
 
 ---
 
@@ -144,6 +145,7 @@ application_agent/browser_profile/
 application_agent/data/
 application_agent/files/
 application_agent/*.private.json
+application_agent/preferences.private.json
 ```
 
 ### Configure The AI Backend
@@ -203,6 +205,36 @@ autofill_extension/profile.private.json
 ```
 
 It opens a persistent Playwright browser, waits for you to click Apply, detects Greenhouse/Lever/Ashby/Workday/generic pages, fills what it can, uploads the ignored local resume when a file input allows it, logs to ignored SQLite storage, and pauses before final submission.
+
+### Use The Shortlist Queue
+
+From the New Grad Jobs tab, click **Shortlist** on roles you want ApplyPilot to attempt later. The Shortlist tab stores those roles in ignored local SQLite storage:
+
+```text
+application_agent/data/applications.sqlite3
+```
+
+Mark shortlisted jobs as queued, then run:
+
+```bash
+python -m application_agent.queued_apply --limit 3
+```
+
+The queued runner opens each job URL in the persistent Playwright browser, clicks an Apply button when one is visible, runs the application agent, writes a structured report, and marks the job as paused/failed/submitted depending on the outcome. It still stops before final submit.
+
+You can inspect reports from the Shortlist tab or directly:
+
+```text
+http://127.0.0.1:5003/application-reports
+```
+
+Optional work preferences can be copied from:
+
+```bash
+cp application_agent/preferences.example.json application_agent/preferences.private.json
+```
+
+The preferences file captures the useful config ideas from bulk-apply tools: target positions, locations, remote/hybrid/onsite preferences, company blacklist, title blacklist, apply-once-per-company, and future confidence gates for unmonitored submission.
 
 The intended workflow is:
 

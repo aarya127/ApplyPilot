@@ -104,6 +104,64 @@ Workflow:
 7. The agent detects the ATS, scans the page, fills known fields, uploads your resume when possible, and handles safe Next/Continue buttons.
 8. Review everything before submitting. The agent should stop before final Submit.
 
+## Run Queued Shortlisted Jobs
+
+The Flask dashboard can now store shortlisted jobs in:
+
+```text
+application_agent/data/applications.sqlite3
+```
+
+Use `/newgrad` to shortlist jobs, open `/shortlist`, and mark selected rows as
+`queued`. Then run:
+
+```bash
+python -m application_agent.queued_apply --limit 3
+```
+
+The queued runner:
+
+1. loads queued jobs from local SQLite storage
+2. opens each job URL in the persistent Playwright browser
+3. clicks a visible Apply/Apply Now/Start Application control when available
+4. runs the ATS completion agent
+5. writes a structured report back to `application_reports`
+6. marks the job as paused, failed, or submitted
+
+Current default behavior is still review-first. The runner does not final-submit
+applications without a future confidence-gated setting.
+
+## Preferences And Blacklists
+
+Copy the tracked example:
+
+```bash
+cp application_agent/preferences.example.json application_agent/preferences.private.json
+```
+
+The private preferences file borrows the useful configuration ideas from
+bulk-apply systems:
+
+- target positions
+- preferred locations
+- remote/hybrid/onsite switches
+- company blacklist
+- title blacklist
+- apply-once-per-company
+- future automation confidence gates
+
+The long-run target is:
+
+```text
+shortlist jobs in dashboard
+  -> queue selected jobs
+  -> run queued ApplyPilot agent
+  -> fill each ATS flow
+  -> verify and audit every filled answer
+  -> send/store a report
+  -> submit only when confidence gates pass
+```
+
 ## Internal Workflow
 
 ApplyPilot now uses a plan-first pipeline:

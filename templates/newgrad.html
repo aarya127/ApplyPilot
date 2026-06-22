@@ -154,6 +154,29 @@
         .button:hover {
             background: #1d4ed8;
         }
+        .button-secondary {
+            background: white;
+            color: #2563eb;
+            border-color: #bfdbfe;
+        }
+        .button-secondary:hover {
+            background: #eff6ff;
+        }
+        .button-muted {
+            background: #e5e7eb;
+            color: #4b5563;
+            border-color: #d1d5db;
+            cursor: default;
+        }
+        .inline-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .inline-form {
+            margin: 0;
+        }
         table {
             width: 100%;
             border-collapse: collapse;
@@ -236,6 +259,7 @@
 <div class="page">
     <nav class="tab-nav">
         <a href="/newgrad" class="tab-link tab-active">New Grad Jobs</a>
+        <a href="/shortlist" class="tab-link">Shortlist</a>
         <a href="/applied" class="tab-link">Applied Jobs</a>
     </nav>
 
@@ -315,7 +339,7 @@
                 <th>Salary</th>
                 <th>Posted</th>
                 <th>Category</th>
-                <th>Link</th>
+                <th>Actions</th>
             </tr>
         </thead>
         <tbody>
@@ -327,7 +351,26 @@
                     <td>{{ job.salary or '—' }}</td>
                     <td>{{ job.posted or '—' }}</td>
                     <td><span class="badge">{{ job.category or '—' }}</span></td>
-                    <td><a href="{{ job.url }}" target="_blank" rel="noopener">Open</a></td>
+                    <td>
+                        <div class="inline-actions">
+                            <a href="{{ job.url }}" target="_blank" rel="noopener">Open</a>
+                            {% if job.url in shortlisted_urls %}
+                                <span class="button button-muted">Shortlisted</span>
+                            {% else %}
+                                <form class="inline-form" method="post" action="/shortlist">
+                                    <input type="hidden" name="source" value="newgrad" />
+                                    <input type="hidden" name="title" value="{{ job.title }}" />
+                                    <input type="hidden" name="company" value="{{ job.company or '' }}" />
+                                    <input type="hidden" name="location" value="{{ job.location or '' }}" />
+                                    <input type="hidden" name="url" value="{{ job.url }}" />
+                                    <input type="hidden" name="category" value="{{ job.category or '' }}" />
+                                    <input type="hidden" name="salary" value="{{ job.salary or '' }}" />
+                                    <input type="hidden" name="posted" value="{{ job.posted or '' }}" />
+                                    <button class="button button-secondary" type="submit">Shortlist</button>
+                                </form>
+                            {% endif %}
+                        </div>
+                    </td>
                 </tr>
             {% endfor %}
         </tbody>

@@ -32,3 +32,4 @@ application_agent/browser_profile/
 application_agent/data/
 application_agent/files/
 application_agent/*.private.json
+application_agent/preferences.private.json
