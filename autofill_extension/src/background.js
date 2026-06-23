@@ -130,6 +130,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "GET_AI_USAGE") {
+    getAiUsage()
+      .then((payload) => sendResponse({ ok: true, payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+
+    return true;
+  }
+
   return false;
 });
 
@@ -204,6 +212,32 @@ async function trackApplication(payload) {
 
   if (!response.ok) {
     throw new Error(`Tracker failed with ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function getAiUsage() {
+  const { settings } = await chrome.storage.local.get("settings");
+  const endpoint = joinUrl(settings?.backendBaseUrl, "/ai-usage");
+
+  if (!endpoint) {
+    return {
+      aiUsage: {
+        requestsLastMinute: 0,
+        limitPerMinute: 40,
+        remainingThisMinute: 40
+      }
+    };
+  }
+
+  const response = await fetchWithLocalhostFallback(endpoint, {
+    method: "GET",
+    headers: { "Content-Type": "application/json" }
+  });
+
+  if (!response.ok) {
+    throw new Error(`AI usage failed with ${response.status}`);
   }
 
   return response.json();

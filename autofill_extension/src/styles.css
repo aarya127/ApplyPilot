@@ -147,6 +147,67 @@ h2 {
   gap: 8px;
 }
 
+.ai-status-panel {
+  display: grid;
+  gap: 7px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 10px;
+  background: #f8fafc;
+}
+
+.ai-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ai-buffer {
+  position: relative;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #dfe7ef;
+}
+
+.ai-buffer span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 34%;
+  border-radius: inherit;
+  background: var(--primary);
+  opacity: 0;
+  transform: translateX(-110%);
+}
+
+.ai-status-panel.is-working .ai-buffer span {
+  opacity: 1;
+  animation: ai-buffer-slide 1.15s ease-in-out infinite;
+}
+
+.ai-status-panel.is-near-limit {
+  border-color: #d7b56d;
+  background: #fff8e6;
+}
+
+@keyframes ai-buffer-slide {
+  0% {
+    transform: translateX(-110%);
+  }
+
+  55% {
+    transform: translateX(145%);
+  }
+
+  100% {
+    transform: translateX(290%);
+  }
+}
+
 #askAiButton,
 #fillSelectedButton {
   grid-column: 1 / -1;

@@ -111,6 +111,7 @@ def test_backend_without_api_key_returns_empty_llm_mapping(monkeypatch, tmp_path
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
     monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    server._ai_request_times.clear()
 
     client = server.app.test_client()
     response = client.post("/map-fields", json={"fields": [], "profile": {}, "page": {}})
@@ -118,6 +119,34 @@ def test_backend_without_api_key_returns_empty_llm_mapping(monkeypatch, tmp_path
     assert response.status_code == 200
     assert response.json["mappings"] == []
     assert "NVIDIA_API_KEY" in response.json["warning"]
+    assert response.json["aiUsage"]["requestsLastMinute"] == 0
+
+
+def test_backend_ai_usage_tracks_requests_in_last_minute():
+    server._ai_request_times.clear()
+
+    assert server.ai_usage_snapshot(now=1000)["requestsLastMinute"] == 0
+    first = server.record_ai_request(now=1000)
+    second = server.record_ai_request(now=1001)
+
+    assert first["requestsLastMinute"] == 1
+    assert second["requestsLastMinute"] == 2
+    assert second["limitPerMinute"] == 40
+    assert server.ai_usage_snapshot(now=1030)["requestsLastMinute"] == 2
+    assert server.ai_usage_snapshot(now=1062)["requestsLastMinute"] == 0
+
+
+def test_backend_ai_usage_endpoint_reports_counter():
+    server._ai_request_times.clear()
+    server.record_ai_request()
+
+    client = server.app.test_client()
+    response = client.get("/ai-usage")
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert response.json["aiUsage"]["requestsLastMinute"] == 1
+    assert response.json["aiUsage"]["remainingThisMinute"] == 39
 
 
 def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
@@ -671,6 +700,18 @@ def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
     assert "relativesAtCompany" in prompt
     assert "Example Labs May 2025 - August 2025" in prompt
     assert "Personal AI agent project" in prompt
+
+
+def test_backend_prompt_requires_first_person_for_custom_answers():
+    prompt = server.build_mapper_prompt(
+        [{"index": 0, "tag": "textarea", "label": "Please describe your AI experience."}],
+        {"firstName": "Aarya", "resumeFacts": {"projects": ["Built multi-agent AI systems"]}},
+        {},
+    )
+
+    assert "first person" in prompt
+    assert "I/my" in prompt
+    assert "Never write narrative answers in third person" in prompt
 
 
 def test_backend_retrieves_relevant_context_for_each_field():
@@ -2190,8 +2231,8 @@ def test_content_script_groups_ashby_style_choice_questions():
         assert not any(label == "White (Not Hispanic or Latino)" for label in labels)
         assert any(mapping["label"] == "Name" and mapping["value"] == "Sample Candidate" for mapping in preview["result"]["mappings"])
         assert any("AI projects" in mapping["label"] and "inference optimization" in mapping["value"] for mapping in preview["result"]["mappings"])
-        assert any(mapping["label"] == "Race" and mapping["value"] == "Asian" for mapping in preview["result"]["mappings"])
-        assert any(mapping["label"] == "Veteran Status" and mapping["value"] == "No" for mapping in preview["result"]["mappings"])
+        assert any(mapping["label"] == "Race" and mapping["value"] == "Asian (Not Hispanic or Latino)" for mapping in preview["result"]["mappings"])
+        assert any(mapping["label"] == "Veteran Status" and mapping["value"] == "I am not a protected veteran" for mapping in preview["result"]["mappings"])
         assert any(mapping["label"] == "What is your current age?" and mapping["value"] == "I prefer not to answer" for mapping in preview["result"]["mappings"])
 
         fill_response = page.evaluate(
@@ -2210,6 +2251,106 @@ def test_content_script_groups_ashby_style_choice_questions():
         assert page.locator("[name='genderIdentity'][value='Man']").is_checked()
         assert page.locator("[name='race'][value='Asian (Not Hispanic or Latino)']").is_checked()
         assert page.locator("[name='veteran'][value='I am not a protected veteran']").is_checked()
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_keeps_ashby_profile_links_and_location_separate():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "fullName": "Aarya Shah",
+        "email": "a268shah@uwaterloo.ca",
+        "phone": "647-767-8243",
+        "linkedin": "https://www.linkedin.com/in/AaryaShah127",
+        "github": "https://github.com/aarya127",
+        "school": "University of Waterloo",
+        "graduationDate": "April 2026",
+        "answers": {
+            "usaLocation": "Chicago, IL",
+        },
+        "addresses": {
+            "usa": {
+                "city": "Chicago",
+                "state": "IL",
+                "zipCode": "60601",
+                "country": "United States",
+            }
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <div class="ashby-section">
+                <div class="field-row"><div>LinkedIn Profile</div><input name="linkedin" placeholder="Type here..."></div>
+                <div class="field-row"><div>Current Location</div><input name="currentLocation" placeholder="Start typing..."></div>
+                <div class="field-row"><div>Github Link</div><input name="github" placeholder="Type here..."></div>
+                <div class="field-row"><div>School</div><input name="school"></div>
+                <div class="field-row"><div>Graduation Date</div><input name="graduationDate"></div>
+              </div>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings_by_name = {mapping["name"]: mapping for mapping in preview["result"]["mappings"]}
+        assert mappings_by_name["linkedin"]["value"] == "https://www.linkedin.com/in/AaryaShah127"
+        assert mappings_by_name["currentLocation"]["value"] == "Chicago, IL"
+        assert mappings_by_name["github"]["value"] == "https://github.com/aarya127"
+        assert mappings_by_name["graduationDate"]["value"] == "April 2026"
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='linkedin']").input_value() == "https://www.linkedin.com/in/AaryaShah127"
+        assert page.locator("[name='currentLocation']").input_value() == "Chicago, IL"
+        assert page.locator("[name='github']").input_value() == "https://github.com/aarya127"
+        assert page.locator("[name='graduationDate']").input_value() == "April 2026"
 
         browser.close()
 

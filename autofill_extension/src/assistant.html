@@ -28,6 +28,15 @@
           <button id="usaButton" class="chip-button" data-country="usa">USA</button>
           <button id="canadaButton" class="chip-button" data-country="canada">Canada</button>
         </div>
+        <div id="aiStatusPanel" class="ai-status-panel" aria-live="polite">
+          <div class="ai-status-row">
+            <span id="aiStatusText">AI idle</span>
+            <span id="aiUsageText">0/40 req/min</span>
+          </div>
+          <div class="ai-buffer" aria-hidden="true">
+            <span></span>
+          </div>
+        </div>
         <div class="tool-grid">
           <button id="scanButton" class="secondary-button">Scan</button>
           <button id="previewButton" class="primary-button">Preview</button>

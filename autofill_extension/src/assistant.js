@@ -3,6 +3,9 @@ const chatForm = document.getElementById("chatForm");
 const chatInput = document.getElementById("chatInput");
 const reviewList = document.getElementById("reviewList");
 const assistantStatus = document.getElementById("assistantStatus");
+const aiStatusPanel = document.getElementById("aiStatusPanel");
+const aiStatusText = document.getElementById("aiStatusText");
+const aiUsageText = document.getElementById("aiUsageText");
 const scanButton = document.getElementById("scanButton");
 const previewButton = document.getElementById("previewButton");
 const askAiButton = document.getElementById("askAiButton");
@@ -14,6 +17,7 @@ const countryButtons = Array.from(document.querySelectorAll("[data-country]"));
 
 let lastPreview = null;
 let lastFillResult = null;
+let aiUsageRefreshTimer = null;
 
 initAssistant();
 
@@ -202,6 +206,16 @@ async function saveNewAnswersFromReview() {
 }
 
 async function askAiForMissingAnswers() {
+  setAiWorking(true, "Refreshing page before Ask AI...");
+  try {
+    return await askAiForMissingAnswersImpl();
+  } finally {
+    setAiWorking(false, "AI idle");
+    await refreshAiUsage(true);
+  }
+}
+
+async function askAiForMissingAnswersImpl() {
   const freshPreview = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
 
   if (!freshPreview?.ok) {
@@ -246,6 +260,7 @@ async function askAiForMissingAnswers() {
   for (let index = 0; index < missingFields.length; index += 1) {
     const field = missingFields[index];
     const fieldForModel = toBackendField(field, 0);
+    setAiWorking(true, `Asking AI ${index + 1}/${missingFields.length}: ${truncateDebug(field.label || "field")}`);
     const response = await chrome.runtime.sendMessage({
       type: "MAP_FIELDS_WITH_BACKEND",
       payload: {
@@ -254,6 +269,7 @@ async function askAiForMissingAnswers() {
         page: pageContext
       }
     });
+    updateAiUsage(response?.payload?.aiUsage);
 
     if (!response?.ok) {
       addMessage("agent", `AI could not answer "${field.label}": ${response?.error || "request failed"}`);
@@ -331,6 +347,8 @@ async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
     addMessage("agent", `Audit skipped: ${response?.error || "request failed"}`);
     return [];
   }
+
+  updateAiUsage(response.payload?.aiUsage);
 
   const corrections = response.payload?.corrections || [];
   const auditMappings = [];
@@ -753,6 +771,10 @@ async function initAssistant() {
 
   assistantStatus.textContent = hasProfile ? "Profile loaded" : "Profile needed";
   updateCountryButtons(targetCountry);
+  await refreshAiUsage(true);
+  if (!aiUsageRefreshTimer) {
+    aiUsageRefreshTimer = setInterval(() => refreshAiUsage(true), 15000);
+  }
   addMessage("agent", "I can help fill this application step by step. Is this role in the USA or Canada?");
   addMessage("agent", "Choose a country first, then preview. I will stop before final submission.");
 }
@@ -1166,6 +1188,46 @@ function addMessage(author, text) {
   message.textContent = text;
   chatLog.append(message);
   chatLog.scrollTop = chatLog.scrollHeight;
+}
+
+function setAiWorking(isWorking, message = "") {
+  aiStatusPanel?.classList.toggle("is-working", isWorking);
+  if (aiStatusText) {
+    aiStatusText.textContent = message || (isWorking ? "AI working..." : "AI idle");
+  }
+  askAiButton.disabled = isWorking || !lastPreview?.unmappedFields?.some((field) => !field.needsManualUpload);
+}
+
+async function refreshAiUsage(silent = false) {
+  try {
+    const response = await chrome.runtime.sendMessage({ type: "GET_AI_USAGE" });
+    if (response?.ok) {
+      updateAiUsage(response.payload?.aiUsage);
+      return;
+    }
+
+    if (!silent) {
+      addMessage("agent", response?.error || "Could not read AI request usage.");
+    }
+  } catch (error) {
+    if (!silent) {
+      addMessage("agent", `Could not read AI request usage: ${error.message}`);
+    }
+  }
+}
+
+function updateAiUsage(usage) {
+  if (!usage || !aiUsageText) {
+    return;
+  }
+
+  const used = Number(usage.requestsLastMinute || 0);
+  const limit = Number(usage.limitPerMinute || 40);
+  const remaining = Number.isFinite(Number(usage.remainingThisMinute))
+    ? Number(usage.remainingThisMinute)
+    : Math.max(limit - used, 0);
+  aiUsageText.textContent = `${used}/${limit} req/min (${remaining} left)`;
+  aiStatusPanel?.classList.toggle("is-near-limit", limit > 0 && used >= Math.ceil(limit * 0.8));
 }
 
 function setBusy(message) {

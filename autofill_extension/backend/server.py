@@ -7,7 +7,10 @@ import json
 import os
 import re
 import sqlite3
+import threading
+import time
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +26,9 @@ LLM_TRACE_PATH = GENERATED_DIR / "llm_trace.private.jsonl"
 PRIVATE_ENV_PATH = Path(__file__).resolve().parent / "env.private"
 NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+AI_RATE_LIMIT_PER_MINUTE = 40
+_ai_request_times: deque[float] = deque()
+_ai_request_lock = threading.Lock()
 
 app = Flask(__name__)
 
@@ -59,6 +65,39 @@ def init_db() -> None:
         )
 
 
+def prune_ai_request_times(now: float) -> None:
+    cutoff = now - 60
+    while _ai_request_times and _ai_request_times[0] < cutoff:
+        _ai_request_times.popleft()
+
+
+def ai_usage_snapshot(now: float | None = None) -> dict[str, int]:
+    current_time = now if now is not None else time.time()
+    with _ai_request_lock:
+        prune_ai_request_times(current_time)
+        requests_last_minute = len(_ai_request_times)
+
+    return {
+        "requestsLastMinute": requests_last_minute,
+        "limitPerMinute": AI_RATE_LIMIT_PER_MINUTE,
+        "remainingThisMinute": max(AI_RATE_LIMIT_PER_MINUTE - requests_last_minute, 0),
+    }
+
+
+def record_ai_request(now: float | None = None) -> dict[str, int]:
+    current_time = now if now is not None else time.time()
+    with _ai_request_lock:
+        prune_ai_request_times(current_time)
+        _ai_request_times.append(current_time)
+        requests_last_minute = len(_ai_request_times)
+
+    return {
+        "requestsLastMinute": requests_last_minute,
+        "limitPerMinute": AI_RATE_LIMIT_PER_MINUTE,
+        "remainingThisMinute": max(AI_RATE_LIMIT_PER_MINUTE - requests_last_minute, 0),
+    }
+
+
 @app.after_request
 def add_cors_headers(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
@@ -69,7 +108,17 @@ def add_cors_headers(response):
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"ok": True, "model": model_name(), "llmConfigured": bool(api_key())})
+    return jsonify({
+        "ok": True,
+        "model": model_name(),
+        "llmConfigured": bool(api_key()),
+        "aiUsage": ai_usage_snapshot(),
+    })
+
+
+@app.route("/ai-usage", methods=["GET"])
+def ai_usage():
+    return jsonify({"ok": True, "aiUsage": ai_usage_snapshot()})
 
 
 @app.route("/map-fields", methods=["POST", "OPTIONS"])
@@ -83,15 +132,23 @@ def map_fields():
     page = payload.get("page", {})
 
     if not api_key():
-        return jsonify({"mappings": [], "warning": "NVIDIA_API_KEY is not configured"})
+        return jsonify({
+            "mappings": [],
+            "warning": "NVIDIA_API_KEY is not configured",
+            "aiUsage": ai_usage_snapshot(),
+        })
 
     try:
         mappings = call_nvidia_mapper(fields, profile, page)
     except Exception as exc:
         app.logger.exception("Mapper request failed")
-        return jsonify({"mappings": policy_mappings(fields, profile), "warning": f"Mapper request failed: {exc}"}), 200
+        return jsonify({
+            "mappings": policy_mappings(fields, profile),
+            "warning": f"Mapper request failed: {exc}",
+            "aiUsage": ai_usage_snapshot(),
+        }), 200
 
-    return jsonify({"mappings": mappings})
+    return jsonify({"mappings": mappings, "aiUsage": ai_usage_snapshot()})
 
 
 @app.route("/audit-fields", methods=["POST", "OPTIONS"])
@@ -123,7 +180,13 @@ def audit_fields():
     else:
         warning = "NVIDIA_API_KEY is not configured; used deterministic audit only"
 
-    return jsonify({"corrections": corrections, "decisions": decisions, "issues": issues, "warning": warning})
+    return jsonify({
+        "corrections": corrections,
+        "decisions": decisions,
+        "issues": issues,
+        "warning": warning,
+        "aiUsage": ai_usage_snapshot(),
+    })
 
 
 @app.route("/track-application", methods=["POST", "OPTIONS"])
@@ -208,6 +271,8 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
                     "For optioned fields, infer the intended meaning from the profile and choose the closest supplied option label verbatim. "
                     "For legal eligibility or authorization to work in the country of employment, choose the positive authorized/eligible option. "
                     "Use the profile, resume facts, saved answers, and default policies. "
+                    "For narrative textarea/free-text custom answers, write as the candidate in first person using I/my; "
+                    "never write in third person as Aarya/he/his. "
                     "Do not invent experience. Skip unknown fields."
                 ),
             },
@@ -228,6 +293,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
         },
     )
 
+    record_ai_request()
     response = requests.post(
         os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
         headers={
@@ -287,6 +353,8 @@ def call_nvidia_auditor(
                     "Only propose a correction when the current answer conflicts with supplied profile facts, "
                     "retrieved context, default policies, or visible options. "
                     "If a field has options, the correction value must be exactly one supplied option label. "
+                    "For narrative textarea/free-text answers, write as the candidate in first person using I/my; "
+                    "never write in third person as Aarya/he/his. "
                     "Never change name, email, phone, address, resume, experience, education, or link fields unless "
                     "the retrieved profile facts explicitly show the visible value is wrong."
                 ),
@@ -310,6 +378,7 @@ def call_nvidia_auditor(
         },
     )
 
+    record_ai_request()
     response = requests.post(
         os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
         headers={
@@ -430,7 +499,9 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "If asked whether the candidate is willing to relocate at their own cost when relocation assistance is not offered, answer Yes. "
                 "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
                 "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
-                "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts. "
+                "For textarea/free-text custom questions, answer in 2-3 concise sentences using only supplied facts. "
+                "Write custom narrative answers in first person as the candidate using I/my. "
+                "Never write narrative answers in third person as Aarya/he/his. "
                 "Skip fields that cannot be answered safely."
             ),
             "page": page,
@@ -489,7 +560,8 @@ def build_audit_prompt(
                 "Work authorization/eligibility is Yes/authorized for both the United States and Canada. "
                 "Visa sponsorship, employer work-authorization assistance, relocation assistance, relatives at company, "
                 "contractor/dealer/affiliate status, military service, veteran protected status, subscriptions, and marketing messages default to No. "
-                "Terms/conditions acceptance and certification that the application is true/correct default to Yes."
+                "Terms/conditions acceptance and certification that the application is true/correct default to Yes. "
+                "For textarea/free-text custom answers, write in first person as the candidate using I/my, never third person."
             ),
             "page": page,
             "candidateContext": candidate_context(profile),
@@ -796,7 +868,7 @@ def resume_transcript(profile: dict[str, Any]) -> str:
 
 def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
     return {
-        "identity": "Answer as Aarya Shah using only the supplied profile and resume facts.",
+        "identity": "Answer as Aarya Shah using only the supplied profile and resume facts. Use first person for narrative answers.",
         "minimumAge": profile.get("answers", {}).get("meetsMinimumAge", "Yes"),
         "usWorkAuthorization": (
             "Aarya is a U.S. permanent resident/green card holder and is authorized to work "
