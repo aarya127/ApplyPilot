@@ -15,6 +15,7 @@ from extract_jobs import extract_newgrad_jobs
 app = Flask(__name__)
 app.secret_key = "hr-system-applied-tracker-key"
 apply_queue = ApplyQueue()
+SHORTLIST_STATUSES = ["shortlisted", "queued", "running", "paused", "submitted", "failed", "skipped"]
 @app.route("/")
 def index() -> str:
     return redirect(url_for("applied"))
@@ -172,21 +173,15 @@ def shortlist() -> str:
         if isinstance(job_id, int) and job_id not in latest_report_by_job:
             latest_report_by_job[job_id] = report
 
-    counts = {
-        "all": len(apply_queue.list_shortlist("all")),
-        "shortlisted": len(apply_queue.list_shortlist("shortlisted")),
-        "queued": len(apply_queue.list_shortlist("queued")),
-        "running": len(apply_queue.list_shortlist("running")),
-        "paused": len(apply_queue.list_shortlist("paused")),
-        "submitted": len(apply_queue.list_shortlist("submitted")),
-        "failed": len(apply_queue.list_shortlist("failed")),
-    }
+    counts = {"all": len(apply_queue.list_shortlist("all"))}
+    counts.update({status: len(apply_queue.list_shortlist(status)) for status in SHORTLIST_STATUSES})
 
     return render_template(
         "shortlist.html",
         jobs=jobs,
         counts=counts,
         status_filter=status_filter,
+        statuses=SHORTLIST_STATUSES,
         latest_report_by_job=latest_report_by_job,
     )
 

@@ -124,6 +124,14 @@ def test_shortlist_routes_add_queue_and_render_reports(tmp_path, monkeypatch):
     assert status_response.status_code == 200
     assert status_response.json["job"]["status"] == "queued"
 
+    manual_status_response = client.post(
+        f"/shortlist/{jobs[0]['id']}/status",
+        data={"status": "submitted"},
+        follow_redirects=False,
+    )
+    assert manual_status_response.status_code == 302
+    assert queue.list_shortlist("submitted")[0]["id"] == jobs[0]["id"]
+
     queue.log_report(
         job_id=jobs[0]["id"],
         url=jobs[0]["url"],
@@ -136,6 +144,9 @@ def test_shortlist_routes_add_queue_and_render_reports(tmp_path, monkeypatch):
     assert page.status_code == 200
     assert "Backend Engineer" in html
     assert "filled 5" in html
+    assert 'class="status-select"' in html
+    assert 'value="submitted" selected' in html
+    assert "/shortlist?status=skipped" in html
 
     reports = client.get(f"/application-reports?job_id={jobs[0]['id']}")
     assert reports.status_code == 200
