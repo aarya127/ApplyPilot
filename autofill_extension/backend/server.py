@@ -385,6 +385,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "school": profile.get("school"),
             "degree": profile.get("degree"),
             "graduationDate": profile.get("graduationDate"),
+            "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4",
         },
         "preferences": {
             "relocation": profile.get("relocation"),
@@ -426,6 +427,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "For Terms and Conditions, Terms of Use, Terms of Service, user agreements, or legal terms acceptance prompts, answer Yes. "
                 "For certification questions that ask the candidate to confirm the application is true, correct, or complete, answer Yes. "
                 "Do not confuse relocation preference with relocation assistance: being open to relocation does not mean the candidate needs relocation assistance. "
+                "If asked whether the candidate is willing to relocate at their own cost when relocation assistance is not offered, answer Yes. "
                 "For voluntary demographic, disability, veteran, age, or sexual-orientation fields, use explicit profile facts when present; otherwise choose a decline/prefer-not-to-answer option if available. "
                 "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
                 "For textarea custom questions, answer in 2-3 concise sentences using only supplied facts. "
@@ -535,6 +537,8 @@ def retrieved_context_for_field(field: dict[str, Any], profile: dict[str, Any], 
 
 
 def field_context_category(haystack: str) -> str:
+    if is_gpa_question(haystack):
+        return "education"
     if has_sponsorship_terms(haystack):
         return "sponsorship"
     if is_work_eligibility_question(haystack):
@@ -577,7 +581,13 @@ def relevant_profile_facts(category: str, profile: dict[str, Any], page: dict[st
             }
         )
     if category in {"relocation_assistance", "relocation_preference"}:
-        base.update({"relocation": profile.get("relocation"), "relocationAssistance": profile.get("answers", {}).get("relocationAssistance")})
+        base.update(
+            {
+                "relocation": profile.get("relocation"),
+                "relocationAssistance": profile.get("answers", {}).get("relocationAssistance"),
+                "relocateAtOwnCost": profile.get("answers", {}).get("relocateAtOwnCost") or "Yes",
+            }
+        )
     if category in {"family_or_relationship", "company_affiliation", "military_veteran"}:
         base.update(
             {
@@ -594,6 +604,7 @@ def relevant_profile_facts(category: str, profile: dict[str, Any], page: dict[st
                 "education": profile.get("education"),
                 "school": profile.get("school"),
                 "degree": profile.get("degree"),
+                "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4",
                 "workExperience": profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience"),
                 "links": profile.get("links"),
                 "resumeFacts": profile.get("resumeFacts"),
@@ -724,6 +735,7 @@ def candidate_context(profile: dict[str, Any]) -> dict[str, Any]:
         "education",
         "links",
         "resumeFacts",
+        "gpa",
     ]
     context = {key: profile.get(key) for key in allowed_keys if profile.get(key) not in (None, "", [], {})}
 
@@ -806,6 +818,8 @@ def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
         "acceptTerms": profile.get("answers", {}).get("acceptTerms", "Yes"),
         "certifyApplicationTruth": profile.get("answers", {}).get("certifyApplicationTruth", "Yes"),
         "relocation": profile.get("relocation") or profile.get("answers", {}).get("relocation") or "Anywhere",
+        "relocateAtOwnCost": profile.get("answers", {}).get("relocateAtOwnCost", "Yes"),
+        "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4",
     }
 
 
@@ -1146,6 +1160,14 @@ def policy_answer_for_field(
     if is_work_eligibility_question(haystack):
         return best_authorization_option(options) or best_available_option("Yes", options) or "Yes"
 
+    if is_gpa_question(haystack):
+        answer = profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4"
+        return best_available_option(answer, options) or answer
+
+    if is_relocation_own_cost_question(haystack):
+        answer = profile.get("answers", {}).get("relocateAtOwnCost") or "Yes"
+        return best_available_option(answer, options) or answer
+
     if any(term in haystack for term in ["relocation assistance", "relocation support", "need relocation assistance"]):
         answer = profile.get("answers", {}).get("relocationAssistance") or "No"
         return best_available_option(answer, options) or answer
@@ -1204,6 +1226,10 @@ def policy_answer_for_field(
     if any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
         return best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
 
+    if re.search(r"how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application|application source|where did you hear", haystack):
+        answer = profile.get("answers", {}).get("applicationSource") or "LinkedIn"
+        return best_available_option(answer, options) or answer
+
     if any(term in haystack for term in ["terms and conditions", "terms of use", "terms of service", "conditions of use", "user agreement", "legal terms", "accept terms", "agree terms", "consent terms"]):
         return best_available_option(policies["acceptTerms"], options) or policies["acceptTerms"]
 
@@ -1220,6 +1246,18 @@ def is_previous_company_question(haystack: str) -> bool:
             any(term in haystack for term in ["previously", "currently", "directly", "ever"])
             and any(term in haystack for term in ["employed", "worked", "paycheck", "w 2"])
         )
+    )
+
+
+def is_gpa_question(haystack: str) -> bool:
+    return bool(re.search(r"overall result|grade point average|\bgpa\b|\bcgpa\b|academic average", haystack))
+
+
+def is_relocation_own_cost_question(haystack: str) -> bool:
+    return bool(
+        "relocat" in haystack
+        and re.search(r"own cost|own expense|without relocation assistance|no relocation assistance|assistance is not offered|assistance not offered|not offered|at your cost", haystack)
+        and re.search(r"willing|able|would you|are you|can you", haystack)
     )
 
 

@@ -46,6 +46,48 @@
                 }, 900);
             }
 
+            function attachShortlistHandlers() {
+                document.querySelectorAll('form[data-shortlist-form]').forEach(function (form) {
+                    form.addEventListener('submit', function (event) {
+                        event.preventDefault();
+
+                        var button = form.querySelector('button[type="submit"]');
+                        if (button) {
+                            button.disabled = true;
+                            button.textContent = 'Saving...';
+                        }
+
+                        fetch(form.action, {
+                            method: 'POST',
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(Object.fromEntries(new FormData(form).entries()))
+                        })
+                            .then(function (response) {
+                                if (!response.ok) {
+                                    throw new Error('Shortlist failed');
+                                }
+                                return response.json();
+                            })
+                            .then(function () {
+                                var replacement = document.createElement('span');
+                                replacement.className = 'button button-muted';
+                                replacement.textContent = 'Shortlisted';
+                                form.replaceWith(replacement);
+                            })
+                            .catch(function () {
+                                if (button) {
+                                    button.disabled = false;
+                                    button.textContent = 'Shortlist';
+                                }
+                            });
+                    });
+                });
+            }
+
+            attachShortlistHandlers();
             renderProgress(initialProgress || {}, isLoading);
 
             if (!isLoading) {
@@ -357,7 +399,7 @@
                             {% if job.url in shortlisted_urls %}
                                 <span class="button button-muted">Shortlisted</span>
                             {% else %}
-                                <form class="inline-form" method="post" action="/shortlist">
+                                <form class="inline-form" method="post" action="/shortlist" data-shortlist-form>
                                     <input type="hidden" name="source" value="newgrad" />
                                     <input type="hidden" name="title" value="{{ job.title }}" />
                                     <input type="hidden" name="company" value="{{ job.company or '' }}" />

@@ -146,6 +146,17 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"question_text": "Have you previously been DIRECTLY employed with Example ParentCo AG or Example Affiliate Inc.?"}, profile) == ("No", "rule")
     assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("No", "rule")
     assert map_field({"label": "Do you opt-in to receive WhatsApp messages from ExampleCo Recruiting?"}, profile) == ("No", "rule")
+    assert map_field({"label": "How Did You Hear About Us?"}, profile) == ("LinkedIn", "rule")
+    assert map_field({"label": "Overall Result (GPA)"}, profile) == ("3.7 out of 4", "rule")
+    assert map_field(
+        {
+            "label": (
+                "If relocation is required for this opportunity, and relocation assistance is not "
+                "offered for this position, are you willing to relocate at your own cost?"
+            )
+        },
+        profile,
+    ) == ("Yes", "rule")
     assert map_field({"label": "Are you Hispanic/Latino?"}, profile) == ("No", "sensitive")
     assert map_field({"label": "Race"}, profile) == ("Asian", "sensitive")
     assert map_field({"label": "Gender"}, profile) == ("Male", "sensitive")

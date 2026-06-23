@@ -104,6 +104,8 @@
       "certifyApplicationTruth": "Yes",
       "relocation": "Open to relocation",
       "relocationAssistance": "No",
+      "relocateAtOwnCost": "Yes",
+      "gpa": "3.7 out of 4",
       "salary": "Negotiable",
       "phoneCountryCode": "Canada (+1)",
       "phoneDeviceType": "Mobile",

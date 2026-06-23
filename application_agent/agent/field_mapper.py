@@ -16,6 +16,9 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if re.search(r"subscribe|subscription|email alerts?|job alerts?|marketing emails?|promotional emails?|newsletter|mailing list", text):
         return profile.get("answers", {}).get("subscribeEmails", "No"), "rule"
 
+    if re.search(r"how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application|application source|where did you hear", text):
+        return profile.get("answers", {}).get("applicationSource", "LinkedIn"), "rule"
+
     if re.search(r"terms and conditions|terms of use|terms of service|conditions of use|user agreement|legal terms|accept.*terms|agree.*terms|consent.*terms", text):
         return profile.get("answers", {}).get("acceptTerms", "Yes"), "rule"
 
@@ -24,6 +27,12 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
 
     if re.search(r"country.*phone.*code|phone.*country.*code|country code|phone\s+country|country\s+phone", text):
         return profile.get("answers", {}).get("phoneCountryCode") or profile.get("phone_country_code") or "+1", "rule"
+
+    if re.search(r"overall result|grade point average|\bgpa\b|\bcgpa\b|academic average", text):
+        return profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4", "rule"
+
+    if is_relocation_own_cost_question(text):
+        return profile.get("answers", {}).get("relocateAtOwnCost", "Yes"), "rule"
 
     field_kind = classify_field_kind(field)
     field_value = resolve_field_kind(field_kind, profile)
@@ -324,6 +333,14 @@ def is_policy_question(text: str) -> bool:
 def relocation_assistance_answer(profile: dict[str, Any]) -> str:
     explicit = profile.get("answers", {}).get("relocationAssistance") or ""
     return "Yes" if re.search(r"^(yes|true|1)$|need|require|request|want", normalize(explicit)) else "No"
+
+
+def is_relocation_own_cost_question(text: str) -> bool:
+    return bool(
+        "relocat" in text
+        and re.search(r"own cost|own expense|without relocation assistance|no relocation assistance|assistance is not offered|assistance not offered|not offered|at your cost", text)
+        and re.search(r"willing|able|would you|are you|can you", text)
+    )
 
 
 def sponsorship_answer(value: Any) -> str:

@@ -341,6 +341,18 @@ def test_backend_policy_treats_work_authorization_assistance_as_sponsorship():
             "Have you ever had, or do you anticipate receiving, any disciplinary action taken on your professional license, certification, or credentials?",
             "No",
         ),
+        (
+            "How Did You Hear About Us?",
+            "LinkedIn",
+        ),
+        (
+            "Overall Result (GPA)",
+            "3.7 out of 4",
+        ),
+        (
+            "If relocation is required for this opportunity, and relocation assistance is not offered for this position, are you willing to relocate at your own cost?",
+            "Yes",
+        ),
     ],
 )
 def test_backend_policy_answers_generic_application_policy_questions(label, expected):
@@ -1504,6 +1516,8 @@ def test_content_script_uses_usa_target_country_for_stripe_style_fields():
               <label>Will you require ExampleCo to sponsor you for a work permit now or in the future for the location(s) you selected in your previous response? *<input name="sponsorship"></label>
               <label>If this role offers the option to work from a remote location, do you plan to work remotely?*<input name="remote"></label>
               <label>What is the most recent school you attended?<input name="school"></label>
+              <label>Overall Result (GPA)*<input name="gpa"></label>
+              <label>If relocation is required for this opportunity, and relocation assistance is not offered for this position, are you willing to relocate at your own cost?*<input name="relocateOwnCost"></label>
             </form>
             """
         )
@@ -1548,6 +1562,8 @@ def test_content_script_uses_usa_target_country_for_stripe_style_fields():
         assert page.locator("[name='sponsorship']").input_value() == "No"
         assert page.locator("[name='remote']").input_value() == ""
         assert page.locator("[name='school']").input_value() == "Sample University"
+        assert page.locator("[name='gpa']").input_value() == "3.7 out of 4"
+        assert page.locator("[name='relocateOwnCost']").input_value() == "Yes"
 
         browser.close()
 
@@ -1766,7 +1782,7 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
                 <label><input type="radio" name="workedBefore" value="No">No</label>
               </div>
               <div class="wd-field">
-                <label id="country-label">Country*</label>
+                <label id="country-label">Country / Territory*</label>
                 <button id="country" type="button" aria-labelledby="country-label" aria-haspopup="listbox" aria-controls="country-options">Canada</button>
                 <div id="country-options" role="listbox" hidden>
                   <div data-automation-id="promptOption" data-automation-label="Canada">Canada</div>
@@ -1791,6 +1807,15 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
                 <div id="phone-device-options" role="listbox" hidden>
                   <div data-automation-id="promptOption" data-automation-label="Home">Home</div>
                   <div data-automation-id="promptOption" data-automation-label="Mobile">Mobile</div>
+                </div>
+              </div>
+              <div class="wd-field">
+                <label id="source-label">How Did You Hear About Us?*</label>
+                <button id="source" type="button" aria-labelledby="source-label" aria-haspopup="listbox" aria-controls="source-options">0 items selected</button>
+                <div id="source-options" role="listbox" hidden>
+                  <div data-automation-id="promptOption" data-automation-label="Company Website">Company Website</div>
+                  <div data-automation-id="promptOption" data-automation-label="LinkedIn">LinkedIn</div>
+                  <div data-automation-id="promptOption" data-automation-label="Indeed">Indeed</div>
                 </div>
               </div>
               <div class="wd-field">
@@ -1855,12 +1880,13 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
             })"""
         )
         assert preview["ok"] is True
-        country_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country*")
+        country_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country / Territory*")
         address_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Address Line 1*")
         city_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "City*")
         state_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "State*")
         postal_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Postal Code*")
         phone_device_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Phone Device Type*")
+        source_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "How Did You Hear About Us?*")
         phone_code_mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Country Phone Code*")
         phone_extension_mapping = [mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Phone Extension"]
         unmapped_labels = [field["label"] for field in preview["result"]["unmappedFields"]]
@@ -1870,6 +1896,7 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
         assert state_mapping["value"] == "Illinois"
         assert postal_mapping["value"] == "60601"
         assert phone_device_mapping["value"] == "Mobile"
+        assert source_mapping["value"] == "LinkedIn"
         assert phone_code_mapping["value"] == "Canada (+1)"
         assert phone_extension_mapping == []
         assert any("previously worked" in label for label in unmapped_labels)
@@ -1891,6 +1918,7 @@ def test_content_script_fills_workday_country_dropdown_with_target_country_optio
         assert page.locator("#state").get_attribute("data-selected") == "Illinois"
         assert page.locator("[name='postalCode']").input_value() == "60601"
         assert page.locator("#phone-device").get_attribute("data-selected") == "Mobile"
+        assert page.locator("#source").get_attribute("data-selected") == "LinkedIn"
         assert page.locator("#phone-code").get_attribute("data-selected") == "Canada (+1)"
         assert page.locator("[name='phoneExtension']").input_value() == ""
 
@@ -2481,6 +2509,7 @@ def test_content_script_does_not_field_kind_map_generic_workday_experience_label
 
         assert not any(mapping["source"] == "field-kind" and mapping["name"] in generic_names for mapping in mappings)
         assert not any(mapping["name"] in {"genericMonth", "genericYear", "genericDescription"} for mapping in mappings), json.dumps(mappings, indent=2)
+        assert not any(mapping["name"] == "genericLocation" and mapping["value"] == "Bartlett" for mapping in mappings), json.dumps(mappings, indent=2)
         assert not any(mapping["name"] in repeatable_names for mapping in mappings)
         assert page.locator(".education-row").count() == 1
         assert url_mappings

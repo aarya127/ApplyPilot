@@ -338,6 +338,7 @@
 
       filled += await fillWorkdayExperienceDateFallback(profile);
       filled += await fillWorkdayEducationDropdownFallback(profile);
+      filled += await fillWorkdayHearAboutUsFallback(profile);
       filled += await fillWorkdayAddressFallback(profile, settings || {});
     } finally {
       state.isApplying = false;
@@ -1722,8 +1723,16 @@
       return buildMapping(field, profile.answers?.withinListedOfficeRadius || "No", "rule", 0.86);
     }
 
+    if (/(overall result|grade point average|\bgpa\b|\bcgpa\b|academic average)/.test(haystack)) {
+      return buildMapping(field, gpaAnswer(profile), "rule", 0.9);
+    }
+
     if (/(review.*linked document|candidate privacy policy|privacy policy|linked document)/.test(haystack)) {
       return buildMapping(field, profile.answers?.reviewedPrivacyPolicy || "Yes", "rule", 0.82);
+    }
+
+    if (/(how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application|application source|where did you hear)/.test(haystack)) {
+      return buildMapping(field, profile.answers?.applicationSource || "LinkedIn", "rule", 0.86);
     }
 
     if (/(terms and conditions|terms of use|terms of service|conditions of use|user agreement|legal terms|accept.*terms|agree.*terms|consent.*terms)/.test(haystack)) {
@@ -1764,6 +1773,10 @@
 
   function mapProfileContactField(field, profile, settings, haystack) {
     if (isAmbiguousRepeatableLocationDateLabel(haystack)) {
+      return null;
+    }
+
+    if (isBareExperiencePageLocationField(field, haystack)) {
       return null;
     }
 
@@ -2202,6 +2215,10 @@
       return buildMapping(field, profile.answers?.meetsMinimumAge || "Yes", "rule", 0.88);
     }
 
+    if (isRelocationOwnCostQuestion(haystack)) {
+      return buildMapping(field, profile.answers?.relocateAtOwnCost || "Yes", "rule", 0.88);
+    }
+
     if (/(served|service).*(u\.?s\.?|united states).*(military|armed forces)|military service/.test(haystack)) {
       return buildMapping(field, profile.answers?.militaryService || profile.militaryService || "No", "rule", 0.88);
     }
@@ -2255,6 +2272,22 @@
     }
 
     return null;
+  }
+
+  function isRelocationOwnCostQuestion(haystack) {
+    return /relocat/.test(haystack)
+      && /(own cost|own expense|without relocation assistance|no relocation assistance|assistance is not offered|assistance not offered|not offered|at your cost)/.test(haystack)
+      && /(willing|able|would you|are you|can you)/.test(haystack);
+  }
+
+  function gpaAnswer(profile) {
+    const education = normalizedEducation(profile)[0] || {};
+    return profile.gpa
+      || profile.answers?.gpa
+      || profile.answers?.overallResult
+      || education.gpa
+      || education.overallResult
+      || "3.7 out of 4";
   }
 
   function isDebarmentOrProgramExclusionQuestion(haystack) {
@@ -2428,6 +2461,10 @@
       return null;
     }
 
+    if (isBareExperiencePageLocationField(field, haystack)) {
+      return null;
+    }
+
     if (isEmploymentField(field, haystack)) {
       return null;
     }
@@ -2460,6 +2497,24 @@
     }
 
     return null;
+  }
+
+  function isBareExperiencePageLocationField(field, haystack) {
+    const visibleLabel = normalize(field?.label || displayLabelForField(field) || "");
+    if (!/^location\s*\*?$/.test(visibleLabel)) {
+      return false;
+    }
+
+    const full = fullFieldHaystack(field);
+    if (/(location city|city location|current city|where.*city|currently reside|current residence|city.*(state|region|country)|required.*city)/.test(full)) {
+      return false;
+    }
+
+    const pageText = normalize(document.body?.innerText || "");
+    const element = field.elementRef?.deref?.();
+    const section = element ? normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`) : "";
+
+    return /(my experience|work experience|employment|work history|professional experience|job history)/.test(`${section} ${pageText}`);
   }
 
   function isGreenhouseApplicationLocationField(field, haystack) {
@@ -5002,6 +5057,20 @@
     return filled;
   }
 
+  async function fillWorkdayHearAboutUsFallback(profile) {
+    if (!/workday/i.test(`${location.hostname} ${document.body?.innerText || ""}`)) {
+      return 0;
+    }
+
+    const answer = profile.answers?.applicationSource || "LinkedIn";
+    const control = findWorkdayDropdownByLabel(/^(how did you hear about us\??|how did you hear about this\??|how did you hear about this job\??|source)\s*\*?$/i);
+    if (!control || !hasValue(answer) || optionMatches(getCurrentValue(control), "", answer)) {
+      return 0;
+    }
+
+    return await fillCombobox(control, answer) ? 1 : 0;
+  }
+
   async function fillWorkdayAddressFallback(profile, settings) {
     if (!/workday/i.test(`${location.hostname} ${document.body?.innerText || ""}`)) {
       return 0;
@@ -5154,7 +5223,7 @@
       .filter(isVisibleElement)
       .filter((item) => {
         const text = normalize(item.innerText || item.textContent || "");
-        return /^country\s*\*?$/.test(text) && !/phone/.test(text);
+        return /^country(\s+(territory|region|or territory|or region))?$/.test(text) && !/phone/.test(text);
       });
 
     for (const label of labels) {
