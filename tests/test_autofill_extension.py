@@ -1686,6 +1686,111 @@ def test_content_script_disambiguates_location_typeahead_with_saved_usa_location
 
 
 @pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_greenhouse_location_typeahead_with_chicago_not_bartlett():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "addresses": {
+            "usa": {
+                "city": "Bartlett",
+                "state": "IL",
+                "zipCode": "60103",
+                "country": "United States",
+            }
+        },
+        "answers": {
+            "usaLocation": "Chicago, IL",
+            "usaCity": "Chicago",
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.route("https://job-boards.greenhouse.io/**", lambda route: route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="""
+            <form>
+              <label>
+                Location (City)*
+                <input name="locationCity" aria-autocomplete="list" aria-controls="location-options" value="Bartlett, Tennessee, United States" placeholder="Start typing...">
+              </label>
+              <div id="location-options" role="listbox" hidden>
+                <div role="option" data-value="Bartlett, Tennessee, United States">Bartlett, Tennessee, United States</div>
+                <div role="option" data-value="Chicago, Illinois, United States">Chicago, Illinois, United States</div>
+              </div>
+            </form>
+            <script>
+              const input = document.querySelector('[name="locationCity"]');
+              const options = document.querySelector('#location-options');
+              input.addEventListener('click', () => { options.hidden = false; });
+              input.addEventListener('input', () => { options.hidden = false; });
+              for (const option of options.querySelectorAll('[role="option"]')) {
+                option.addEventListener('click', () => {
+                  input.value = option.getAttribute('data-value');
+                  input.setAttribute('data-selected', option.getAttribute('data-value'));
+                  options.hidden = true;
+                });
+              }
+            </script>
+            """
+        ))
+        page.goto("https://job-boards.greenhouse.io/example/jobs/1")
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mapping = next(mapping for mapping in preview["result"]["mappings"] if mapping["label"] == "Location (City)*")
+        assert mapping["value"] == "Chicago, Illinois, United States"
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='locationCity']").input_value() == "Chicago, Illinois, United States"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
 def test_content_script_does_not_cross_fill_gem_contact_fields():
     from playwright.sync_api import sync_playwright
 

@@ -1034,10 +1034,11 @@
       || field.tag === "button"
       || field.tag === "oj-select-single"
       || field.tag === "oj-combobox-one"
+      || /list/i.test(field.ariaAutocomplete || "")
       || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
       || field.ariaLabel
-      || /(\blocation\b|\bcity\b|\bcountry\b|\bstate\b|\bprovince\b|phone.*code|country.*phone|select one)/i.test([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.surroundingText].join(" "))
-      || /listbox|combobox/i.test([field.type, field.ariaLabel, field.surroundingText].join(" "));
+      || /(\blocation\b|\bcity\b|\bcountry\b|\bstate\b|\bprovince\b|phone.*code|country.*phone|select one)/i.test([field.label, field.placeholder, field.name, field.id, field.ariaLabel, field.ariaAutocomplete, field.surroundingText].join(" "))
+      || /listbox|combobox/i.test([field.type, field.ariaLabel, field.ariaAutocomplete, field.surroundingText].join(" "));
   }
 
   async function discoverDynamicDropdownOptions(element) {
@@ -1086,12 +1087,14 @@
   function isListboxTrigger(element) {
     const role = (element.getAttribute("role") || "").toLowerCase();
     const popup = (element.getAttribute("aria-haspopup") || "").toLowerCase();
+    const autocomplete = (element.getAttribute("aria-autocomplete") || "").toLowerCase();
     const automationId = (element.getAttribute("data-automation-id") || "").toLowerCase();
     const tag = element.tagName.toLowerCase();
     const className = (element.getAttribute("class") || "").toLowerCase();
     return role === "combobox"
       || popup === "listbox"
       || popup === "true"
+      || autocomplete === "list"
       || automationId === "selectwidget"
       || automationId === "selectshowall"
       || tag === "oj-select-single"
@@ -5340,12 +5343,33 @@
       return true;
     }
 
+    if (locationOptionMatches(normalizedLabel, desired) || locationOptionMatches(normalizedValue, desired)) {
+      return true;
+    }
+
     if (isUnitedStatesDesired(desired)) {
       return isUnitedStatesOption(normalizedLabel) || isUnitedStatesOption(normalizedValue);
     }
 
     return aliases.some((alias) => alias.length > 3 && containsNormalizedPhrase(normalizedLabel, alias))
       || (desired.length > 2 && containsNormalizedPhrase(normalizedLabel, desired));
+  }
+
+  function locationOptionMatches(optionText, desiredText) {
+    if (!optionText || !desiredText || !/[, ]/.test(desiredText)) {
+      return false;
+    }
+
+    const [rawCity, rawRegion] = String(desiredText)
+      .split(",")
+      .map((part) => normalize(part));
+    if (!rawCity || !rawRegion || rawCity.length < 3) {
+      return false;
+    }
+
+    const regionName = normalize(stateNameOrValue(rawRegion));
+    const regionMatches = optionText.includes(rawRegion) || (regionName && optionText.includes(regionName));
+    return optionText.includes(rawCity) && regionMatches;
   }
 
   function isUnitedStatesDesired(value) {

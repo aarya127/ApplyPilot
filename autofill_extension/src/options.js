@@ -145,6 +145,8 @@ async function loadOptions() {
 }
 
 function writeForm(profile, settings) {
+  profile.answers = preserveApplicationLocationAnswers(profile);
+
   for (const [key, value] of Object.entries(profile)) {
     if (key === "answers" || key === "addresses" || key === "demographics" || key === "resumeFacts") {
       continue;
@@ -244,6 +246,14 @@ function readForm() {
     usPermanentResident: valueOf("usPermanentResident"),
     subjectToAgreement: valueOf("subjectToAgreement"),
     relocation: valueOf("relocation"),
+    usaLocation: answers.usaLocation || answers.usaPreferredLocation || "",
+    usaCity: answers.usaCity || answers.usaPreferredCity || "",
+    usaPreferredLocation: answers.usaPreferredLocation || answers.usaLocation || "",
+    usaPreferredCity: answers.usaPreferredCity || answers.usaCity || "",
+    canadaLocation: answers.canadaLocation || answers.canadaPreferredLocation || "",
+    canadaCity: answers.canadaCity || answers.canadaPreferredCity || "",
+    canadaPreferredLocation: answers.canadaPreferredLocation || answers.canadaLocation || "",
+    canadaPreferredCity: answers.canadaPreferredCity || answers.canadaCity || "",
     salary: valueOf("salary"),
     resumeFileName: valueOf("resumeFileName"),
     resumeFacts,
@@ -267,6 +277,27 @@ function readForm() {
   };
 
   return { candidateProfile, settings };
+}
+
+function preserveApplicationLocationAnswers(profile) {
+  const answers = { ...(profile.answers || {}) };
+
+  for (const key of [
+    "usaLocation",
+    "usaCity",
+    "usaPreferredLocation",
+    "usaPreferredCity",
+    "canadaLocation",
+    "canadaCity",
+    "canadaPreferredLocation",
+    "canadaPreferredCity"
+  ]) {
+    if (!answers[key] && profile[key]) {
+      answers[key] = profile[key];
+    }
+  }
+
+  return answers;
 }
 
 function valueOf(name) {
