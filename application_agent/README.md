@@ -16,6 +16,35 @@ cp autofill_extension/profile.example.json autofill_extension/profile.private.js
 
 Then replace the sample values with your own contact info, addresses, work authorization, work history, education, links, resume filename, saved answers, and optional self-identification answers.
 
+## Install Playwright Browser
+
+The agent and queued runner use Playwright. Installing the Python package is not
+enough; each machine also needs the Chromium browser binary:
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+If you see:
+
+```text
+BrowserType.launch: Executable doesn't exist at .../ms-playwright/.../headless_shell
+Looks like Playwright was just installed or updated.
+Please run: playwright install
+```
+
+run this from the same activated virtual environment you use to start
+ApplyPilot:
+
+```bash
+python -m playwright install chromium
+```
+
+Prefer `python -m playwright ...` over bare `playwright ...` so the browser is
+installed for the same Python interpreter used by `python app.py` and
+`python -m application_agent.main`.
+
 ## Safety Rules
 
 - It can fill fields, upload the ignored local resume file, and click safe Next/Continue buttons.

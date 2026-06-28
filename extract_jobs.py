@@ -92,7 +92,7 @@ def extract_spglobal_jobs(url: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError(
             'Playwright is required for S&P Global scraping. '
-            'Install it with: pip install playwright && playwright install chromium'
+            'Install it with: python -m pip install playwright && python -m playwright install chromium'
         ) from exc
 
     with sync_playwright() as pw:
@@ -182,7 +182,7 @@ def extract_qualcomm_jobs(url: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError(
             'Playwright is required for Qualcomm scraping. '
-            'Install it with: pip install playwright && playwright install chromium'
+            'Install it with: python -m pip install playwright && python -m playwright install chromium'
         ) from exc
 
     with sync_playwright() as pw:
@@ -363,7 +363,7 @@ def extract_stryker_jobs(url: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError(
             "Playwright is required for Stryker scraping. "
-            "Install it with: pip install playwright && playwright install chromium"
+            "Install it with: python -m pip install playwright && python -m playwright install chromium"
         ) from exc
 
     with sync_playwright() as pw:
@@ -419,7 +419,7 @@ def extract_bms_jobs(url: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError(
             "Playwright is required for BMS scraping. "
-            "Install it with: pip install playwright && playwright install chromium"
+            "Install it with: python -m pip install playwright && python -m playwright install chromium"
         ) from exc
 
     with sync_playwright() as pw:
@@ -549,7 +549,7 @@ def extract_micron_jobs(url: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError(
             "Playwright is required for rendering the Micron careers page. "
-            "Install it with: pip install playwright && playwright install chromium"
+            "Install it with: python -m pip install playwright && python -m playwright install chromium"
         ) from exc
 
     with sync_playwright() as pw:
@@ -643,7 +643,7 @@ def extract_progressive_jobs(url: str) -> dict[str, Any]:
     except ImportError as exc:
         raise ImportError(
             'Playwright is required for Progressive scraping. '
-            'Install it with: pip install playwright && playwright install chromium'
+            'Install it with: python -m pip install playwright && python -m playwright install chromium'
         ) from exc
 
     with sync_playwright() as pw:
@@ -1244,7 +1244,7 @@ def _scrape_newgrad_category(category: str, embed_url: str, progress_callback: A
     except ImportError as exc:
         raise ImportError(
             "Playwright is required for newgrad-jobs.com scraping. "
-            "Install with: pip install playwright && playwright install chromium"
+            "Install with: python -m pip install playwright && python -m playwright install chromium"
         ) from exc
 
     label = _NEWGRAD_CATEGORY_LABELS.get(category, category)

@@ -26,8 +26,8 @@ source .venv/bin/activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Install the browser used by Playwright-based scrapers
-playwright install chromium
+# 3. Install the browser binary used by Playwright-based scrapers/agents
+python -m playwright install chromium
 
 # 4. Start the Flask app
 python app.py
@@ -38,6 +38,42 @@ Open the dashboard at:
 ```text
 http://127.0.0.1:5003
 ```
+
+### Playwright Browser Install Troubleshooting
+
+If the dashboard or agent shows an error like:
+
+```text
+BrowserType.launch: Executable doesn't exist at .../ms-playwright/.../headless_shell
+Looks like Playwright was just installed or updated.
+Please run: playwright install
+```
+
+it means the Python `playwright` package is installed, but the browser binary
+for that Python environment is missing. Run this from the activated virtual
+environment for this repo:
+
+```bash
+python -m playwright install chromium
+```
+
+If the command still fails, reinstall the Python package and browser together:
+
+```bash
+python -m pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+On a fresh machine, confirm the same Python environment is being used:
+
+```bash
+which python
+python -m pip show playwright
+python -m playwright --version
+```
+
+Use `python -m playwright ...` instead of bare `playwright ...` so the browser
+is installed for the same interpreter that runs `python app.py`.
 
 ---
 
