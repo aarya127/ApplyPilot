@@ -78,12 +78,16 @@ const sampleProfile = {
 
 const sampleSettings = {
   backendMapperUrl: "",
+  autoMapAmbiguousFields: true,
   autoFillDynamicFields: false,
   autoFillSensitiveFields: false,
   requireReviewBeforeSubmit: true,
   backendBaseUrl: "http://127.0.0.1:8000",
   targetCountry: "canada"
 };
+
+let storedProfile = {};
+let storedSettings = {};
 
 loadOptions();
 
@@ -93,6 +97,8 @@ form.addEventListener("submit", async (event) => {
   try {
     const { candidateProfile, settings } = readForm();
     await chrome.storage.local.set({ candidateProfile, settings });
+    storedProfile = candidateProfile;
+    storedSettings = settings;
     showStatus("Saved.");
   } catch (error) {
     showStatus(error.message);
@@ -146,6 +152,8 @@ async function loadOptions() {
 
 function writeForm(profile, settings) {
   profile.answers = preserveApplicationLocationAnswers(profile);
+  storedProfile = profile;
+  storedSettings = settings;
 
   for (const [key, value] of Object.entries(profile)) {
     if (key === "answers" || key === "addresses" || key === "demographics" || key === "resumeFacts") {
@@ -183,6 +191,7 @@ function writeForm(profile, settings) {
   form.elements.backendMapperUrl.value = settings.backendMapperUrl || "";
   form.elements.backendBaseUrl.value = settings.backendBaseUrl || "";
   form.elements.targetCountry.value = settings.targetCountry || "canada";
+  form.elements.autoMapAmbiguousFields.checked = settings.autoMapAmbiguousFields !== false;
   form.elements.autoFillDynamicFields.checked = settings.autoFillDynamicFields === true;
   form.elements.autoFillSensitiveFields.checked = settings.autoFillSensitiveFields === true;
   form.elements.requireReviewBeforeSubmit.checked = settings.requireReviewBeforeSubmit !== false;
@@ -205,6 +214,7 @@ function readForm() {
   }
 
   const candidateProfile = {
+    ...storedProfile,
     firstName: valueOf("firstName"),
     lastName: valueOf("lastName"),
     fullName: valueOf("fullName"),
@@ -268,7 +278,9 @@ function readForm() {
   };
 
   const settings = {
+    ...storedSettings,
     backendMapperUrl: valueOf("backendMapperUrl"),
+    autoMapAmbiguousFields: form.elements.autoMapAmbiguousFields.checked,
     autoFillDynamicFields: form.elements.autoFillDynamicFields.checked,
     autoFillSensitiveFields: form.elements.autoFillSensitiveFields.checked,
     requireReviewBeforeSubmit: form.elements.requireReviewBeforeSubmit.checked,

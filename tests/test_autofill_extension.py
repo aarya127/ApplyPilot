@@ -169,7 +169,7 @@ def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
                     ],
                 }
             ],
-            "profile": {},
+            "profile": {"workAuthorization": "Yes"},
             "page": {},
         },
     )
@@ -303,7 +303,7 @@ def test_backend_policy_prioritizes_sponsorship_over_authorization_phrase():
         },
     ]
 
-    assert server.policy_mappings(fields, {}) == [
+    assert server.policy_mappings(fields, {"workAuthorization": "Yes"}) == [
         {"index": 0, "value": "No", "confidence": 0.78, "source": "policy"},
         {
             "index": 1,
@@ -385,9 +385,22 @@ def test_backend_policy_treats_work_authorization_assistance_as_sponsorship():
     ],
 )
 def test_backend_policy_answers_generic_application_policy_questions(label, expected):
-    assert server.policy_mappings([{"index": 0, "label": label}], {}) == [
+    profile = {"workAuthorization": "Yes", "answers": {"gpa": "3.7 out of 4"}}
+    assert server.policy_mappings([{"index": 0, "label": label}], profile) == [
         {"index": 0, "value": expected, "confidence": 0.78, "source": "policy"}
     ]
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Are you legally eligible to work in the U.S.?",
+        "Are you authorized to work in the country where this role is based?",
+        "Overall Result (GPA)",
+    ],
+)
+def test_backend_policy_skips_work_authorization_and_gpa_when_profile_is_silent(label):
+    assert server.policy_mappings([{"index": 0, "label": label}], {}) == []
 
 
 def test_backend_policy_answers_generic_policy_questions_without_visible_options_together():
@@ -410,7 +423,7 @@ def test_backend_policy_answers_generic_policy_questions_without_visible_options
         },
     ]
 
-    assert server.policy_mappings(fields, {}) == [
+    assert server.policy_mappings(fields, {"workAuthorization": "Yes"}) == [
         {"index": 0, "value": "Yes", "confidence": 0.78, "source": "policy"},
         {"index": 1, "value": "No", "confidence": 0.78, "source": "policy"},
         {"index": 2, "value": "No", "confidence": 0.78, "source": "policy"},
@@ -677,6 +690,54 @@ def test_backend_drops_non_option_education_dropdown_answers():
     ) == []
 
 
+def test_backend_merge_prefers_llm_mappings_over_policy_fallback():
+    llm = [{"index": 0, "value": "3.9 out of 4", "confidence": 0.8, "source": "llm"}]
+    policy = [
+        {"index": 0, "value": "No", "confidence": 0.78, "source": "policy"},
+        {"index": 1, "value": "Yes", "confidence": 0.78, "source": "policy"},
+    ]
+
+    merged = sorted(server.merge_backend_mappings(llm, policy), key=lambda mapping: mapping["index"])
+
+    assert merged == [
+        {"index": 0, "value": "3.9 out of 4", "confidence": 0.8, "source": "llm"},
+        {"index": 1, "value": "Yes", "confidence": 0.78, "source": "policy"},
+    ]
+
+
+def test_backend_semantic_yes_no_handles_authorization_polarity():
+    assert server.semantic_yes_no_value(server.normalize_for_option("I am authorized to work and do not require sponsorship")) == "yes"
+    assert server.semantic_yes_no_value(server.normalize_for_option("Yes, I will require sponsorship")) == "yes"
+    assert server.semantic_yes_no_value(server.normalize_for_option("No, I am authorized to work")) == "no"
+    assert server.semantic_yes_no_value(server.normalize_for_option("I am not authorized to work in the United States")) == "no"
+    assert server.semantic_yes_no_value(server.normalize_for_option("I do not require sponsorship")) == "no"
+
+
+def test_backend_enforces_authorization_statement_to_yes_option():
+    fields = [
+        {
+            "index": 0,
+            "label": "Are you legally authorized to work in the United States without sponsorship?",
+            "options": [{"label": "Yes"}, {"label": "No"}],
+        }
+    ]
+
+    assert server.enforce_option_values(
+        [{"index": 0, "value": "I am authorized to work and do not require sponsorship", "confidence": 0.8, "source": "llm"}],
+        fields,
+    ) == [{"index": 0, "value": "Yes", "confidence": 0.8, "source": "llm"}]
+
+
+def test_backend_deterministic_audit_ignores_mappings_without_matching_field():
+    report = server.deterministic_audit_report(
+        [],
+        [{"index": 7, "value": "Yes", "source": "llm", "confidence": 0.8}],
+        {},
+    )
+
+    assert report == {"corrections": [], "decisions": []}
+
+
 def test_backend_prompt_includes_resume_transcript_for_unknown_questions():
     profile = {
         "workExperience": [{"company": "Example Labs", "title": "Machine Learning Engineer"}],
@@ -755,7 +816,7 @@ def test_backend_deterministic_audit_corrects_wrong_policy_answers():
         {"index": 1, "value": "No", "source": "autofill", "confidence": 0.9},
     ]
 
-    assert server.deterministic_audit_corrections(fields, mappings, {}) == [
+    assert server.deterministic_audit_corrections(fields, mappings, {"workAuthorization": "Yes"}) == [
         {
             "index": 0,
             "value": "No",
@@ -793,7 +854,7 @@ def test_backend_deterministic_audit_report_explains_keep_correct_and_skip():
         {"index": 2, "value": "I like this role.", "source": "llm", "confidence": 0.8},
     ]
 
-    report = server.deterministic_audit_report(fields, mappings, {})
+    report = server.deterministic_audit_report(fields, mappings, {"workAuthorization": "Yes"})
 
     assert report["corrections"] == [
         {
@@ -1512,7 +1573,7 @@ def test_content_script_uses_usa_target_country_for_stripe_style_fields():
                 "line1": "456 Lake St",
             },
         },
-        "answers": {},
+        "answers": {"gpa": "3.7 out of 4"},
         "demographics": {},
     }
     settings = {

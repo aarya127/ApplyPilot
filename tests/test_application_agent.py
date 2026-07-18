@@ -147,7 +147,9 @@ def test_field_mapper_handles_greenhouse_style_questions():
     assert map_field({"label": "Will you need relocation assistance to work at this role's specified location?"}, profile) == ("No", "rule")
     assert map_field({"label": "Do you opt-in to receive WhatsApp messages from ExampleCo Recruiting?"}, profile) == ("No", "rule")
     assert map_field({"label": "How Did You Hear About Us?"}, profile) == ("LinkedIn", "rule")
-    assert map_field({"label": "Overall Result (GPA)"}, profile) == ("3.7 out of 4", "rule")
+    assert map_field({"label": "Overall Result (GPA)"}, profile) is None
+    profile["gpa"] = "3.9/4.0"
+    assert map_field({"label": "Overall Result (GPA)"}, profile) == ("3.9/4.0", "rule")
     assert map_field(
         {
             "label": (

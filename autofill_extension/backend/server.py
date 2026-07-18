@@ -98,11 +98,24 @@ def record_ai_request(now: float | None = None) -> dict[str, int]:
     }
 
 
+def cors_origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+
+    if origin.startswith("chrome-extension://"):
+        return True
+
+    return bool(re.match(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$", origin))
+
+
 @app.after_request
 def add_cors_headers(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    origin = request.headers.get("Origin", "")
+    if cors_origin_allowed(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     return response
 
 
@@ -254,8 +267,22 @@ def llm_traces():
     return jsonify({"tracePath": str(LLM_TRACE_PATH), "traces": traces})
 
 
+def profile_display_name(profile: dict[str, Any]) -> str:
+    if not isinstance(profile, dict):
+        return "the candidate"
+
+    full_name = str(profile.get("fullName") or "").strip()
+    if full_name:
+        return full_name
+
+    parts = [str(profile.get(key) or "").strip() for key in ("firstName", "lastName")]
+    name = " ".join(part for part in parts if part)
+    return name or "the candidate"
+
+
 def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> list[dict[str, Any]]:
     prompt = build_mapper_prompt(fields, profile, page)
+    display_name = profile_display_name(profile)
     trace_id = new_trace_id()
     request_json = {
         "model": model_name(),
@@ -263,7 +290,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
             {
                 "role": "system",
                 "content": (
-                    "You are ApplyPilot acting for Aarya Shah on job application forms. "
+                    f"You are ApplyPilot acting for {display_name} on job application forms. "
                     "Return only strict JSON with no markdown or reasoning. "
                     "For each field, produce the most accurate truthful answer using the supplied profile, "
                     "resume facts, saved answers, default policies, retrieved field context, and visible options. "
@@ -272,7 +299,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
                     "For legal eligibility or authorization to work in the country of employment, choose the positive authorized/eligible option. "
                     "Use the profile, resume facts, saved answers, and default policies. "
                     "For narrative textarea/free-text custom answers, write as the candidate in first person using I/my; "
-                    "never write in third person as Aarya/he/his. "
+                    f"never write in third person as {display_name} or he/she/they. "
                     "Do not invent experience. Skip unknown fields."
                 ),
             },
@@ -337,6 +364,7 @@ def call_nvidia_auditor(
     page: dict[str, Any],
 ) -> dict[str, Any]:
     prompt = build_audit_prompt(fields, mappings, profile, page)
+    display_name = profile_display_name(profile)
     trace_id = new_trace_id()
     request_json = {
         "model": model_name(),
@@ -344,7 +372,7 @@ def call_nvidia_auditor(
             {
                 "role": "system",
                 "content": (
-                    "You are ApplyPilot auditing answers on a job application for Aarya Shah. "
+                    f"You are ApplyPilot auditing answers on a job application for {display_name}. "
                     "Return only strict JSON with no markdown. "
                     "Follow the audit protocol exactly: keep correct answers, correct wrong answers, fill safe unanswered required questions, "
                     "and skip anything unsafe with a reason. "
@@ -354,7 +382,7 @@ def call_nvidia_auditor(
                     "retrieved context, default policies, or visible options. "
                     "If a field has options, the correction value must be exactly one supplied option label. "
                     "For narrative textarea/free-text answers, write as the candidate in first person using I/my; "
-                    "never write in third person as Aarya/he/his. "
+                    f"never write in third person as {display_name} or he/she/they. "
                     "Never change name, email, phone, address, resume, experience, education, or link fields unless "
                     "the retrieved profile facts explicitly show the visible value is wrong."
                 ),
@@ -423,6 +451,7 @@ def call_nvidia_auditor(
 
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
     addresses = profile.get("addresses", {})
+    display_name = profile_display_name(profile)
     minimized_profile = {
         "contact": {
             "firstName": profile.get("firstName"),
@@ -454,7 +483,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "school": profile.get("school"),
             "degree": profile.get("degree"),
             "graduationDate": profile.get("graduationDate"),
-            "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4",
+            "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "",
         },
         "preferences": {
             "relocation": profile.get("relocation"),
@@ -488,7 +517,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "For disability, demographic, veteran, work authorization, sponsorship, relocation, consent, and yes/no fields, compare the meaning of every supplied option and return the single closest option label exactly. "
                 "Prefer explicit profile facts and resume facts over inference. "
                 "Use savedAnswers only when they clearly match the same current question; ignore generic or low-information saved answers for policy questions. "
-                "Act as Aarya; answer eligibility/default-policy questions according to defaultPolicies. "
+                f"Act as {display_name}; answer eligibility/default-policy questions according to defaultPolicies. "
                 "Use resumeTranscript to decide whether the candidate has worked at a named company; if the named company is absent from the transcript and savedAnswers do not say otherwise, answer No. "
                 "Use candidateContext as the full compact source of truth for profile facts, work history, education, links, preferences, eligibility, and saved answers. "
                 "For relatives, family, spouse, domestic partner, contractors, dealers, affiliates, group/community affiliations, memberships, or company-specific conflict questions, answer No/None of the above by default unless savedAnswers or resumeTranscript explicitly says Yes. "
@@ -501,7 +530,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "For previous employer/company questions, answer No when the saved profile does not show employment at that company. "
                 "For textarea/free-text custom questions, answer in 2-3 concise sentences using only supplied facts. "
                 "Write custom narrative answers in first person as the candidate using I/my. "
-                "Never write narrative answers in third person as Aarya/he/his. "
+                f"Never write narrative answers in third person as {display_name} or he/she/they. "
                 "Skip fields that cannot be answered safely."
             ),
             "page": page,
@@ -557,7 +586,8 @@ def build_audit_prompt(
                 "If options are supplied, decision.value and correction.value must be one exact option label from field.options. "
                 "For unanswered required fields, correct/fill only when a safe exact option or precise text answer is supported; otherwise skip and add an issue. "
                 "Do not change identity/contact/address/education/experience/link fields unless the supplied profile fact is explicit and the current value is wrong. "
-                "Work authorization/eligibility is Yes/authorized for both the United States and Canada. "
+                "Answer work authorization/eligibility questions only from the work authorization facts in defaultPolicies and candidateContext; "
+                "if the profile does not state work authorization, skip the field instead of assuming an answer. "
                 "Visa sponsorship, employer work-authorization assistance, relocation assistance, relatives at company, "
                 "contractor/dealer/affiliate status, military service, veteran protected status, subscriptions, and marketing messages default to No. "
                 "Terms/conditions acceptance and certification that the application is true/correct default to Yes. "
@@ -676,7 +706,7 @@ def relevant_profile_facts(category: str, profile: dict[str, Any], page: dict[st
                 "education": profile.get("education"),
                 "school": profile.get("school"),
                 "degree": profile.get("degree"),
-                "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4",
+                "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "",
                 "workExperience": profile.get("workExperience") or profile.get("resumeFacts", {}).get("workExperience"),
                 "links": profile.get("links"),
                 "resumeFacts": profile.get("resumeFacts"),
@@ -866,15 +896,44 @@ def resume_transcript(profile: dict[str, Any]) -> str:
     return "\n\n".join(sections)[:12000]
 
 
+def stated_work_authorization(profile: dict[str, Any]) -> str:
+    answers = profile.get("answers", {}) if isinstance(profile.get("answers"), dict) else {}
+    authorization = (
+        profile.get("workAuthorization")
+        or profile.get("workEligibility")
+        or answers.get("workAuthorization")
+    )
+    return str(authorization).strip() if authorization not in (None, "", [], {}) else ""
+
+
+def work_authorization_policy(profile: dict[str, Any], country: str, status_key: str) -> str:
+    facts = []
+    status = profile.get(status_key)
+    if status not in (None, ""):
+        facts.append(f"{status_key}: {status}")
+
+    authorization = stated_work_authorization(profile)
+    if authorization:
+        facts.append(f"workAuthorization: {authorization}")
+
+    if not facts:
+        return (
+            f"Work authorization for {country} is not specified in profile; "
+            "do not assert authorization and leave the field for user review."
+        )
+
+    return f"Answer work authorization questions for {country} strictly from these profile facts: {'; '.join(facts)}."
+
+
 def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
     return {
-        "identity": "Answer as Aarya Shah using only the supplied profile and resume facts. Use first person for narrative answers.",
-        "minimumAge": profile.get("answers", {}).get("meetsMinimumAge", "Yes"),
-        "usWorkAuthorization": (
-            "Aarya is a U.S. permanent resident/green card holder and is authorized to work "
-            "in the United States for any employer."
+        "identity": (
+            f"Answer as {profile_display_name(profile)} using only the supplied profile and resume facts. "
+            "Use first person for narrative answers."
         ),
-        "canadaWorkAuthorization": "Aarya is a Canadian citizen and is authorized to work in Canada.",
+        "minimumAge": profile.get("answers", {}).get("meetsMinimumAge", "Yes"),
+        "usWorkAuthorization": work_authorization_policy(profile, "United States", "usPermanentResident"),
+        "canadaWorkAuthorization": work_authorization_policy(profile, "Canada", "canadianCitizen"),
         "needsSponsorship": profile.get("needsSponsorship") or profile.get("answers", {}).get("sponsorship") or "No",
         "subjectToAgreement": profile.get("subjectToAgreement") or profile.get("answers", {}).get("subjectToAgreement") or "No",
         "relativesAtCompany": profile.get("answers", {}).get("relativesAtCompany", "No"),
@@ -891,7 +950,7 @@ def default_answer_policies(profile: dict[str, Any]) -> dict[str, Any]:
         "certifyApplicationTruth": profile.get("answers", {}).get("certifyApplicationTruth", "Yes"),
         "relocation": profile.get("relocation") or profile.get("answers", {}).get("relocation") or "Anywhere",
         "relocateAtOwnCost": profile.get("answers", {}).get("relocateAtOwnCost", "Yes"),
-        "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4",
+        "gpa": profile.get("gpa") or profile.get("answers", {}).get("gpa") or "",
     }
 
 
@@ -927,10 +986,11 @@ def deterministic_audit_report(
 
         index = mapping["index"]
         field = field_by_index.get(index)
-        policy = policy_by_index.get(index) or deterministic_profile_mapping(field, profile)
 
         if not field:
             continue
+
+        policy = policy_by_index.get(index) or deterministic_profile_mapping(field, profile)
 
         current_value = mapping.get("value")
 
@@ -1088,7 +1148,7 @@ def deterministic_profile_answer(field: dict[str, Any], profile: dict[str, Any])
         return location
 
     if is_work_authorized_countries_field(haystack):
-        return profile.get("answers", {}).get("authorizedCountries") or "Canada and United States"
+        return profile.get("answers", {}).get("authorizedCountries") or None
 
     return None
 
@@ -1226,14 +1286,23 @@ def policy_answer_for_field(
         return best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
 
     if is_work_authorized_countries_field(haystack):
-        answer = profile.get("answers", {}).get("authorizedCountries") or "Canada and United States"
+        answer = profile.get("answers", {}).get("authorizedCountries")
+        if not answer:
+            return None
         return best_available_option(answer, options) or answer
 
     if is_work_eligibility_question(haystack):
-        return best_authorization_option(options) or best_available_option("Yes", options) or "Yes"
+        authorization = stated_work_authorization(profile)
+        if not authorization:
+            return None
+        if semantic_yes_no_value(normalize_for_option(authorization)) == "no":
+            return best_available_option("No", options) or "No"
+        return best_authorization_option(options) or best_available_option(authorization, options) or authorization
 
     if is_gpa_question(haystack):
-        answer = profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4"
+        answer = profile.get("gpa") or profile.get("answers", {}).get("gpa")
+        if not answer:
+            return None
         return best_available_option(answer, options) or answer
 
     if is_relocation_own_cost_question(haystack):
@@ -1603,7 +1672,7 @@ def merge_backend_mappings(primary: list[dict[str, Any]], fallback: list[dict[st
         if not isinstance(index, int):
             continue
 
-        if index not in by_index or mapping.get("source") == "policy":
+        if index not in by_index:
             by_index[index] = mapping
 
     return list(by_index.values())
@@ -1744,10 +1813,25 @@ def match_simple_yes_no_option(label: str, value: str, desired: str) -> bool:
 
 
 def semantic_yes_no_value(value: str) -> str | None:
-    if re.search(r"^(no|false|n|0)$", value) or re.search(r"\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b", value):
+    if re.search(r"^(yes|true)\b", value) or re.search(r"^(y|1)$", value):
+        return "yes"
+
+    if re.search(r"^(no|false)\b", value) or re.search(r"^(n|0)$", value):
         return "no"
 
-    if re.search(r"^(yes|true|y|1)$", value) or re.search(r"\b(open|willing|able|can|agree|consent|authorized|eligible)\b", value):
+    if re.search(r"\bnot (legally )?(authorized|eligible|permitted|allowed)\b", value):
+        return "no"
+
+    if re.search(r"\b(authorized|eligible|permitted|allowed) to work\b", value) or (
+        re.search(r"\b(authorized|eligible|permitted|allowed)\b", value)
+        and re.search(r"\bwithout (visa )?sponsorship\b", value)
+    ):
+        return "yes"
+
+    if re.search(r"\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b", value):
+        return "no"
+
+    if re.search(r"\b(open|willing|able|can|agree|consent|authorized|eligible)\b", value):
         return "yes"
 
     return None
@@ -1989,4 +2073,8 @@ init_db()
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=int(os.environ.get("PORT", "8000")), debug=True)
+    app.run(
+        host="127.0.0.1",
+        port=int(os.environ.get("PORT", "8000")),
+        debug=os.environ.get("FLASK_DEBUG") == "1",
+    )

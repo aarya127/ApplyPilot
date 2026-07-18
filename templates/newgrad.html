@@ -42,7 +42,11 @@
 
                 reloadScheduled = true;
                 setTimeout(function () {
-                    window.location.reload();
+                    // Drop refresh=1 so the reload doesn't kick off another scrape
+                    var params = new URLSearchParams(window.location.search);
+                    params.delete('refresh');
+                    var query = params.toString();
+                    window.location.href = window.location.pathname + (query ? '?' + query : '');
                 }, 900);
             }
 

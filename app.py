@@ -1,9 +1,12 @@
+import os
 import re
+import secrets
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import urllib.error
 import urllib.request
 import urllib.parse
 import json
@@ -13,7 +16,9 @@ from application_agent.agent.apply_queue import ApplyQueue
 from extract_jobs import extract_newgrad_jobs
 
 app = Flask(__name__)
-app.secret_key = "hr-system-applied-tracker-key"
+# Sessions only carry an opaque token id, so a per-process random key is fine;
+# set FLASK_SECRET_KEY to keep sessions valid across restarts.
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 apply_queue = ApplyQueue()
 SHORTLIST_STATUSES = ["shortlisted", "queued", "running", "paused", "submitted", "failed", "skipped"]
 @app.route("/")
@@ -21,13 +26,193 @@ def index() -> str:
     return redirect(url_for("applied"))
 
 
+# ---------------------------------------------------------------------------
+# Job relevance scoring and posted-date parsing (shared by scrapers and tests)
+# ---------------------------------------------------------------------------
+
+_STRONG_KEYWORDS = "|".join([
+    # --- Machine Learning / AI ---
+    r"machine learning", r"deep learning", r"reinforcement learning",
+    r"artificial intelligence", r"ai/ml", r"mlops", r"llmops",
+    r"large language model", r"llm", r"generative ai", r"gen ai",
+    r"computer vision", r"natural language processing", r"nlp",
+    r"speech recognition", r"recommendation system", r"feature engineering",
+    r"model training", r"model evaluation", r"applied scientist",
+    r"research scientist", r"ml engineer", r"ai engineer", r"ai researcher",
+    r"ai infrastructure", r"foundation model", r"rag",
+    r"prompt engineer", r"fine.?tun",
+    # --- Data Science / Analytics ---
+    r"data scientist", r"data science",
+    r"data analyst", r"senior analyst",
+    r"analytics engineer", r"quantitative analyst", r"quant analyst",
+    r"business intelligence", r"bi engineer", r"bi developer",
+    r"reporting analyst", r"insights analyst",
+    r"statistical model", r"statistician",
+    r"a/b test", r"experimentation engineer",
+    # --- Data Engineering / Architecture ---
+    r"data engineer", r"data engineering",
+    r"data architect", r"data platform",
+    r"etl", r"elt", r"pipeline engineer",
+    r"lakehouse", r"data lake", r"data warehouse", r"data mesh",
+    r"streaming engineer", r"kafka engineer",
+    r"spark engineer", r"dbt", r"airflow",
+    r"database engineer", r"database administrator", r"dba",
+    # --- Software Engineering ---
+    r"software engineer", r"software developer", r"software engineering",
+    r"software architect", r"principal engineer",
+    r"full[ -]?stack", r"front[ -]?end", r"back[ -]?end",
+    r"mobile engineer", r"ios engineer", r"android engineer",
+    r"embedded engineer", r"embedded software",
+    r"firmware engineer",
+    r"api engineer", r"sdk engineer",
+    r"staff engineer", r"distinguished engineer",
+    # --- Infrastructure / Platform / DevOps ---
+    r"platform engineer", r"infrastructure engineer",
+    r"site reliability engineer", r"\bsre\b",
+    r"devops", r"devsecops", r"cloud engineer",
+    r"cloud architect", r"solutions architect",
+    r"kubernetes", r"\bk8s\b", r"docker",
+    r"ci/cd", r"build engineer", r"release engineer",
+    r"distributed systems", r"systems engineer",
+    r"storage engineer", r"network engineer", r"network architect",
+    r"gpu infrastructure", r"hpc engineer",
+    # --- Security / Compliance Engineering ---
+    r"security engineer", r"application security", r"appsec",
+    r"cybersecurity", r"cyber security", r"information security",
+    r"devsecops", r"penetration test", r"pentest",
+    r"identity engineer", r"iam engineer", r"zero trust",
+    r"threat intelligence",
+    # --- Technical Leadership / Management ---
+    r"engineering manager", r"principal scientist",
+    r"director of engineering", r"vp of engineering",
+    r"technical program manager", r"technical project manager",
+    r"it systems", r"it engineer", r"it architect",
+    # --- Product / UX Engineering ---
+    r"product engineer", r"growth engineer",
+    r"ux engineer", r"ui engineer",
+])
+
+TECH_INCLUDE_PATTERNS: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(rf"\b({_STRONG_KEYWORDS})\b", re.IGNORECASE), 4),
+    # Weaker lone-word signals — still need a strong match unless stacked
+    (re.compile(r"\b(ai|ml|data|software|platform|cloud|automation|infrastructure|python|sql|scala|spark|golang|rust|java|typescript|kubernetes|devops|analytics|modeling|algorithm)\b", re.IGNORECASE), 1),
+]
+
+TECH_EXCLUDE_PATTERN = re.compile(
+    "|".join([
+        r"\bsales associate\b", r"\bculinary\b", r"\bdishwasher\b", r"\bsteward\b",
+        r"\bpastry\b", r"\brestaurant\b", r"\bchef\b", r"\bcashier\b",
+        r"\bretail\b", r"\bstore manager\b", r"\bstore associate\b",
+        r"\bparalegal\b", r"\blegal counsel\b", r"\battorney\b", r"\bcounsel\b",
+        r"\bcorporate communications\b", r"\bpublic relations\b", r"\bpr manager\b",
+        r"\bmarketing manager\b", r"\bbrand manager\b", r"\bcontent strategist\b",
+        r"\bevent coordinator\b", r"\bworkplace experience\b",
+        r"\bfinancial analyst\b", r"\bfinancial advisor\b", r"\bportfolio manager\b",
+        r"\btax\b", r"\baccountant\b", r"\baccounting\b", r"\baudit\b", r"\bpayroll\b",
+        r"\bhuman resources\b", r"\bhr business partner\b", r"\brecruiter\b",
+        r"\btalent acquisition\b", r"\blearning.*development\b",
+        r"\bnurse\b", r"\bphysician\b", r"\bmedical assistant\b", r"\bpharmacist\b",
+        r"\bdentist\b", r"\btherapist\b", r"\bclinical\b",
+        r"\bmechanic\b", r"\bmanufacturing technician\b", r"\bproduction operator\b",
+        r"\bassembly technician\b", r"\bquality inspector\b",
+        r"\bfacilities\b", r"\bcustodian\b", r"\bjanitorial\b",
+        r"\bsecurity officer\b", r"\bsecurity guard\b",
+        r"\bsupply chain\b", r"\bprocurement\b", r"\blogistics\b",
+        r"\bbox office\b", r"\bguestroom\b", r"\bfront desk\b", r"\bconcierge\b",
+        r"\bhousekeeping\b",
+    ]),
+    re.IGNORECASE,
+)
+
+
+def parse_posted_date(posted: str) -> Optional[datetime]:
+    if not posted:
+        return None
+
+    text = posted.strip()
+    text = text.replace("Date Posted:", "").replace("Posted:", "").strip()
+    text = text.replace("Posted", "").replace("Date Posted", "").strip()
+
+    now = datetime.now()
+    if "today" in text.lower():
+        return now
+    if "yesterday" in text.lower():
+        return now - timedelta(days=1)
+
+    # Handle "a day ago", "an hour ago", "a month ago" etc. by substituting "1"
+    text = re.sub(r'\ba\b(?=\s+(second|minute|hour|day|week|month|year))', '1', text, flags=re.IGNORECASE)
+    text = re.sub(r'\ban\b(?=\s+(second|minute|hour|day|week|month|year))', '1', text, flags=re.IGNORECASE)
+
+    for pattern, builder in [
+        (r"(\d+)\s+days?\s+ago", lambda value: now - timedelta(days=int(value))),
+        (r"(\d+)\s+hours?\s+ago", lambda value: now - timedelta(hours=int(value))),
+        (r"(\d+)\s+hrs?\s+ago", lambda value: now - timedelta(hours=int(value))),
+        (r"(\d+)\s+minutes?\s+ago", lambda value: now - timedelta(minutes=int(value))),
+        (r"(\d+)\s+weeks?\s+ago", lambda value: now - timedelta(weeks=int(value))),
+        (r"(\d+)\s+months?\s+ago", lambda value: now - timedelta(days=int(value) * 30)),
+        (r"(\d+)\s+years?\s+ago", lambda value: now - timedelta(days=int(value) * 365)),
+    ]:
+        try:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return builder(match.group(1))
+        except Exception:
+            continue
+
+    for fmt in ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y", "%m/%d/%y", "%b %d, %Y", "%B %d, %Y"]:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+
+    return None
+
+
+def normalize_job_text(*parts: str) -> str:
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part)).strip().lower()
+
+
+def score_job_relevance(title: str, *, source: str = "", source_url: str = "") -> int:
+    text = normalize_job_text(title, source, source_url)
+    score = 0
+    for pattern, weight in TECH_INCLUDE_PATTERNS:
+        if pattern.search(text):
+            score += weight
+    if TECH_EXCLUDE_PATTERN.search(text):
+        score -= 6
+    return score
+
+
+def is_relevant_job(title: str, *, source: str = "", source_url: str = "") -> bool:
+    return score_job_relevance(title, source=source, source_url=source_url) >= 3
+
+
+def job_matches_filters(job: Dict[str, Any], *, filter_mode: str, search_query: str) -> bool:
+    if filter_mode == "relevant" and not job.get("is_relevant", True):
+        return False
+
+    if search_query:
+        haystack = normalize_job_text(
+            job.get("title", ""),
+            job.get("location", ""),
+            job.get("source", ""),
+        )
+        for token in normalize_job_text(search_query).split():
+            if token not in haystack:
+                return False
+
+    return True
+
 
 # ---------------------------------------------------------------------------
 # New-grad tab — separate cache so it doesn't block the main dashboard fetch
 # ---------------------------------------------------------------------------
-_newgrad_cache: Dict[str, Any] = {"jobs": [], "errors": [], "updated_at": None}
+_newgrad_cache: Dict[str, Any] = {"jobs": [], "errors": [], "updated_at": None, "last_attempt_at": None}
 _newgrad_cache_lock = threading.Lock()
 _newgrad_cache_loading = False
+# After a failed fetch, wait this long before auto-retrying so an error doesn't
+# turn into an endless scrape loop (each attempt launches headless browsers).
+NEWGRAD_RETRY_COOLDOWN = timedelta(minutes=2)
 _newgrad_progress: Dict[str, Any] = {
     "percent": 0,
     "message": "Idle",
@@ -85,6 +270,7 @@ def start_newgrad_fetch() -> None:
         if _newgrad_cache_loading:
             return
         _newgrad_cache_loading = True
+        _newgrad_cache["last_attempt_at"] = datetime.now()
         _newgrad_progress["percent"] = 0
         _newgrad_progress["message"] = "Queued new-grad job refresh"
         _newgrad_progress["detail"] = {"phase": "queued"}
@@ -116,14 +302,19 @@ def newgrad() -> str:
 
     with _newgrad_cache_lock:
         updated_at = _newgrad_cache["updated_at"]
+        last_attempt_at = _newgrad_cache["last_attempt_at"]
         expired = not updated_at or now - updated_at > NEWGRAD_CACHE_TTL
         loading = _newgrad_cache_loading
         jobs = list(_newgrad_cache["jobs"])
         errors = list(_newgrad_cache["errors"])
         progress = _newgrad_progress_snapshot()
 
+    # Auto-triggered fetches respect a cooldown so a failing scrape (empty jobs,
+    # no updated_at) doesn't relaunch browsers on every page load; an explicit
+    # refresh=1 from the user bypasses it.
+    cooled_down = not last_attempt_at or now - last_attempt_at > NEWGRAD_RETRY_COOLDOWN
     triggered_fetch = False
-    if (refresh or not jobs or expired) and not loading:
+    if not loading and (refresh or ((not jobs or expired) and cooled_down)):
         start_newgrad_fetch()
         triggered_fetch = True
     elif loading:
@@ -214,7 +405,9 @@ def update_shortlist_status(job_id: int):
         return redirect(request.referrer or url_for("shortlist"))
 
     if request.is_json:
-        return jsonify({"ok": bool(job), "job": job})
+        if job is None:
+            return jsonify({"ok": False, "error": f"No shortlisted job with id {job_id}"}), 404
+        return jsonify({"ok": True, "job": job})
 
     return redirect(request.referrer or url_for("shortlist"))
 
@@ -330,6 +523,8 @@ def _graph_request(access_token: str, path: str) -> dict:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode(errors="replace")
         raise RuntimeError(f"Graph API {exc.code}: {body[:300]}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Graph API request failed: {exc}") from exc
 
 
 _GRAPH_BASE = "https://graph.microsoft.com/v1.0"
@@ -559,39 +754,60 @@ def fetch_applied_jobs(access_token: str) -> list[dict[str, Any]]:
     return results
 
 
+# Graph tokens live only in server memory; the session cookie carries an opaque
+# id. Keeps the raw token out of the (signed but readable) cookie and avoids
+# blowing the ~4KB cookie limit that large Graph JWTs can hit.
+_token_store: Dict[str, str] = {}
+_token_store_lock = threading.Lock()
+
+
+def _stored_graph_token() -> str:
+    token_id = session.get("graph_token_id", "")
+    if not token_id:
+        return ""
+    with _token_store_lock:
+        return _token_store.get(token_id, "")
+
+
+def _forget_graph_token() -> None:
+    token_id = session.pop("graph_token_id", "")
+    if not token_id:
+        return
+    with _token_store_lock:
+        token = _token_store.pop(token_id, "")
+    if token:
+        import hashlib
+        token_key = hashlib.sha256(token.encode()).hexdigest()
+        with _applied_cache_lock:
+            _applied_cache.pop(token_key, None)
+
+
 @app.route("/applied", methods=["GET", "POST"])
 def applied() -> str:
     error: str = ""
     jobs: list[dict] = []
     search_query = request.args.get("q", "").strip()
     category_filter = request.args.get("cat", "all")
-    token_submitted = ""
 
     if request.method == "POST":
         token_submitted = (request.form.get("access_token") or "").strip()
         if token_submitted:
-            # Store only in server-side session (never echoed back to client)
-            session["graph_token"] = token_submitted
-
-    access_token: str = session.get("graph_token", "")
+            _forget_graph_token()
+            token_id = secrets.token_urlsafe(16)
+            with _token_store_lock:
+                _token_store[token_id] = token_submitted
+            session["graph_token_id"] = token_id
 
     if request.args.get("clear_token"):
-        session.pop("graph_token", None)
-        access_token = ""
-        # Also evict the cache for this token
-        import hashlib
-        if access_token:
-            token_key = hashlib.sha256(access_token.encode()).hexdigest()
-            with _applied_cache_lock:
-                _applied_cache.pop(token_key, None)
+        _forget_graph_token()
 
-    if request.args.get("refresh"):
-        stored = session.get("graph_token", "")
-        if stored:
-            import hashlib
-            token_key = hashlib.sha256(stored.encode()).hexdigest()
-            with _applied_cache_lock:
-                _applied_cache.pop(token_key, None)
+    access_token: str = _stored_graph_token()
+
+    if request.args.get("refresh") and access_token:
+        import hashlib
+        token_key = hashlib.sha256(access_token.encode()).hexdigest()
+        with _applied_cache_lock:
+            _applied_cache.pop(token_key, None)
 
     if access_token:
         try:
@@ -599,7 +815,8 @@ def applied() -> str:
         except RuntimeError as exc:
             error = str(exc)
             if "401" in error or "InvalidAuthenticationToken" in error:
-                session.pop("graph_token", None)
+                _forget_graph_token()
+                access_token = ""
                 error = "Access token expired or invalid. Please paste a new one."
 
     counts = {
@@ -628,4 +845,5 @@ def applied() -> str:
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5003, debug=True)
+    # Werkzeug's debugger allows code execution — keep it opt-in.
+    app.run(host="127.0.0.1", port=5003, debug=os.environ.get("FLASK_DEBUG") == "1")

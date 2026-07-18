@@ -55,7 +55,7 @@ def classify_field_kind(field: dict[str, Any]) -> str:
     if is_repeatable_employment_detail_field(primary, full):
         return ""
 
-    if is_work_or_education_identity_field(primary):
+    if is_work_or_education_identity_field(primary) and field.get("tag") != "textarea":
         if re.search(r"employer|company", primary):
             return WORK_CURRENT_EMPLOYER
         if re.search(r"job title|title|position|role", primary):
@@ -95,17 +95,22 @@ def classify_field_kind(field: dict[str, Any]) -> str:
         return ADDRESS_LINE2
     if re.search(r"location city|city location|^city\b|\bcity$", primary):
         return ADDRESS_CITY
-    if re.search(r"(what|which).{0,20}u\.?s\.?\s*state|state.{0,60}(currently reside|current residence)|currently reside.{0,60}state|\bstate\b|\bprovince\b|region", primary):
+    if re.search(
+        r"(what|which).{0,20}u\.?s\.?\s*state|state.{0,60}(currently reside|current residence)|currently reside.{0,60}state|"
+        r"state\s*/\s*province|state or province|home state|\bprovince\b|^state\s*\*?$",
+        primary,
+    ) or (re.search(r"\bstate\b", primary) and re.search(r"\baddress\b|\bcity\b|\bzip\b|postal", primary)):
         return ADDRESS_STATE
     if re.search(r"postal code|postcode|zip code|\bzip\b", primary):
         return ADDRESS_POSTAL
     if re.search(r"\bcountry\b|currently reside", primary) and not re.search(r"phone|code", primary):
         return ADDRESS_COUNTRY
 
-    if re.search(r"(current|previous|most recent).*(employer|company)|(employer|company).*(current|previous|most recent)", full):
-        return WORK_CURRENT_EMPLOYER
-    if re.search(r"(current|previous|most recent).*(job title|title|position|role)|(job title|title|position|role).*(current|previous|most recent)", full):
-        return WORK_CURRENT_TITLE
+    if field.get("tag") != "textarea":
+        if re.search(r"(current|previous|most recent).*(employer|company)|(employer|company).*(current|previous|most recent)", primary):
+            return WORK_CURRENT_EMPLOYER
+        if re.search(r"(current|previous|most recent).*(job title|title|position|role)|(job title|title|position|role).*(current|previous|most recent)", primary):
+            return WORK_CURRENT_TITLE
 
     return ""
 

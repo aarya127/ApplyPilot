@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -81,23 +82,27 @@ def generate_option_answer_with_llm(question: str, options: list[str], profile: 
         "profile": safe_profile_for_prompt(profile),
     }
 
-    response = requests.post(
-        "https://integrate.api.nvidia.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You choose exact dropdown options for truthful job applications."},
-                {"role": "user", "content": json.dumps(prompt, ensure_ascii=True)},
-            ],
-            "temperature": 0,
-            "max_tokens": 120,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    content = response.json()["choices"][0]["message"]["content"]
-    return parse_option_answer(content)
+    try:
+        response = requests.post(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You choose exact dropdown options for truthful job applications."},
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=True)},
+                ],
+                "temperature": 0,
+                "max_tokens": 512,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        return ""
+
+    return parse_option_answer(strip_reasoning(content))
 
 
 def generate_answer_with_llm(question: str, profile: dict[str, Any]) -> str:
@@ -113,22 +118,34 @@ def generate_answer_with_llm(question: str, profile: dict[str, Any]) -> str:
         f"Profile: {json.dumps(safe_profile_for_prompt(profile), ensure_ascii=True)}"
     )
 
-    response = requests.post(
-        "https://integrate.api.nvidia.com/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": "You help draft concise, truthful job application answers."},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.2,
-            "max_tokens": 220,
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
-    return response.json()["choices"][0]["message"]["content"].strip()
+    try:
+        response = requests.post(
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": "You help draft concise, truthful job application answers."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.2,
+                "max_tokens": 768,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        return ""
+
+    return strip_reasoning(content)
+
+
+def strip_reasoning(content: Any) -> str:
+    text = re.sub(r"<think>.*?</think>", "", str(content or ""), flags=re.DOTALL)
+    if "</think>" in text:
+        text = text.split("</think>")[-1]
+    return text.strip()
 
 
 def parse_option_answer(content: Any) -> str:
@@ -150,6 +167,9 @@ def parse_option_answer(content: Any) -> str:
 
     if isinstance(data, dict):
         return str(data.get("answer") or data.get("value") or "").strip()
+
+    if isinstance(data, str):
+        return data.strip()
 
     return ""
 

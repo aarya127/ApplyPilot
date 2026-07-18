@@ -682,17 +682,29 @@ def extract_progressive_jobs(url: str) -> dict[str, Any]:
 def extract_greenhouse_jobs(url: str) -> dict[str, Any]:
     html_text = request_html(url)
     jobs = []
-    for match in re.finditer(
-        r'<tr[^>]+class=["\']job-post["\'][^>]*>.*?'
-        r'<a[^>]+href=["\'](?P<href>[^"\']+)["\'][^>]*>.*?'
-        r'<p[^>]+class=["\'][^"\']*body--medium[^"\']*["\'][^>]*>(?P<title>[^<]+)</p>.*?'
-        r'(?:<p[^>]+class=["\'][^"\']*body--metadata[^"\']*["\'][^>]*>(?P<location>[^<]+)</p>)?',
+    # Match each job row as a block, then pull the pieces out of the block —
+    # a fully-optional group after a lazy .*? never participates in the match,
+    # so location has to be extracted separately.
+    for row_match in re.finditer(
+        r'<tr[^>]+class=["\']job-post["\'][^>]*>(?P<row>.*?)</tr>',
         html_text,
         re.IGNORECASE | re.DOTALL,
     ):
-        href = match.group('href').strip()
-        title = html.unescape(match.group('title')).strip()
-        location = html.unescape(match.group('location') or '').strip()
+        row = row_match.group('row')
+        href_match = re.search(r'<a[^>]+href=["\'](?P<href>[^"\']+)["\']', row, re.IGNORECASE)
+        title_match = re.search(
+            r'<p[^>]+class=["\'][^"\']*body--medium[^"\']*["\'][^>]*>(?P<title>[^<]+)</p>',
+            row, re.IGNORECASE,
+        )
+        location_match = re.search(
+            r'<p[^>]+class=["\'][^"\']*body--metadata[^"\']*["\'][^>]*>(?P<location>[^<]+)</p>',
+            row, re.IGNORECASE,
+        )
+        if not href_match or not title_match:
+            continue
+        href = href_match.group('href').strip()
+        title = html.unescape(title_match.group('title')).strip()
+        location = html.unescape(location_match.group('location') if location_match else '').strip()
         jobs.append({'title': title, 'location': location, 'posted': '', 'url': href})
     return {'total_jobs': len(jobs), 'jobs': jobs}
 
@@ -907,15 +919,14 @@ def extract_uber_jobs(url: str) -> dict[str, Any]:
 def extract_boeing_jobs(url: str) -> dict[str, Any]:
     """TalentBrew-based Boeing careers site — server-rendered HTML, paginated."""
     import requests as req
-    from urllib.parse import unquote
 
     parsed = urlparse(url)
     # Path format: /search-jobs/{keyword}/{org_id}/{page}
     parts = [p for p in parsed.path.strip("/").split("/") if p]
     # parts[0]='search-jobs', parts[1]=keyword, parts[2]=org_id, parts[3]=page
-    keyword = unquote(parts[1]) if len(parts) > 1 else ""
+    keyword = parts[1] if len(parts) > 1 else "machine%20learning"
     org_id = parts[2] if len(parts) > 2 else "185"
-    base = f"https://{parsed.hostname}/search-jobs/{parsed.path.strip('/').split('/')[1]}/{org_id}"
+    base = f"https://{parsed.hostname}/search-jobs/{keyword}/{org_id}"
 
     headers = {**REQUEST_HEADERS, "Accept": "text/html"}
     all_jobs: list[dict] = []

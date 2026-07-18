@@ -35,17 +35,19 @@ def main() -> None:
             headless=args.headless,
             args=["--start-maximized"],
         )
-        page = context.pages[-1] if context.pages else context.new_page()
+        try:
+            page = context.pages[-1] if context.pages else context.new_page()
 
-        for job in jobs:
-            run_queued_job(page, agent, queue, job)
-
-        context.close()
+            for job in jobs:
+                run_queued_job(page, agent, queue, job)
+        finally:
+            context.close()
 
 
 def run_queued_job(page: Any, agent: ApplicationAgent, queue: ApplyQueue, job: dict[str, Any]) -> dict[str, Any]:
     queue.update_status(int(job["id"]), "running")
-    report: dict[str, Any]
+    report: dict[str, Any] | None = None
+    status_recorded = False
 
     try:
         page.goto(job["url"], wait_until="domcontentloaded", timeout=45_000)
@@ -59,6 +61,7 @@ def run_queued_job(page: Any, agent: ApplicationAgent, queue: ApplyQueue, job: d
         }
         queue.log_report(job_id=int(job["id"]), url=page.url, status=report["status"], report=report)
         queue.update_status(int(job["id"]), status_for_report(report))
+        status_recorded = True
         print(f"{job.get('company') or 'Unknown'} - {job.get('title') or 'Untitled'}: {report['status']}")
         return report
     except Exception as exc:
@@ -75,8 +78,12 @@ def run_queued_job(page: Any, agent: ApplicationAgent, queue: ApplyQueue, job: d
         }
         queue.log_report(job_id=int(job["id"]), url=job.get("url", ""), status="failed", report=report)
         queue.update_status(int(job["id"]), "failed")
+        status_recorded = True
         print(f"{job.get('company') or 'Unknown'} - {job.get('title') or 'Untitled'}: failed ({exc})")
         return report
+    finally:
+        if not status_recorded:
+            queue.update_status(int(job["id"]), "paused" if report else "failed")
 
 
 def click_apply_if_available(page: Any) -> bool:

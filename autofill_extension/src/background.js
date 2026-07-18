@@ -83,6 +83,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     await chrome.storage.local.set({
       settings: {
         backendMapperUrl: "",
+        autoMapAmbiguousFields: true,
         autoFillDynamicFields: false,
         autoFillSensitiveFields: false,
         requireReviewBeforeSubmit: true,

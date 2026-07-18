@@ -29,7 +29,10 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
         return profile.get("answers", {}).get("phoneCountryCode") or profile.get("phone_country_code") or "+1", "rule"
 
     if re.search(r"overall result|grade point average|\bgpa\b|\bcgpa\b|academic average", text):
-        return profile.get("gpa") or profile.get("answers", {}).get("gpa") or "3.7 out of 4", "rule"
+        gpa = profile.get("gpa") or profile.get("answers", {}).get("gpa")
+        if has_value(gpa):
+            return gpa, "rule"
+        return None
 
     if is_relocation_own_cost_question(text):
         return profile.get("answers", {}).get("relocateAtOwnCost", "Yes"), "rule"
@@ -63,15 +66,21 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if profile_link:
         return profile_link, "rule"
 
-    rules = [
-        (
-            r"(current|previous|most recent).*(employer|company)|(employer|company).*(current|previous|most recent)",
-            profile.get("current_or_previous_employer"),
-        ),
-        (
-            r"(current|previous|most recent).*(job title|title|position|role)|(job title|title|position|role).*(current|previous|most recent)",
-            profile.get("current_or_previous_job_title"),
-        ),
+    rules = []
+    if field.get("tag") != "textarea":
+        rules.extend(
+            [
+                (
+                    r"(current|previous|most recent).*(employer|company)|(employer|company).*(current|previous|most recent)",
+                    profile.get("current_or_previous_employer"),
+                ),
+                (
+                    r"(current|previous|most recent).*(job title|title|position|role)|(job title|title|position|role).*(current|previous|most recent)",
+                    profile.get("current_or_previous_job_title"),
+                ),
+            ]
+        )
+    rules += [
         (r"salary|compensation|pay expectation", profile.get("salary")),
         (r"relocation assistance|need relocation assistance|relocation support", relocation_assistance_answer(profile)),
         (r"relocat", profile.get("relocation")),
@@ -87,12 +96,18 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
         return address_answer, "rule"
 
     if has_sponsorship_terms(text):
+        if asks_authorization_without_sponsorship(text):
+            return profile.get("work_authorization") or "Yes", "rule"
         return sponsorship_answer(profile.get("needs_sponsorship") or profile.get("answers", {}).get("sponsorship") or "No"), "rule"
 
     if is_work_eligibility_question(text):
         return profile.get("work_authorization") or "Yes", "rule"
 
-    if re.search(r"ever|previously|formerly", text) and re.search(r"employed|worked", text):
+    if (
+        re.search(r"\bever\b|\bpreviously\b|\bformerly\b", text)
+        and re.search(r"\bemployed\b|\bworked\b", text)
+        and is_yes_no_style_question(field, text)
+    ):
         return previous_company_answer(text, profile), "rule"
 
     if re.search(r"relatives?|family member|spouse|domestic partner", text) and re.search(r"employed|work|working|relationship", text):
@@ -197,6 +212,28 @@ def has_sponsorship_terms(text: str) -> bool:
     )
 
 
+def asks_authorization_without_sponsorship(text: str) -> bool:
+    if has_work_authorization_assistance_terms(text):
+        return False
+
+    return bool(
+        re.search(r"\bwithout\b.{0,60}\b(sponsor|sponsorship|visa|work permit)", text)
+        or re.search(r"\bnot\b.{0,20}\b(require|need)\b.{0,40}\b(sponsor|sponsorship|visa|work permit)", text)
+    )
+
+
+def is_yes_no_style_question(field: dict[str, Any], text: str) -> bool:
+    labels = " ".join(
+        normalize(str(option.get("label") or option.get("value") or ""))
+        for option in field.get("options") or []
+        if isinstance(option, dict)
+    )
+    if re.search(r"\byes\b", labels) and re.search(r"\bno\b", labels):
+        return True
+
+    return bool(re.match(r"(have|has|were|was|are|do|did|will) you\b", text))
+
+
 def has_work_authorization_assistance_terms(text: str) -> bool:
     return bool(
         re.search(r"\b(require|need|request|want|seek|seeking).{0,80}\b(assistance|help|support).{0,80}\b(work authorization|employment authorization|work permit)\b", text)
@@ -217,7 +254,11 @@ def map_address(text: str, profile: dict[str, Any]) -> str | None:
         (r"address line 1|street address|street", address.get("line1")),
         (r"address line 2|apt|apartment|suite|unit", address.get("line2")),
         (r"\bcity\b|location city", address.get("city")),
-        (r"\bstate\b|\bprovince\b|region", address.get("state") or address.get("province")),
+        (
+            r"state\s*/\s*province|state or province|home state|\bprovince\b|^state\s*\*?$|"
+            r"(address|city|zip|postal).{0,80}\bstate\b|\bstate\b.{0,80}(address|city|zip|postal)",
+            address.get("state") or address.get("province"),
+        ),
         (r"postal code|postcode|zip code|\bzip\b", address.get("zipCode") or address.get("postalCode")),
         (r"\bcountry\b|currently reside", address.get("country")),
         (r"full address|mailing address|home address", address.get("fullAddress")),
@@ -331,8 +372,12 @@ def is_policy_question(text: str) -> bool:
 
 
 def relocation_assistance_answer(profile: dict[str, Any]) -> str:
-    explicit = profile.get("answers", {}).get("relocationAssistance") or ""
-    return "Yes" if re.search(r"^(yes|true|1)$|need|require|request|want", normalize(explicit)) else "No"
+    explicit = normalize(profile.get("answers", {}).get("relocationAssistance") or "")
+    leading = re.match(r"(yes|no)\b", explicit)
+    if leading:
+        return "Yes" if leading.group(1) == "yes" else "No"
+
+    return "Yes" if re.search(r"^(true|1)$|\b(need|require|request|want)\b", explicit) else "No"
 
 
 def is_relocation_own_cost_question(text: str) -> bool:
@@ -364,7 +409,13 @@ def sponsorship_answer(value: Any) -> str:
 
 
 def phrase_in_text(phrase: str, text: str) -> bool:
-    return f" {phrase} " in f" {text} "
+    phrase = strip_punctuation(phrase)
+    text = strip_punctuation(text)
+    return bool(phrase) and f" {phrase} " in f" {text} "
+
+
+def strip_punctuation(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", normalize(value))).strip()
 
 
 def saved_answer(field: dict[str, Any], profile: dict[str, Any]) -> str:

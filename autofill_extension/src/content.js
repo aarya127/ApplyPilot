@@ -1757,7 +1757,8 @@
     }
 
     if (/(overall result|grade point average|\bgpa\b|\bcgpa\b|academic average)/.test(haystack)) {
-      return buildMapping(field, gpaAnswer(profile), "rule", 0.9);
+      const gpa = gpaAnswer(profile);
+      return gpa ? buildMapping(field, gpa, "rule", 0.9) : null;
     }
 
     if (/(review.*linked document|candidate privacy policy|privacy policy|linked document)/.test(haystack)) {
@@ -2320,7 +2321,7 @@
       || profile.answers?.overallResult
       || education.gpa
       || education.overallResult
-      || "3.7 out of 4";
+      || "";
   }
 
   function isDebarmentOrProgramExclusionQuestion(haystack) {
@@ -4990,11 +4991,28 @@
       return "";
     }
 
-    if (/^(no|false|n|0)$/.test(text) || /\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b/.test(text)) {
+    if (/^(yes|true)\b/.test(text) || /^(y|1)$/.test(text)) {
+      return "yes";
+    }
+
+    if (/^(no|false)\b/.test(text) || /^(n|0)$/.test(text)) {
       return "no";
     }
 
-    if (/^(yes|true|y|1)$/.test(text) || /\b(open|willing|able|can|agree|consent|authorized|eligible)\b/.test(text)) {
+    if (/\bnot (legally )?(authorized|eligible|permitted|allowed)\b/.test(text)) {
+      return "no";
+    }
+
+    if (/\b(authorized|eligible|permitted|allowed) to work\b/.test(text)
+      || (/\b(authorized|eligible|permitted|allowed)\b/.test(text) && /\bwithout (visa )?sponsorship\b/.test(text))) {
+      return "yes";
+    }
+
+    if (/\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b/.test(text)) {
+      return "no";
+    }
+
+    if (/\b(open|willing|able|can|agree|consent|authorized|eligible)\b/.test(text)) {
       return "yes";
     }
 
@@ -5237,27 +5255,10 @@
   }
 
   function preferredEducationFields(education) {
-    const desired = normalize(education.fieldOfStudy || "");
     const values = [];
 
-    if (/computer science/.test(desired)) {
-      values.push("Computer Science");
-    }
-
-    if (/statistics/.test(desired)) {
-      values.push("Statistics");
-    }
-
-    if (!values.length && education.fieldOfStudy) {
+    if (education.fieldOfStudy) {
       values.push(education.fieldOfStudy);
-    }
-
-    if (!values.includes("Computer Science")) {
-      values.push("Computer Science");
-    }
-
-    if (!values.includes("Statistics")) {
-      values.push("Statistics");
     }
 
     return values;

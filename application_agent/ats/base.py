@@ -257,6 +257,11 @@ class BaseAdapter:
             locator.set_checked(should_check, timeout=2_000)
             return True
 
+        radio_value = locator.get_attribute("value") or ""
+        radio_label = radio_option_label(locator)
+        if not radio_choice_matches(radio_label, radio_value, str(value)):
+            return False
+
         locator.check(timeout=2_000)
         return True
 
@@ -366,6 +371,30 @@ def button_text(button: Any) -> str:
 def is_final_submit_text(text: str) -> bool:
     normalized = normalize(text)
     return any(label == normalized or label in normalized for label in FINAL_SUBMIT_TEXT)
+
+
+def radio_option_label(locator: Any) -> str:
+    try:
+        return locator.evaluate(
+            """
+            element => {
+              const label = (element.labels && element.labels[0]) || null;
+              const text = label ? label.textContent : (element.getAttribute('aria-label') || '');
+              return (text || '').replace(/\\s+/g, ' ').trim();
+            }
+            """
+        ) or ""
+    except Exception:
+        return ""
+
+
+def radio_choice_matches(label: str, value: str, desired: str) -> bool:
+    desired_semantic = semantic_yes_no_value(desired)
+    option_semantic = semantic_yes_no_value(label) or semantic_yes_no_value(value)
+    if desired_semantic is not None and option_semantic is not None:
+        return desired_semantic == option_semantic
+
+    return option_matches(label, value, normalize(desired))
 
 
 def option_matches(label: str, value: str, desired: str) -> bool:
@@ -564,10 +593,14 @@ def yes_no_constrained_value(value: str, options: list[dict[str, Any]]) -> str |
 def semantic_yes_no_value(value: str) -> str | None:
     text = normalize(str(value or ""))
 
-    if re.search(r"^(no|false|n|0)$", text) or re.search(r"\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b", text):
+    explicit = re.match(r"(yes|no)\b", text)
+    if explicit:
+        return explicit.group(1)
+
+    if re.search(r"^(false|n|0)$", text) or re.search(r"\b(no|not|never|decline|unable|cannot|won t|would not|do not|don t)\b", text):
         return "no"
 
-    if re.search(r"^(yes|true|y|1)$", text) or re.search(r"\b(open|willing|able|can|agree|consent|authorized|eligible)\b", text):
+    if re.search(r"^(true|y|1)$", text) or re.search(r"\b(open|willing|able|can|agree|consent|authorized|eligible)\b", text):
         return "yes"
 
     return None
