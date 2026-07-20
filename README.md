@@ -208,6 +208,8 @@ python autofill_extension/backend/server.py
 
 The backend lets the extension and agent ask one structured AI request for visible missing fields, constrained to the actual dropdown/radio options when those options are available.
 
+The Playwright agent reads the same key either way: export `NVIDIA_API_KEY` (and optionally `NVIDIA_MODEL`) in your shell, or just keep them in `autofill_extension/backend/env.private` — the agent loads that file automatically when the variable is not already set.
+
 ### Use The Chrome Extension
 
 Load the extension from:
