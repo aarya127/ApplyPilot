@@ -8,6 +8,7 @@ from typing import Any
 from playwright.sync_api import sync_playwright
 
 from application_agent.agent.apply_queue import ApplyQueue
+from application_agent.agent.preferences import job_matches_preferences, load_preferences
 from application_agent.agent.profile_loader import load_profile
 from application_agent.agent.runner import ApplicationAgent
 
@@ -28,6 +29,7 @@ def main() -> None:
         return
 
     agent = ApplicationAgent(profile)
+    preferences = load_preferences()
 
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
@@ -39,12 +41,26 @@ def main() -> None:
             page = context.pages[-1] if context.pages else context.new_page()
 
             for job in jobs:
-                run_queued_job(page, agent, queue, job)
+                run_queued_job(page, agent, queue, job, preferences)
         finally:
             context.close()
 
 
-def run_queued_job(page: Any, agent: ApplicationAgent, queue: ApplyQueue, job: dict[str, Any]) -> dict[str, Any]:
+def run_queued_job(
+    page: Any,
+    agent: ApplicationAgent,
+    queue: ApplyQueue,
+    job: dict[str, Any],
+    preferences: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    skip_report = preference_skip_report(job, preferences or {})
+    if skip_report is not None:
+        queue.log_report(job_id=int(job["id"]), url=job.get("url", ""), status="skipped", report=skip_report)
+        queue.update_status(int(job["id"]), "skipped")
+        reasons = ", ".join(skip_report["skipReasons"])
+        print(f"{job.get('company') or 'Unknown'} - {job.get('title') or 'Untitled'}: skipped ({reasons})")
+        return skip_report
+
     queue.update_status(int(job["id"]), "running")
     report: dict[str, Any] | None = None
     status_recorded = False
@@ -86,6 +102,33 @@ def run_queued_job(page: Any, agent: ApplicationAgent, queue: ApplyQueue, job: d
             queue.update_status(int(job["id"]), "paused" if report else "failed")
 
 
+def preference_skip_report(job: dict[str, Any], preferences: dict[str, Any]) -> dict[str, Any] | None:
+    if not preferences:
+        return None
+
+    matches, reasons = job_matches_preferences(job, preferences)
+    if matches:
+        return None
+
+    return {
+        "url": job.get("url", ""),
+        "title": job.get("title", ""),
+        "ats": "unknown",
+        "status": "skipped",
+        "filled": 0,
+        "skipped": 0,
+        "corrected": 0,
+        "confidence": 0.0,
+        "skipReasons": reasons,
+        "job": {
+            "id": job.get("id"),
+            "title": job.get("title"),
+            "company": job.get("company"),
+            "sourceUrl": job.get("url"),
+        },
+    }
+
+
 def click_apply_if_available(page: Any) -> bool:
     patterns = [
         re.compile(r"^apply$", re.I),
@@ -121,6 +164,10 @@ def wait_after_apply_click(page: Any) -> None:
 
 
 def status_for_report(report: dict[str, Any]) -> str:
+    # The agent always stops before final submit ("paused_before_submit"), which
+    # is exactly what the preferences.example.json automation gate
+    # (submitMode: "review") asks for. There is no auto-submit code path, so the
+    # gate is honored by keeping paused statuses as "paused" for human review.
     status = str(report.get("status") or "")
     if status in {"paused_before_submit", "paused_for_review", "max_steps_reached"}:
         return "paused"

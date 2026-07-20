@@ -102,6 +102,11 @@ python autofill_extension/backend/server.py
 
 The backend is used for ambiguous fields and custom questions. It receives a structured list of visible fields and options, then returns mappings. Option fields are constrained to the actual dropdown/radio/checkbox labels whenever those labels are available.
 
+The agent itself also calls the NVIDIA API directly for generated answers. It picks up the key from either place:
+
+- an exported `NVIDIA_API_KEY` environment variable, or
+- `autofill_extension/backend/env.private`, which the agent loads automatically when `NVIDIA_API_KEY` is not already set in the environment.
+
 ## Run The Agent
 
 In another terminal:

@@ -181,6 +181,7 @@ async function fillSelectedMappings() {
   lastFillResult = response.result;
   trackButton.disabled = false;
   addMessage("agent", `Filled ${response.result.filled} selected field(s). Please review the page before submitting.`);
+  renderVerification(response.result.verification);
   assistantStatus.textContent = "Filled";
 }
 
@@ -307,6 +308,7 @@ async function askAiForMissingAnswersImpl() {
     trackButton.disabled = false;
     addMessage("agent", `Audited, added, and filled ${fillResponse.result.filled} answer(s). Please review them before continuing.`);
     await refreshPreviewAfterAiFill();
+    renderVerification(fillResponse.result.verification);
     reportRemainingRequiredFields(lastPreview);
   } else {
     addMessage("agent", `Added ${aiMappings.length} AI answer(s) to the review list, but I could not fill them automatically. Keep them checked and click Fill selected.`);
@@ -1008,7 +1010,12 @@ function aggregateFillResponses(successful, frameCount) {
     filled: 0,
     frameCount,
     accessibleFrameCount: successful.length,
-    failures: []
+    failures: [],
+    verification: {
+      matched: 0,
+      mismatched: [],
+      unreadable: []
+    }
   };
 
   for (const { response } of successful) {
@@ -1017,7 +1024,13 @@ function aggregateFillResponses(successful, frameCount) {
     result.mapped += Number(frameResult.mapped || 0);
     result.filled += Number(frameResult.filled || 0);
     result.failures.push(...(frameResult.failures || []));
+    result.verification.matched += Number(frameResult.verification?.matched || 0);
+    result.verification.mismatched.push(...(frameResult.verification?.mismatched || []));
+    result.verification.unreadable.push(...(frameResult.verification?.unreadable || []));
   }
+
+  result.verification.mismatched = result.verification.mismatched.slice(0, 25);
+  result.verification.unreadable = result.verification.unreadable.slice(0, 25);
 
   return { ok: true, result };
 }
@@ -1120,6 +1133,59 @@ function appendReviewHeading(text) {
   heading.className = "review-heading";
   heading.textContent = text;
   reviewList.append(heading);
+}
+
+function renderVerification(verification) {
+  if (!verification) {
+    return;
+  }
+
+  const mismatched = verification.mismatched || [];
+  const unreadable = verification.unreadable || [];
+  appendReviewHeading("Verification");
+
+  const summary = document.createElement("div");
+  summary.className = "assistant-card verification-summary";
+  const summaryBody = document.createElement("span");
+  summaryBody.className = "review-body";
+  const summaryLabel = document.createElement("strong");
+  summaryLabel.textContent = `${verification.matched || 0} field(s) verified on the page`;
+  summaryBody.append(summaryLabel);
+
+  if (mismatched.length || unreadable.length) {
+    const detail = document.createElement("span");
+    detail.className = "review-value";
+    detail.textContent = [
+      mismatched.length ? `${mismatched.length} mismatch(es)` : "",
+      unreadable.length ? `${unreadable.length} unreadable field(s)` : ""
+    ].filter(Boolean).join(", ");
+    summaryBody.append(detail);
+  }
+
+  summary.append(summaryBody);
+  reviewList.append(summary);
+
+  for (const item of mismatched) {
+    const card = document.createElement("div");
+    card.className = "assistant-card verification-mismatch";
+    const body = document.createElement("span");
+    body.className = "review-body";
+
+    const label = document.createElement("strong");
+    label.textContent = item.label || `Field ${Number(item.index) + 1}`;
+
+    const value = document.createElement("span");
+    value.className = "review-value";
+    value.textContent = `Expected "${String(item.expected ?? "").slice(0, 140)}" but the page shows "${String(item.actual ?? "").slice(0, 140) || "(empty)"}".`;
+
+    body.append(label, value);
+    card.append(body);
+    reviewList.append(card);
+  }
+
+  if (mismatched.length) {
+    addMessage("agent", `Verification found ${mismatched.length} field(s) whose page value does not match the intended answer. Check the Verification section below.`);
+  }
 }
 
 function buildAnswerInput(field) {

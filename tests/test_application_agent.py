@@ -1,9 +1,12 @@
+import os
 from pathlib import Path
 
+import application_agent.agent.answer_generator as answer_generator
 from application_agent.agent.answer_generator import answer_option_question, parse_option_answer
 from application_agent.agent.detector import detect_ats
 from application_agent.agent.field_kinds import classify_field_kind, resolve_field_kind
 from application_agent.agent.field_mapper import map_field
+from application_agent.agent.form_scanner import FIELD_SELECTOR, durable_selector, field_locator
 from application_agent.agent.planner import build_fill_plan
 from application_agent.agent.profile_loader import normalize_profile
 from application_agent.agent.verifier import verify_fill_plan
@@ -22,6 +25,37 @@ def test_detect_ats_routes_common_platforms():
     assert detect_ats("https://jobs.smartrecruiters.com/Acme/123") == "smartrecruiters"
     assert detect_ats("https://career012.successfactors.eu/career?company=acme") == "successfactors"
     assert detect_ats("https://example.com/apply") == "generic"
+
+
+class FakeCountLocator:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    def count(self) -> int:
+        return self._count
+
+
+class FakeMarkerPage:
+    def __init__(self, markers: list[str]) -> None:
+        self.markers = markers
+
+    def locator(self, selector: str) -> FakeCountLocator:
+        return FakeCountLocator(1 if any(marker in selector for marker in self.markers) else 0)
+
+
+def test_detect_ats_never_matches_page_prose():
+    # Bare keywords in paths or prose ("In a typical workday...") must not route adapters.
+    assert detect_ats("https://careers.example.com/blog/a-typical-workday") == "generic"
+    assert detect_ats("https://example.com/about-greenhouse-gases") == "generic"
+    assert detect_ats("https://careers.example.com/apply", FakeMarkerPage([])) == "generic"
+
+
+def test_detect_ats_uses_dom_markers_for_embedded_boards():
+    assert detect_ats("https://careers.example.com/apply", FakeMarkerPage(["#grnhse_iframe"])) == "greenhouse"
+    assert detect_ats("https://careers.example.com/apply", FakeMarkerPage(["data-automation-id='applyFlowPage'"])) == "workday"
+    assert detect_ats("https://careers.example.com/apply", FakeMarkerPage(["iframe[src*='taleo.net']"])) == "taleo"
+    # URL detection wins over DOM markers.
+    assert detect_ats("https://boards.greenhouse.io/acme/jobs/1", FakeMarkerPage(["iframe[src*='taleo.net']"])) == "greenhouse"
 
 
 def test_router_returns_first_class_ats_adapters():
@@ -261,6 +295,110 @@ def test_fill_plan_constrains_options_and_reports_skipped_fields():
     assert plan["skipped"] == [{"index": 2, "label": "Unmapped custom field", "reason": "no_mapping"}]
 
 
+class FakeResolvedLocator:
+    def __init__(self, description: str) -> None:
+        self.description = description
+
+    @property
+    def first(self) -> "FakeResolvedLocator":
+        return FakeResolvedLocator(f"{self.description}.first")
+
+    def nth(self, index: int) -> "FakeResolvedLocator":
+        return FakeResolvedLocator(f"{self.description}.nth({index})")
+
+
+class FakeContainer:
+    def __init__(self, name: str = "page", url: str = "") -> None:
+        self.name = name
+        self.url = url
+
+    def locator(self, selector: str) -> FakeResolvedLocator:
+        return FakeResolvedLocator(f"{self.name}.locator({selector})")
+
+    def get_by_label(self, text: str, exact: bool = False) -> FakeResolvedLocator:
+        return FakeResolvedLocator(f"{self.name}.get_by_label({text}, exact={exact})")
+
+
+class FakeFramedPage(FakeContainer):
+    def __init__(self, frames: list[FakeContainer] | None = None) -> None:
+        super().__init__(name="page")
+        self.frames = frames or []
+
+    def frame(self, url: str = "") -> FakeContainer | None:
+        for frame in self.frames:
+            if frame.url == url:
+                return frame
+        return None
+
+
+def test_field_locator_rebuilds_from_stored_selector_strategy():
+    page = FakeFramedPage()
+
+    css_field = {"selector": '[id="email"]', "selector_strategy": "css"}
+    assert field_locator(page, css_field).description == 'page.locator([id="email"]).first'
+
+    label_field = {"selector": "First Name", "selector_strategy": "label"}
+    assert field_locator(page, label_field).description == "page.get_by_label(First Name, exact=True).first"
+
+    nth_field = {"selector": "4", "selector_strategy": "nth"}
+    assert field_locator(page, nth_field).description == f"page.locator({FIELD_SELECTOR}).nth(4)"
+
+    sentinel = object()
+    assert field_locator(page, {"locator": sentinel}) is sentinel
+    assert field_locator(None, {"locator": sentinel, "selector": "#x", "selector_strategy": "css"}) is sentinel
+
+
+def test_field_locator_resolves_against_the_owning_frame():
+    frame = FakeContainer(name="grnhse", url="https://boards.greenhouse.io/embed/job_app?for=acme")
+    page = FakeFramedPage(frames=[frame])
+
+    framed_field = {
+        "selector": '[name="resume"]',
+        "selector_strategy": "css",
+        "frame_url": frame.url,
+    }
+    assert field_locator(page, framed_field).description == 'grnhse.locator([name="resume"]).first'
+
+    sentinel = object()
+    missing_frame_field = {
+        "selector": "#x",
+        "selector_strategy": "css",
+        "frame_url": "https://gone.example.com/frame",
+        "locator": sentinel,
+    }
+    assert field_locator(page, missing_frame_field) is sentinel
+
+
+def test_durable_selector_prefers_unique_id_then_name_then_label():
+    class FakeUniqueContainer:
+        def __init__(self, unique: set[str]) -> None:
+            self.unique = unique
+
+        def locator(self, selector: str) -> FakeCountLocator:
+            return FakeCountLocator(1 if selector in self.unique else 2)
+
+        def get_by_label(self, text: str, exact: bool = False) -> FakeCountLocator:
+            return FakeCountLocator(1 if text in self.unique else 2)
+
+    container = FakeUniqueContainer({'[id="first_name"]'})
+    assert durable_selector(container, {"id": "first_name", "name": "fn", "tag": "input"}, 3) == ('[id="first_name"]', "css")
+
+    container = FakeUniqueContainer({'[name="fn"]'})
+    assert durable_selector(container, {"id": "duplicated", "name": "fn", "tag": "input"}, 3) == ('[name="fn"]', "css")
+
+    container = FakeUniqueContainer({'input[name="fn"]'})
+    assert durable_selector(container, {"id": "", "name": "fn", "tag": "input"}, 3) == ('input[name="fn"]', "css")
+
+    container = FakeUniqueContainer({"First Name"})
+    assert durable_selector(container, {"id": "", "name": "", "label": "First Name"}, 3) == ("First Name", "label")
+
+    container = FakeUniqueContainer(set())
+    assert durable_selector(container, {"id": "", "name": "", "label": "Ambiguous"}, 5) == ("5", "nth")
+
+    container = FakeUniqueContainer({'[id="with \\"quote"]'})
+    assert durable_selector(container, {"id": 'with "quote', "name": ""}, 0) == ('[id="with \\"quote"]', "css")
+
+
 def test_verifier_reports_mismatched_filled_values():
     class Locator:
         def __init__(self, value: str) -> None:
@@ -336,3 +474,32 @@ def test_option_answer_generation_only_accepts_exact_dropdown_options(monkeypatc
 def test_option_answer_parser_accepts_json_only_shape():
     assert parse_option_answer('{"answer":"No"}') == "No"
     assert parse_option_answer('```json\n{"answer":"Yes"}\n```') == "Yes"
+
+
+def test_answer_generator_loads_private_env_when_key_missing(tmp_path, monkeypatch):
+    env_file = tmp_path / "env.private"
+    env_file.write_text(
+        "# comment\nNVIDIA_API_KEY=test-key\nNVIDIA_MODEL='model-x'\nnot a key value line\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(answer_generator, "PRIVATE_ENV_PATH", env_file)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_MODEL", raising=False)
+
+    try:
+        answer_generator.load_private_env()
+        assert os.environ["NVIDIA_API_KEY"] == "test-key"
+        assert os.environ["NVIDIA_MODEL"] == "model-x"
+    finally:
+        os.environ.pop("NVIDIA_API_KEY", None)
+        os.environ.pop("NVIDIA_MODEL", None)
+
+
+def test_answer_generator_keeps_existing_environment_key(tmp_path, monkeypatch):
+    env_file = tmp_path / "env.private"
+    env_file.write_text("NVIDIA_API_KEY=file-key\n", encoding="utf-8")
+    monkeypatch.setattr(answer_generator, "PRIVATE_ENV_PATH", env_file)
+    monkeypatch.setenv("NVIDIA_API_KEY", "env-key")
+
+    answer_generator.load_private_env()
+    assert os.environ["NVIDIA_API_KEY"] == "env-key"

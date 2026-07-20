@@ -11,6 +11,22 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANSWERS = ROOT / "application_agent/standard_answers.private.json"
+PRIVATE_ENV_PATH = ROOT / "autofill_extension/backend/env.private"
+
+
+def load_private_env() -> None:
+    if os.getenv("NVIDIA_API_KEY"):
+        return
+
+    if not PRIVATE_ENV_PATH.exists():
+        return
+
+    for line in PRIVATE_ENV_PATH.read_text(encoding="utf-8").splitlines():
+        if not line or line.strip().startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
 def load_standard_answers(path: Path = DEFAULT_ANSWERS) -> dict[str, str]:
@@ -65,6 +81,7 @@ def answer_option_question(
 
 
 def generate_option_answer_with_llm(question: str, options: list[str], profile: dict[str, Any]) -> str:
+    load_private_env()
     api_key = os.getenv("NVIDIA_API_KEY", "")
     if not api_key:
         return ""
@@ -106,6 +123,7 @@ def generate_option_answer_with_llm(question: str, options: list[str], profile: 
 
 
 def generate_answer_with_llm(question: str, profile: dict[str, Any]) -> str:
+    load_private_env()
     api_key = os.getenv("NVIDIA_API_KEY", "")
     if not api_key:
         return ""

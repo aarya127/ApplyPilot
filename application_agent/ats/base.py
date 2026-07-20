@@ -6,7 +6,7 @@ from typing import Any
 
 from application_agent.agent.answer_generator import answer_option_question, answer_question
 from application_agent.agent.field_mapper import normalize
-from application_agent.agent.form_scanner import scan_fields
+from application_agent.agent.form_scanner import field_frame, field_locator, scan_fields
 from application_agent.agent.planner import build_fill_plan
 from application_agent.agent.verifier import verify_fill_plan
 
@@ -52,11 +52,11 @@ class BaseAdapter:
             if source == "generated_review_required":
                 generated_review_required += 1
 
-            if self.fill_field(field, value):
+            if self.fill_field(page, field, value):
                 filled += 1
 
         skipped.extend(item["label"] for item in plan["skipped"])
-        verification = verify_fill_plan(plan["items"])
+        verification = verify_fill_plan(plan["items"], page=page)
 
         return {
             "ats": self.name,
@@ -102,8 +102,11 @@ class BaseAdapter:
 
         return answer, source
 
-    def fill_field(self, field: dict[str, Any], value: Any) -> bool:
-        locator = field["locator"]
+    def fill_field(self, page: Any, field: dict[str, Any], value: Any) -> bool:
+        locator = field_locator(page, field)
+        if locator is None:
+            return False
+
         tag = field.get("tag", "")
         field_type = field.get("type", "")
 
@@ -121,13 +124,13 @@ class BaseAdapter:
                 if locator_value_matches(locator, value):
                     return False
 
-                return self.select_dynamic_option(field, value)
+                return self.select_dynamic_option(page, field, value)
 
             if is_typeahead_field(field):
                 if locator_value_matches(locator, value):
                     return False
 
-                if self.select_dynamic_option(field, value):
+                if self.select_dynamic_option(page, field, value):
                     return True
 
             locator.fill(str(value), timeout=2_000)
@@ -153,8 +156,12 @@ class BaseAdapter:
 
         return False
 
-    def select_dynamic_option(self, field: dict[str, Any], value: Any) -> bool:
-        locator = field["locator"]
+    def select_dynamic_option(self, page: Any, field: dict[str, Any], value: Any) -> bool:
+        locator = field_locator(page, field)
+        if locator is None:
+            return False
+
+        container = field_frame(page, field) if page is not None else None
         desired = str(value)
 
         try:
@@ -162,7 +169,7 @@ class BaseAdapter:
         except Exception:
             return False
 
-        if self.click_visible_option(locator, desired):
+        if self.click_visible_option(locator, desired, container=container):
             return True
 
         search_value = dropdown_search_value(field, desired)
@@ -180,7 +187,7 @@ class BaseAdapter:
         except Exception:
             pass
 
-        if self.wait_and_click_visible_option(locator, desired):
+        if self.wait_and_click_visible_option(locator, desired, container=container):
             return True
 
         if can_confirm_typed_dropdown_value(field, desired):
@@ -196,25 +203,26 @@ class BaseAdapter:
 
         return locator_value_matches(locator, desired)
 
-    def wait_and_click_visible_option(self, locator: Any, desired: Any, attempts: int = 8) -> bool:
+    def wait_and_click_visible_option(self, locator: Any, desired: Any, attempts: int = 8, container: Any = None) -> bool:
         for _ in range(attempts):
             try:
                 locator.page.wait_for_timeout(150)
             except Exception:
                 pass
 
-            if self.click_visible_option(locator, desired):
+            if self.click_visible_option(locator, desired, container=container):
                 return True
 
         return False
 
-    def click_visible_option(self, locator: Any, desired: Any) -> bool:
-        try:
-            page = locator.page
-        except Exception:
-            return False
+    def click_visible_option(self, locator: Any, desired: Any, container: Any = None) -> bool:
+        if container is None:
+            try:
+                container = locator.page
+            except Exception:
+                return False
 
-        options = page.locator(dropdown_option_selector())
+        options = container.locator(dropdown_option_selector())
         option_values: list[dict[str, str]] = []
 
         for index in range(options.count()):
@@ -460,16 +468,24 @@ def can_confirm_typed_dropdown_value(field: dict[str, Any], desired: Any) -> boo
     if is_phone_country_code_field(field) and re.search(r"^(\+?1|canada|canada 1|canada \+1)$", value):
         return True
 
-    try:
-        url = field["locator"].page.url
-    except Exception:
-        url = ""
+    url = field_page_url(field)
 
     return bool(
         re.search(r"greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse", url, re.I)
         and re.search(r"gender|race|racial|ethnic|ethnicity|veteran|protected veteran|disability status|have a disability|u\.?s\.?\s*state|state.*currently reside|currently reside.*state", text)
         and value
     )
+
+
+def field_page_url(field: dict[str, Any]) -> str:
+    url = str(field.get("frame_url") or field.get("page_url") or "")
+    if url:
+        return url
+
+    try:
+        return field["locator"].page.url
+    except Exception:
+        return ""
 
 
 def is_phone_country_code_field(field: dict[str, Any]) -> bool:
@@ -493,10 +509,7 @@ def field_full_text(field: dict[str, Any]) -> str:
 
 
 def requires_dropdown_option_click(field: dict[str, Any]) -> bool:
-    try:
-        url = field["locator"].page.url
-    except Exception:
-        url = ""
+    url = field_page_url(field)
 
     return bool(re.search(
         r"greenhouse\.io|boards\.greenhouse|job-boards\.greenhouse|"

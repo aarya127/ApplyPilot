@@ -48,6 +48,41 @@
     ".iCIMS_Dropdown_Option"
   ].join(",");
 
+  const CONSENT_CONTAINER_SELECTOR = [
+    "[id*='onetrust' i]",
+    "[class*='onetrust' i]",
+    "[id*='ot-sdk' i]",
+    "[class*='ot-sdk' i]",
+    "[id*='cookie' i]",
+    "[class*='cookie-banner' i]",
+    "[class*='cookie-consent' i]",
+    "[class*='consent' i]",
+    "[id*='consent' i]",
+    "[aria-label*='cookie' i]",
+    "[id*='truste' i]",
+    "[class*='truste' i]",
+    "[class*='cky-consent' i]",
+    "[id*='cky-consent' i]",
+    "[id*='usercentrics' i]",
+    "[class*='usercentrics' i]",
+    "[id*='osano' i]",
+    "[class*='osano' i]",
+    "[id*='didomi' i]",
+    "[class*='didomi' i]",
+    "[id*='qc-cmp' i]",
+    "[class*='qc-cmp' i]"
+  ].join(",");
+
+  // Normalized (lowercase, punctuation stripped) so they can be matched against normalize() output.
+  const CONSENT_BANNER_PHRASES = [
+    "when you visit any website it may store or retrieve information",
+    "we and our partners use cookies",
+    "this website uses cookies",
+    "we use cookies and similar technologies"
+  ];
+
+  const MAX_FIELD_LABEL_LENGTH = 300;
+
   const state = {
     observer: null,
     lastFilledAt: 0,
@@ -287,7 +322,7 @@
     const profile = candidateProfile || {};
     const fields = scanFields();
     hydrateFieldsFromPreview(fields);
-    mappings = mappings
+    mappings = reindexMappingsByIdentity(mappings, fields)
       .map((mapping) => normalizeMappingForField(mapping, fields))
       .filter((mapping) => hasValue(mapping.value));
     let filled = 0;
@@ -302,7 +337,7 @@
         await enrichDynamicDropdownOptions(fields);
         hydrateFieldsFromPreview(fields);
         mappings = mergeMappings(
-          mappings,
+          reindexMappingsByIdentity(mappings, fields),
           fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean),
           fields
         );
@@ -404,7 +439,9 @@
   }
 
   function scanFields() {
-    const elements = Array.from(document.querySelectorAll(FIELD_SELECTOR)).filter(isFillable);
+    const elements = Array.from(document.querySelectorAll(FIELD_SELECTOR))
+      .filter(isFillable)
+      .filter((element) => !isJunkFieldElement(element));
     const choiceGroups = buildChoiceGroups(elements);
     const groupedElements = new Set(choiceGroups.flatMap((group) => group.elements));
     const fields = [];
@@ -427,6 +464,47 @@
     return fields;
   }
 
+  function isJunkFieldElement(element) {
+    return isInsideConsentUi(element) || isStandaloneSearchElement(element);
+  }
+
+  function isInsideConsentUi(element) {
+    if (element.closest?.(CONSENT_CONTAINER_SELECTOR)) {
+      return true;
+    }
+
+    const dialog = element.closest?.("[role='dialog'], [role='alertdialog'], dialog");
+    if (!dialog) {
+      return false;
+    }
+
+    const dialogText = normalize((dialog.innerText || dialog.textContent || "").slice(0, 1500));
+    return CONSENT_BANNER_PHRASES.some((phrase) => dialogText.includes(phrase));
+  }
+
+  function isStandaloneSearchElement(element) {
+    const type = (element.getAttribute("type") || "").toLowerCase();
+    const role = (element.getAttribute("role") || "").toLowerCase();
+
+    if (type === "search" || role === "searchbox") {
+      return true;
+    }
+
+    const accessibleLabel = normalize([
+      element.getAttribute("aria-label") || "",
+      element.getAttribute("placeholder") || "",
+      element.getAttribute("name") || "",
+      element.id || ""
+    ].filter(Boolean).join(" "));
+
+    return /^search( search)*$/.test(accessibleLabel);
+  }
+
+  function capFieldLabel(value) {
+    const text = compactText(value);
+    return text.length > MAX_FIELD_LABEL_LENGTH ? text.slice(0, MAX_FIELD_LABEL_LENGTH).trimEnd() : text;
+  }
+
   function buildFieldMetadata(element, index) {
     const tag = element.tagName.toLowerCase();
     const type = (element.getAttribute("type") || element.getAttribute("role") || tag).toLowerCase();
@@ -446,7 +524,7 @@
       type,
       name: element.getAttribute("name") || "",
       id: element.id || "",
-      label: recoveredLabel,
+      label: capFieldLabel(recoveredLabel),
       placeholder: element.getAttribute("placeholder") || "",
       ariaLabel: element.getAttribute("aria-label") || "",
       ariaAutocomplete: element.getAttribute("aria-autocomplete") || "",
@@ -515,7 +593,7 @@
       type: group.mode,
       name: first.getAttribute("name") || "",
       id: first.id || "",
-      label,
+      label: capFieldLabel(label),
       placeholder: "",
       ariaLabel: group.container?.getAttribute?.("aria-label") || first.getAttribute("aria-label") || "",
       autocomplete: "",
@@ -1308,7 +1386,7 @@
         }
 
         return hasValue(value)
-          ? { index: field.index, value: compactText(value), source: "rule", confidence: 0.9 }
+          ? { index: field.index, value: compactText(value), source: "rule", confidence: 0.9, ...mappingIdentityForField(field) }
           : null;
       })
       .filter(Boolean);
@@ -2108,11 +2186,19 @@
       return false;
     }
 
+    if (isSearchWidgetField(field)) {
+      return false;
+    }
+
     if (isAiOnlyQuestion(haystack)) {
       return true;
     }
 
     if (shouldSkipField(haystack)) {
+      return false;
+    }
+
+    if (!hasMeaningfulAskableLabel(field)) {
       return false;
     }
 
@@ -2133,6 +2219,25 @@
       || field.type === "combobox"
       || field.ariaLabel
       || field.tag === "button";
+  }
+
+  function isSearchWidgetField(field) {
+    if (field.type === "search" || field.type === "searchbox") {
+      return true;
+    }
+
+    return normalize(cleanDisplayLabel(displayLabelForField(field))) === "search";
+  }
+
+  function isGenericPlaceholderLabel(text) {
+    return /^((checkbox|radio|input|select|text|field|button|option)\s*)?label$/.test(text)
+      || /^(option|choice|item)\s*\d*$/.test(text);
+  }
+
+  function hasMeaningfulAskableLabel(field) {
+    return [field.label, field.ariaLabel, field.placeholder, field.questionText, field.name, field.id]
+      .map((value) => normalize(cleanDisplayLabel(value || "")))
+      .some((text) => text && !isGenericPlaceholderLabel(text) && !/^[a-z]{2,}\d{2,}$/.test(text));
   }
 
   function displayLabelForField(field) {
@@ -4124,7 +4229,20 @@
       index: field.index,
       value: normalizedValue,
       source,
-      confidence
+      confidence,
+      ...mappingIdentityForField(field)
+    };
+  }
+
+  function mappingIdentityForField(field) {
+    return {
+      label: field.label || "",
+      name: field.name || "",
+      id: field.id || "",
+      placeholder: field.placeholder || "",
+      ariaLabel: field.ariaLabel || "",
+      tag: field.tag || "",
+      type: field.type || ""
     };
   }
 
@@ -4330,7 +4448,10 @@
         return [];
       }
 
-      return response.payload.mappings;
+      return response.payload.mappings.map((mapping) => {
+        const field = fields.find((item) => item.index === mapping.index);
+        return field ? { ...mapping, ...mappingIdentityForField(field) } : mapping;
+      });
     } catch (error) {
       return [];
     }
@@ -4511,6 +4632,19 @@
     return mappingHasIdentity(mapping) ? null : indexed;
   }
 
+  function reindexMappingsByIdentity(mappings, fields) {
+    return mappings.map((mapping) => {
+      if (!mappingHasIdentity(mapping)) {
+        return mapping;
+      }
+
+      const field = resolveFieldForMapping(mapping, fields);
+      return field && field.index !== mapping.index
+        ? { ...mapping, index: field.index }
+        : mapping;
+    });
+  }
+
   function mappingMatchesField(mapping, field) {
     if (!field) {
       return false;
@@ -4520,7 +4654,12 @@
       return true;
     }
 
-    if (mapping.name && field.name && mapping.name === field.name) {
+    if (
+      mapping.name
+      && field.name
+      && mapping.name === field.name
+      && (!mapping.type || !field.type || mapping.type === field.type || compatibleFieldTypes(mapping.type, field.type))
+    ) {
       return true;
     }
 

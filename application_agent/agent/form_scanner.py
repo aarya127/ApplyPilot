@@ -19,12 +19,48 @@ OPTION_SELECTOR = (
     ".ui-menu-item, .ui-menu-item-wrapper, .iCIMS_Dropdown_Option"
 )
 
+SKIPPED_FRAME_URL_TERMS = (
+    "doubleclick",
+    "googletagmanager",
+    "google-analytics",
+    "googlesyndication",
+    "adsystem",
+    "facebook",
+    "recaptcha",
+    "gstatic",
+    "youtube",
+    "vimeo",
+    "bat.bing",
+    "cookielaw",
+    "onetrust",
+    "hotjar",
+    "clarity.ms",
+)
+
 
 def scan_fields(page: Any) -> list[dict[str, Any]]:
-    locators = page.locator(FIELD_SELECTOR)
+    fields = scan_container_fields(page, page, frame_url="")
+
+    for frame in scannable_frames(page):
+        fields.extend(scan_container_fields(page, frame, frame_url=frame.url))
+
+    for index, field in enumerate(fields):
+        field["index"] = index
+
+    return fields
+
+
+def scan_container_fields(page: Any, container: Any, frame_url: str) -> list[dict[str, Any]]:
+    try:
+        locators = container.locator(FIELD_SELECTOR)
+        count = locators.count()
+    except Exception:
+        return []
+
+    page_url = safe_page_url(page)
     fields: list[dict[str, Any]] = []
 
-    for index in range(locators.count()):
+    for index in range(count):
         element = locators.nth(index)
 
         try:
@@ -46,16 +82,144 @@ def scan_fields(page: Any) -> list[dict[str, Any]]:
                 "question_text": question_text_for(element),
                 "surrounding_text": surrounding_text_for(element),
                 "options": options,
+                "frame_url": frame_url,
+                "page_url": page_url,
                 "locator": element,
             }
+            field["selector"], field["selector_strategy"] = durable_selector(container, field, index)
             if not options and is_dynamic_dropdown_field(field):
-                field["options"] = dynamic_options_for(element)
+                field["options"] = dynamic_options_for(element, container)
 
             fields.append(field)
         except Exception:
             continue
 
     return fields
+
+
+def scannable_frames(page: Any) -> list[Any]:
+    try:
+        all_frames = list(page.frames)
+    except Exception:
+        return []
+
+    main_frame = getattr(page, "main_frame", None)
+    frames: list[Any] = []
+
+    for frame in all_frames:
+        if frame is main_frame:
+            continue
+
+        try:
+            if frame.is_detached():
+                continue
+        except Exception:
+            pass
+
+        url = str(getattr(frame, "url", "") or "").lower()
+        if not url.startswith("http"):
+            continue
+
+        if any(term in url for term in SKIPPED_FRAME_URL_TERMS):
+            continue
+
+        frames.append(frame)
+
+    return frames
+
+
+def durable_selector(container: Any, field: dict[str, Any], index: int) -> tuple[str, str]:
+    field_id = str(field.get("id") or "")
+    if field_id:
+        selector = f'[id="{css_attribute_escape(field_id)}"]'
+        if selector_is_unique(container, selector):
+            return selector, "css"
+
+    name = str(field.get("name") or "")
+    if name:
+        base = f'[name="{css_attribute_escape(name)}"]'
+        tag = str(field.get("tag") or "")
+        candidates = [base]
+        if tag:
+            candidates.append(f"{tag}{base}")
+
+        for selector in candidates:
+            if selector_is_unique(container, selector):
+                return selector, "css"
+
+    for label_text in [str(field.get("aria_label") or ""), str(field.get("label") or "")]:
+        label_text = label_text.strip()
+        if not label_text:
+            continue
+
+        try:
+            if container.get_by_label(label_text, exact=True).count() == 1:
+                return label_text, "label"
+        except Exception:
+            continue
+
+    return str(index), "nth"
+
+
+def field_frame(page: Any, field: dict[str, Any]) -> Any | None:
+    frame_url = str(field.get("frame_url") or "")
+    if not frame_url:
+        return page
+
+    try:
+        frame = page.frame(url=frame_url)
+        if frame is not None:
+            return frame
+    except Exception:
+        pass
+
+    try:
+        for frame in page.frames:
+            if frame.url == frame_url:
+                return frame
+    except Exception:
+        pass
+
+    return None
+
+
+def field_locator(page: Any, field: dict[str, Any]) -> Any | None:
+    strategy = str(field.get("selector_strategy") or "")
+    selector = str(field.get("selector") or "")
+    container = field_frame(page, field) if page is not None else None
+
+    if container is None or not strategy:
+        return field.get("locator")
+
+    try:
+        if strategy == "css":
+            return container.locator(selector).first
+        if strategy == "label":
+            return container.get_by_label(selector, exact=True).first
+        if strategy == "nth":
+            return container.locator(FIELD_SELECTOR).nth(int(selector))
+    except Exception:
+        pass
+
+    return field.get("locator")
+
+
+def selector_is_unique(container: Any, selector: str) -> bool:
+    try:
+        return container.locator(selector).count() == 1
+    except Exception:
+        return False
+
+
+def css_attribute_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def safe_page_url(page: Any) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        return ""
 
 
 def label_for(page: Any, element: Any) -> str:
@@ -144,16 +308,18 @@ def is_dynamic_dropdown_field(field: dict[str, Any]) -> bool:
     )
 
 
-def dynamic_options_for(element: Any) -> list[dict[str, str]]:
+def dynamic_options_for(element: Any, container: Any = None) -> list[dict[str, str]]:
     try:
         page = element.page
     except Exception:
         return []
 
+    container = container if container is not None else page
+
     try:
         element.click(timeout=1_500)
         page.wait_for_timeout(250)
-        options = visible_dropdown_options(page)
+        options = visible_dropdown_options(container)
 
         if not options:
             try:
@@ -161,7 +327,7 @@ def dynamic_options_for(element: Any) -> list[dict[str, str]]:
             except Exception:
                 pass
             page.wait_for_timeout(250)
-            options = visible_dropdown_options(page)
+            options = visible_dropdown_options(container)
 
         try:
             element.press("Escape", timeout=800)

@@ -16,8 +16,7 @@ class ApplicationAgent:
         self.max_steps = max_steps
 
     def complete_current_application(self, page: Any) -> dict[str, Any]:
-        page_text = safe_body_text(page)
-        ats = detect_ats(page.url, page_text)
+        ats = detect_ats(page.url, page)
         adapter = get_adapter(ats)
         status = "started"
         details: dict[str, Any] = {"steps": []}
@@ -57,13 +56,6 @@ class ApplicationAgent:
         }
         self.logger.log(url=page.url, title=report["title"], ats=ats, status=status, details=details)
         return report
-
-
-def safe_body_text(page: Any) -> str:
-    try:
-        return page.locator("body").inner_text(timeout=2_000)
-    except Exception:
-        return ""
 
 
 def safe_title(page: Any) -> str:

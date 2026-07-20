@@ -3384,3 +3384,312 @@ def test_content_script_greenhouse_uses_typed_dropdown_fallbacks_when_options_ar
         assert page.locator("#disability").get_attribute("data-selected") is None
 
         browser.close()
+
+
+def _fake_nvidia_response(status_code, payload=None):
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
+            self.ok = status_code < 400
+            self.text = json.dumps(payload or {})
+
+        def json(self):
+            return payload or {}
+
+        def raise_for_status(self):
+            if status_code >= 400:
+                raise RuntimeError(f"HTTP {status_code}")
+
+    return FakeResponse()
+
+
+def _reset_key_probe_cache():
+    server._key_probe_cache.update({"checkedAt": 0.0, "keyValid": None, "keyError": ""})
+
+
+def test_backend_health_reports_key_rejected_as_invalid(monkeypatch, tmp_path):
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server.requests, "post", lambda *args, **kwargs: _fake_nvidia_response(403))
+    _reset_key_probe_cache()
+
+    client = server.app.test_client()
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json["ok"] is True
+    assert response.json["keyConfigured"] is True
+    assert response.json["keyValid"] is False
+    assert "rejected (403)" in response.json["keyError"]
+    assert "test-key" not in response.get_data(as_text=True)
+    _reset_key_probe_cache()
+
+
+def test_backend_health_reports_valid_key_and_caches_probe(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_post(*args, **kwargs):
+        calls.append(kwargs.get("json", {}))
+        return _fake_nvidia_response(200, {"choices": [{"message": {"content": "pong"}}]})
+
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server.requests, "post", fake_post)
+    _reset_key_probe_cache()
+
+    client = server.app.test_client()
+    first = client.get("/health")
+    second = client.get("/health")
+
+    assert first.json["keyValid"] is True
+    assert first.json["keyError"] == ""
+    assert second.json["keyValid"] is True
+    assert len(calls) == 1
+    assert calls[0]["max_tokens"] == 1
+    _reset_key_probe_cache()
+
+
+def test_backend_health_without_key_reports_not_configured(monkeypatch, tmp_path):
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    _reset_key_probe_cache()
+
+    client = server.app.test_client()
+    response = client.get("/health")
+
+    assert response.json["keyConfigured"] is False
+    assert response.json["keyValid"] is False
+    assert "not configured" in response.json["keyError"]
+
+
+def test_backend_mapper_key_rejection_returns_actionable_warning(monkeypatch, tmp_path):
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "LLM_TRACE_PATH", tmp_path / "llm_trace.private.jsonl")
+    monkeypatch.setattr(server.requests, "post", lambda *args, **kwargs: _fake_nvidia_response(403))
+    _reset_key_probe_cache()
+
+    client = server.app.test_client()
+    response = client.post(
+        "/map-fields",
+        json={
+            "fields": [{"index": 0, "label": "Favorite color", "options": []}],
+            "profile": {},
+            "page": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert "API key was rejected (403)" in response.json["warning"]
+
+    traces = (tmp_path / "llm_trace.private.jsonl").read_text(encoding="utf-8").splitlines()
+    error_events = [json.loads(line) for line in traces if json.loads(line)["event"] == "mapper.error"]
+    assert error_events
+    assert "API key was rejected (403)" in error_events[0]["error"]
+    assert server._key_probe_cache["keyValid"] is False
+    _reset_key_probe_cache()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_scan_skips_cookie_consent_and_search_widgets():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "email": "test@example.com",
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <div id="onetrust-consent-sdk">
+              <div class="ot-sdk-container">
+                <h2>Your Privacy</h2>
+                <p>When you visit any website, it may store or retrieve information on your browser,
+                mostly in the form of cookies. This information might be about you, your preferences
+                or your device and is mostly used to make the site work as you expect it to.</p>
+                <label>Performance Cookies<input type="checkbox" name="ot-performance"></label>
+                <label>Targeting Cookies<input type="checkbox" name="ot-targeting"></label>
+                <button aria-haspopup="listbox">Confirm My Choices</button>
+              </div>
+            </div>
+            <header>
+              <input type="search" name="site-search" placeholder="Search">
+              <input type="text" aria-label="Search" name="search">
+            </header>
+            <div role="dialog">
+              <p>When you visit any website, it may store or retrieve information on your browser.</p>
+              <label>Strictly Necessary<input type="checkbox" name="dialog-consent"></label>
+            </div>
+            <form>
+              <label>First name *<input name="firstName"></label>
+              <label>Last name *<input name="lastName"></label>
+              <label>Email<input name="email" type="email"></label>
+              <div><label>checkbox label<input type="checkbox"></label></div>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        scan = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'SCAN_FIELDS' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert scan["ok"] is True
+        scanned_names = {field["name"] for field in scan["fields"]}
+        assert "firstName" in scanned_names
+        assert "lastName" in scanned_names
+        assert "email" in scanned_names
+        assert "ot-performance" not in scanned_names
+        assert "ot-targeting" not in scanned_names
+        assert "dialog-consent" not in scanned_names
+        assert "site-search" not in scanned_names
+        assert "search" not in scanned_names
+        assert all(len(field["label"]) <= 300 for field in scan["fields"])
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        generic_checkbox = next(
+            field for field in preview["result"]["debugFields"]
+            if field["rawLabel"].lower() == "checkbox label"
+        )
+        assert generic_checkbox["shouldAsk"] is False
+        unmapped_labels = {field["label"] for field in preview["result"]["unmappedFields"]}
+        assert not any("cookie" in label.lower() for label in unmapped_labels)
+        assert not any("privacy" in label.lower() for label in unmapped_labels)
+        assert "checkbox label" not in {label.lower() for label in unmapped_labels}
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_applies_mappings_by_identity_after_index_drift():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "email": "test@example.com",
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form id="application">
+              <label>First name *<input name="firstName"></label>
+              <label>Last name *<input name="lastName"></label>
+              <label>Email<input name="email" type="email"></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings = preview["result"]["mappings"]
+        assert {mapping["name"] for mapping in mappings} >= {"firstName", "lastName", "email"}
+
+        # Mutate the DOM between preview and fill so that scan indices drift.
+        page.evaluate(
+            """() => {
+              const form = document.getElementById('application');
+              const drift = document.createElement('div');
+              drift.innerHTML = `
+                <label>Nickname<input name="nickname"></label>
+                <label>Fax number<input name="fax"></label>
+              `;
+              form.prepend(drift);
+            }"""
+        )
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            mappings,
+        )
+        assert fill_response["ok"] is True
+        assert page.locator("[name='firstName']").input_value() == "Test"
+        assert page.locator("[name='lastName']").input_value() == "Candidate"
+        assert page.locator("[name='email']").input_value() == "test@example.com"
+        assert page.locator("[name='nickname']").input_value() == ""
+        assert page.locator("[name='fax']").input_value() == ""
+
+        verification = fill_response["result"]["verification"]
+        assert verification["matched"] >= 3
+        assert verification["mismatched"] == []
+
+        browser.close()

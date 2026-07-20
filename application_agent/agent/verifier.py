@@ -3,15 +3,16 @@ from __future__ import annotations
 from typing import Any
 
 from application_agent.agent.field_mapper import normalize
+from application_agent.agent.form_scanner import field_locator
 
 
-def verify_fill_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
+def verify_fill_plan(items: list[dict[str, Any]], page: Any = None) -> dict[str, Any]:
     results: list[dict[str, Any]] = []
 
     for item in items:
         field = item.get("field") or {}
         expected = str(item.get("value") or "")
-        actual = current_field_value(field)
+        actual = current_field_value(field, page)
         status = "matched" if values_match(actual, expected) else "mismatch"
 
         if actual is None:
@@ -36,8 +37,8 @@ def verify_fill_plan(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def current_field_value(field: dict[str, Any]) -> str | None:
-    locator = field.get("locator")
+def current_field_value(field: dict[str, Any], page: Any = None) -> str | None:
+    locator = field_locator(page, field)
     if not locator:
         return None
 

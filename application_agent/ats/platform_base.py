@@ -60,7 +60,7 @@ class LabelFirstAdapter(BaseAdapter):
                         "label": label_pattern,
                         "options": [],
                     }
-                    return 1 if self.select_dynamic_option(pseudo_field, value) else 0
+                    return 1 if self.select_dynamic_option(page, pseudo_field, value) else 0
 
                 field.fill(str(value), timeout=2_000)
                 return 1

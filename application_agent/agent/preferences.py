@@ -7,11 +7,15 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_PREFERENCES = ROOT / "application_agent/preferences.private.json"
+EXAMPLE_PREFERENCES = ROOT / "application_agent/preferences.example.json"
 
 
 def load_preferences(path: Path = DEFAULT_PREFERENCES) -> dict[str, Any]:
     if not path.exists():
-        return {}
+        if path == DEFAULT_PREFERENCES and EXAMPLE_PREFERENCES.exists():
+            path = EXAMPLE_PREFERENCES
+        else:
+            return {}
 
     return json.loads(path.read_text(encoding="utf-8"))
 

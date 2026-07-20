@@ -410,6 +410,16 @@ button,
   background: #fff8e6;
 }
 
+.verification-summary {
+  border-color: #8fbf9f;
+  background: #f0f9f2;
+}
+
+.verification-mismatch {
+  border-color: #d98a80;
+  background: #fdefec;
+}
+
 .options-shell {
   width: min(960px, calc(100vw - 32px));
   margin: 32px auto 56px;

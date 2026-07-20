@@ -27,8 +27,11 @@ PRIVATE_ENV_PATH = Path(__file__).resolve().parent / "env.private"
 NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 AI_RATE_LIMIT_PER_MINUTE = 40
+KEY_PROBE_TTL_SECONDS = 600
 _ai_request_times: deque[float] = deque()
 _ai_request_lock = threading.Lock()
+_key_probe_lock = threading.Lock()
+_key_probe_cache: dict[str, Any] = {"checkedAt": 0.0, "keyValid": None, "keyError": ""}
 
 app = Flask(__name__)
 
@@ -119,12 +122,95 @@ def add_cors_headers(response):
     return response
 
 
+def nvidia_key_rejected_message(status_code: int) -> str:
+    return (
+        f"NVIDIA API key was rejected ({status_code}). "
+        "Update NVIDIA_API_KEY in backend/env.private and restart the backend."
+    )
+
+
+def note_api_key_rejected(status_code: int) -> None:
+    with _key_probe_lock:
+        _key_probe_cache.update({
+            "checkedAt": time.time(),
+            "keyValid": False,
+            "keyError": nvidia_key_rejected_message(status_code),
+        })
+
+
+def raise_for_nvidia_status(response, trace_event: str, trace_id: str) -> None:
+    if response.status_code in (401, 403):
+        message = nvidia_key_rejected_message(response.status_code)
+        note_api_key_rejected(response.status_code)
+        write_llm_trace(trace_event, {
+            "traceId": trace_id,
+            "statusCode": response.status_code,
+            "error": message,
+        })
+        raise RuntimeError(message)
+
+    response.raise_for_status()
+
+
+def probe_api_key_validity() -> dict[str, Any]:
+    if not api_key():
+        return {
+            "keyConfigured": False,
+            "keyValid": False,
+            "keyError": "NVIDIA_API_KEY is not configured",
+        }
+
+    now = time.time()
+    with _key_probe_lock:
+        if _key_probe_cache["checkedAt"] and now - _key_probe_cache["checkedAt"] < KEY_PROBE_TTL_SECONDS:
+            return {
+                "keyConfigured": True,
+                "keyValid": _key_probe_cache["keyValid"],
+                "keyError": _key_probe_cache["keyError"],
+            }
+
+    key_valid: bool | None = None
+    key_error = ""
+    try:
+        response = requests.post(
+            os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
+            headers={
+                "Authorization": f"Bearer {api_key()}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model_name(),
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=15,
+        )
+        if response.status_code in (401, 403):
+            key_valid = False
+            key_error = nvidia_key_rejected_message(response.status_code)
+        elif response.ok:
+            key_valid = True
+        else:
+            key_error = f"NVIDIA API returned status {response.status_code} during the key check"
+    except requests.RequestException as exc:
+        key_error = f"Could not reach the NVIDIA API to validate the key: {exc.__class__.__name__}"
+
+    with _key_probe_lock:
+        _key_probe_cache.update({"checkedAt": time.time(), "keyValid": key_valid, "keyError": key_error})
+
+    return {"keyConfigured": True, "keyValid": key_valid, "keyError": key_error}
+
+
 @app.route("/health", methods=["GET"])
 def health():
+    key_status = probe_api_key_validity()
     return jsonify({
         "ok": True,
         "model": model_name(),
-        "llmConfigured": bool(api_key()),
+        "llmConfigured": key_status["keyConfigured"],
+        "keyConfigured": key_status["keyConfigured"],
+        "keyValid": key_status["keyValid"],
+        "keyError": key_status["keyError"],
         "aiUsage": ai_usage_snapshot(),
     })
 
@@ -330,7 +416,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
         json=request_json,
         timeout=45,
     )
-    response.raise_for_status()
+    raise_for_nvidia_status(response, "mapper.error", trace_id)
     content = response.json()["choices"][0]["message"]["content"]
     data = parse_json_object(content)
     mappings = data.get("mappings", [])
@@ -416,7 +502,7 @@ def call_nvidia_auditor(
         json=request_json,
         timeout=45,
     )
-    response.raise_for_status()
+    raise_for_nvidia_status(response, "auditor.error", trace_id)
     content = response.json()["choices"][0]["message"]["content"]
     data = parse_json_object(content)
     corrections = data.get("corrections", [])
