@@ -461,11 +461,54 @@
       index += 1;
     }
 
-    return fields;
+    // Drop fields whose derived text is actually an open dropdown's option list (e.g. a
+    // phone Country combobox whose expanded listbox "244 results found ... Afghanistan+93 ..."
+    // leaked into the label). These are scanning artifacts, not askable fields.
+    return fields.filter((field) => !isOptionListArtifactField(field));
   }
 
   function isJunkFieldElement(element) {
-    return isInsideConsentUi(element) || isStandaloneSearchElement(element);
+    return isInsideConsentUi(element)
+      || isStandaloneSearchElement(element)
+      || isInsideOpenOptionList(element);
+  }
+
+  // An element that is itself an option list (role=listbox/option) or that lives inside an
+  // open combobox popup is a transient product of opening a dropdown, not a real form field.
+  function isInsideOpenOptionList(element) {
+    const role = (element.getAttribute("role") || "").toLowerCase();
+    if (role === "listbox" || role === "option") {
+      return true;
+    }
+
+    const popup = element.closest?.(
+      "[role='listbox'], [class*='menu' i], [class*='listbox' i], [class*='options' i]"
+    );
+    if (!popup || popup === element) {
+      return false;
+    }
+
+    // Only discard when the popup genuinely holds option nodes, so ordinary fields wrapped in
+    // "menu"-styled containers are never dropped.
+    const looksLikeOptionList = (popup.getAttribute("role") || "").toLowerCase() === "listbox"
+      || Boolean(popup.querySelector?.(DROPDOWN_OPTION_SELECTOR));
+    return looksLikeOptionList;
+  }
+
+  // Matches labels that are really an open dropdown's option list rather than a question,
+  // e.g. "244 results foundNo results found" or a long run of country dialing codes.
+  function isOptionListArtifactField(field) {
+    const text = compactText([field.label, field.ariaLabel, field.placeholder].join(" "));
+    if (!text) {
+      return false;
+    }
+
+    if (/\bresults? found\b/i.test(text) || /\bno results? found\b/i.test(text)) {
+      return true;
+    }
+
+    const dialingCodes = text.match(/\+\d{1,4}/g);
+    return Boolean(dialingCodes && dialingCodes.length >= 5);
   }
 
   function isInsideConsentUi(element) {
@@ -5243,43 +5286,57 @@
       return 0;
     }
 
-    const education = normalizedEducation(profile)[0];
-    if (!education) {
+    const educationEntries = normalizedEducation(profile);
+    if (!educationEntries.length) {
       return 0;
     }
 
+    // Per-row fill. Repeatable education sections (Greenhouse/Workday) render one
+    // School/Degree/Field-of-study control per education block, and prepareRepeatableSections
+    // clicks "Add another" once per profile entry. Previously this fallback only located the
+    // FIRST control of each kind (document-wide) and filled it from education[0], leaving the
+    // rows created for entries 2..N empty. Collect every matching control in document order
+    // and fill control[i] from educationEntries[i] so each created row is populated.
+    const schoolControls = findAllWorkdayDropdownsByLabel(/^(school or university|school|university|college|institution)\s*\*?$/i);
+    const degreeControls = findAllWorkdayDropdownsByLabel(/^degree\s*\*?$/i);
+    const fieldControls = findAllWorkdayDropdownsByLabel(/^(field of study|discipline|major)\s*\*?$/i);
+
     let filled = 0;
-    const school = education.school || profile.school;
-    const schoolControl = findWorkdayDropdownByLabel(/^(school or university|school|university|college|institution)\s*\*?$/i);
 
-    if (schoolControl && hasValue(school) && !valueMatches(getCurrentValue(schoolControl), school)) {
-      filled += await fillCombobox(schoolControl, school) ? 1 : 0;
-    }
+    for (let index = 0; index < educationEntries.length; index += 1) {
+      const education = educationEntries[index];
 
-    const degree = education.degree || profile.degree;
-    const degreeControl = findWorkdayDropdownByLabel(/^degree\s*\*?$/i);
-
-    if (degreeControl && hasValue(degree) && !valueMatches(getCurrentValue(degreeControl), degree)) {
-      filled += await fillCombobox(degreeControl, degree) ? 1 : 0;
-    }
-
-    const fieldControl = findWorkdayDropdownByLabel(/^(field of study|discipline|major)\s*\*?$/i);
-    const fields = preferredEducationFields(education);
-
-    for (const field of fields) {
-      if (!fieldControl) {
-        break;
+      // Top-level profile.school/profile.degree only describe the primary (first) entry.
+      const school = education.school || (index === 0 ? profile.school : "");
+      const schoolControl = schoolControls[index];
+      if (schoolControl && hasValue(school) && !valueMatches(getCurrentValue(schoolControl), school)) {
+        filled += await fillCombobox(schoolControl, school) ? 1 : 0;
       }
 
-      const current = normalize(getCurrentValue(fieldControl));
-      if (current && optionMatches(current, "", field)) {
-        continue;
+      const degree = education.degree || (index === 0 ? profile.degree : "");
+      const degreeControl = degreeControls[index];
+      if (degreeControl && hasValue(degree) && !valueMatches(getCurrentValue(degreeControl), degree)) {
+        filled += await fillCombobox(degreeControl, degree) ? 1 : 0;
       }
 
-      filled += await fillCombobox(fieldControl, field) ? 1 : 0;
+      const fieldControl = fieldControls[index];
+      const fields = preferredEducationFields(education);
 
-      if (!isMultiSelectDropdown(fieldControl)) {
-        break;
+      for (const field of fields) {
+        if (!fieldControl) {
+          break;
+        }
+
+        const current = normalize(getCurrentValue(fieldControl));
+        if (current && optionMatches(current, "", field)) {
+          continue;
+        }
+
+        filled += await fillCombobox(fieldControl, field) ? 1 : 0;
+
+        if (!isMultiSelectDropdown(fieldControl)) {
+          break;
+        }
       }
     }
 
@@ -5428,6 +5485,29 @@
     }
 
     return null;
+  }
+
+  // Like findWorkdayDropdownByLabel but returns every distinct matching control in document
+  // (top-to-bottom) order. Used to fill repeated education blocks per row instead of only the
+  // first one.
+  function findAllWorkdayDropdownsByLabel(pattern) {
+    const labels = Array.from(document.querySelectorAll("label, [data-automation-id='formLabel'], [data-automation-id='formFieldLabel'], span, div"))
+      .filter(isVisibleElement)
+      .filter((item) => pattern.test(compactText(item.innerText || item.textContent || "")))
+      .sort((left, right) => topOfElement(left) - topOfElement(right));
+
+    const controls = [];
+    const seen = new Set();
+
+    for (const label of labels) {
+      const control = findDropdownNearLabel(label);
+      if (control && !seen.has(control)) {
+        seen.add(control);
+        controls.push(control);
+      }
+    }
+
+    return controls;
   }
 
   function findWorkdayCountryDropdown() {

@@ -394,6 +394,9 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
         "temperature": 0.1,
         "max_tokens": 3200,
         "response_format": {"type": "json_object"},
+        # The default model is a reasoning model that otherwise spends the whole
+        # token budget on chain-of-thought and never emits the JSON body.
+        "chat_template_kwargs": {"thinking": False},
     }
     write_llm_trace(
         "mapper.request",
@@ -417,7 +420,7 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
         timeout=45,
     )
     raise_for_nvidia_status(response, "mapper.error", trace_id)
-    content = response.json()["choices"][0]["message"]["content"]
+    content = message_json_content(response)
     data = parse_json_object(content)
     mappings = data.get("mappings", [])
 
@@ -478,6 +481,8 @@ def call_nvidia_auditor(
         "temperature": 0.05,
         "max_tokens": 3200,
         "response_format": {"type": "json_object"},
+        # Disable chain-of-thought so the reasoning model emits JSON directly.
+        "chat_template_kwargs": {"thinking": False},
     }
     write_llm_trace(
         "auditor.request",
@@ -503,7 +508,7 @@ def call_nvidia_auditor(
         timeout=45,
     )
     raise_for_nvidia_status(response, "auditor.error", trace_id)
-    content = response.json()["choices"][0]["message"]["content"]
+    content = message_json_content(response)
     data = parse_json_object(content)
     corrections = data.get("corrections", [])
     decisions = data.get("decisions", [])
@@ -2085,6 +2090,20 @@ def normalize_for_option(value: Any) -> str:
     return " ".join(
         "".join(char.lower() if char.isalnum() else " " for char in str(value or "")).split()
     )
+
+
+def message_json_content(response: Any) -> str:
+    """Return the JSON-bearing text from a chat completion.
+
+    Reasoning models sometimes leave `content` empty and place everything in
+    `reasoning_content`; and when reasoning isn't fully disabled the JSON is the
+    trailing block of that text. Prefer `content`, fall back to reasoning text.
+    """
+    message = response.json()["choices"][0]["message"]
+    content = (message.get("content") or "").strip()
+    if content:
+        return content
+    return (message.get("reasoning_content") or "").strip()
 
 
 def parse_json_object(content: str) -> dict[str, Any]:

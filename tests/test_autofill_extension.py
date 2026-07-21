@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -3691,5 +3692,263 @@ def test_content_script_applies_mappings_by_identity_after_index_drift():
         verification = fill_response["result"]["verification"]
         assert verification["matched"] >= 3
         assert verification["mismatched"] == []
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_every_repeated_greenhouse_education_row_without_empty_rows():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "education": [
+            {"school": "University of Waterloo", "degree": "Bachelor's Degree"},
+            {"school": "University of Toronto", "degree": "Master's Degree"},
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    # A repeated Greenhouse-style education section: one School + Degree combobox per block,
+    # each block's option listbox only visible while that block's control is open, and an
+    # "Add another" button that clones a new empty block. The option lists are intentionally
+    # long (> 40 entries) so the extension cannot pre-discover them and must fill each block
+    # through its per-row dropdown fallback.
+    html = """
+      <form>
+        <h2>Education</h2>
+        <div id="education">
+          <div class="education-row">
+            <div data-automation-id="formField-school">
+              <div data-automation-id="formLabel">School or University*</div>
+              <button class="school" type="button" aria-haspopup="listbox">Select...</button>
+              <div class="listbox school-options" role="listbox" hidden></div>
+            </div>
+            <div data-automation-id="formField-degree">
+              <div data-automation-id="formLabel">Degree*</div>
+              <button class="degree" type="button" aria-haspopup="listbox">Select...</button>
+              <div class="listbox degree-options" role="listbox" hidden></div>
+            </div>
+          </div>
+          <button id="addEducation" type="button">Add another</button>
+        </div>
+      </form>
+      <script>
+        const SCHOOLS = ['University of Waterloo', 'University of Toronto'];
+        const DEGREES = ["Bachelor's Degree", "Master's Degree"];
+        function padOptions(base) {
+          const options = base.slice();
+          for (let i = options.length; i < 45; i += 1) {
+            options.push('Filler option ' + i);
+          }
+          return options;
+        }
+        function fillListbox(container, values) {
+          container.innerHTML = '';
+          values.forEach((value) => {
+            const option = document.createElement('div');
+            option.setAttribute('role', 'option');
+            option.textContent = value;
+            container.appendChild(option);
+          });
+        }
+        function wire(root) {
+          fillListbox(root.querySelector('.school-options'), padOptions(SCHOOLS));
+          fillListbox(root.querySelector('.degree-options'), padOptions(DEGREES));
+          root.querySelectorAll('button[aria-haspopup="listbox"]').forEach((button) => {
+            const list = button.parentElement.querySelector('.listbox');
+            button.addEventListener('click', () => { list.hidden = !list.hidden; });
+            button.addEventListener('keydown', (event) => { if (event.key === 'Escape') list.hidden = true; });
+            list.querySelectorAll('[role="option"]').forEach((option) => {
+              option.addEventListener('click', () => {
+                button.textContent = option.textContent;
+                button.setAttribute('data-selected', option.textContent);
+                list.hidden = true;
+              });
+            });
+          });
+        }
+        wire(document.querySelector('.education-row'));
+        document.getElementById('addEducation').addEventListener('click', () => {
+          const row = document.querySelector('.education-row').cloneNode(true);
+          row.querySelectorAll('button').forEach((button) => {
+            button.textContent = 'Select...';
+            button.removeAttribute('data-selected');
+          });
+          row.querySelectorAll('.listbox').forEach((list) => { list.hidden = true; });
+          document.getElementById('education').insertBefore(row, document.getElementById('addEducation'));
+          wire(row);
+        });
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(html)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        # One block should have been added, one per education entry.
+        assert page.locator(".education-row").count() == 2
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+
+        # No added row is left empty: every degree/school control is populated, and each
+        # education entry lands in its own separate row.
+        assert page.locator(".education-row").count() == 2
+        assert page.locator(".education-row").nth(0).locator("button.school").inner_text() == "University of Waterloo"
+        assert page.locator(".education-row").nth(0).locator("button.degree").inner_text() == "Bachelor's Degree"
+        assert page.locator(".education-row").nth(1).locator("button.school").inner_text() == "University of Toronto"
+        assert page.locator(".education-row").nth(1).locator("button.degree").inner_text() == "Master's Degree"
+
+        selected_degrees = page.locator("button.degree[data-selected]").count()
+        assert selected_degrees == 2
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_scan_skips_open_dropdown_option_lists():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "email": "test@example.com",
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    # A phone Country combobox that is currently OPEN. Its popup listbox holds a search input
+    # and the full country-dialing-code list, and a second field's label was polluted with the
+    # same option dump. Neither the injected search input nor the option-list-labelled field
+    # should be scanned or sent as askable.
+    option_dump = (
+        "244 results found No results found Afghanistan +93 Åland Islands +358 "
+        "Albania +355 Algeria +213 Andorra +376 Angola +244 Argentina +54"
+    )
+    html = f"""
+      <form>
+        <label>First name *<input name="firstName"></label>
+        <div class="phone-country select__container">
+          <label id="pc-label">Phone country code</label>
+          <div class="select__control">
+            <input id="pc-combobox" name="phoneCountry" role="combobox" aria-labelledby="pc-label" aria-expanded="true" value="">
+          </div>
+          <div class="select__menu" role="listbox" id="pc-menu">
+            <input id="pc-search" name="phoneCountrySearch" role="textbox" placeholder="Search">
+            <div class="select__menu-notice">244 results found</div>
+            <div role="option">Afghanistan +93</div>
+            <div role="option">Åland Islands +358</div>
+            <div role="option">Albania +355</div>
+          </div>
+        </div>
+        <div class="form-group">
+          <input name="leakedLabelField">
+          <span>{option_dump}</span>
+        </div>
+      </form>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(html)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        scan = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'SCAN_FIELDS' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert scan["ok"] is True
+        scanned_names = {field["name"] for field in scan["fields"]}
+        assert "firstName" in scanned_names
+        # The dropdown's injected search input and the option-list-labelled field are dropped.
+        assert "phoneCountrySearch" not in scanned_names
+        assert "leakedLabelField" not in scanned_names
+        for field in scan["fields"]:
+            haystack = " ".join([field.get("label", ""), field.get("ariaLabel", ""), field.get("placeholder", "")]).lower()
+            assert "results found" not in haystack
+            assert len(re.findall(r"\+\d", haystack)) < 5
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        askable_names = {field["name"] for field in preview["result"]["unmappedFields"]}
+        assert "phoneCountrySearch" not in askable_names
+        assert "leakedLabelField" not in askable_names
+        for field in preview["result"]["unmappedFields"]:
+            assert "results found" not in field["label"].lower()
 
         browser.close()
