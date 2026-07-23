@@ -1,3 +1,4 @@
+import base64
 import importlib.util
 import json
 import re
@@ -4332,5 +4333,300 @@ def test_content_script_reports_unfilled_mapped_fields_as_failures():
         assert len(failures) == 1, failures
         assert "favorite color" in failures[0]["label"].lower()
         assert failures[0]["error"] == "no matching option"
+
+        browser.close()
+
+
+RESUME_UPLOAD_PAGE = """
+<form>
+  <div>
+    <label for="resumeUpload">Resume/CV *</label>
+    <button type="button">Attach</button>
+    <input id="resumeUpload" type="file" style="display:none">
+  </div>
+  <div>
+    <label for="coverLetterUpload">Cover Letter</label>
+    <button type="button">Attach</button>
+    <input id="coverLetterUpload" type="file" style="display:none">
+  </div>
+</form>
+"""
+
+
+def install_chrome_mock_with_resume(page, profile, settings, resume_response):
+    page.evaluate(
+        f"""() => {{
+          const profile = {json.dumps(profile)};
+          const settings = {json.dumps(settings)};
+          const resumeResponse = {json.dumps(resume_response)};
+          window.__autofillListener = null;
+          window.__resumeFetchCount = 0;
+          window.chrome = {{
+            runtime: {{
+              onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+              sendMessage: async (message) => {{
+                if (message?.type === 'FETCH_RESUME_FILE') {{
+                  window.__resumeFetchCount += 1;
+                  return resumeResponse;
+                }}
+                return {{ ok: true, payload: {{ mappings: [] }} }};
+              }}
+            }},
+            storage: {{
+              local: {{
+                get: async () => ({{ candidateProfile: profile, settings }})
+              }}
+            }}
+          }};
+        }}"""
+    )
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_attaches_resume_to_resume_input_but_not_cover_letter():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    resume_b64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+    profile = {"firstName": "Test", "lastName": "Candidate", "resumeFileName": "My Resume.pdf", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(RESUME_UPLOAD_PAGE)
+        install_chrome_mock_with_resume(
+            page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        automatic_tasks = [task for task in preview["result"]["manualTasks"] if task.get("automatic")]
+        assert len(automatic_tasks) == 1
+        assert automatic_tasks[0]["label"] == "Resume/CV"
+        assert automatic_tasks[0]["resumeFileName"] == "My Resume.pdf"
+
+        fill_response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: [] }, null, (response) => resolve(response));
+            })"""
+        )
+        assert fill_response["ok"] is True, fill_response
+        result = fill_response["result"]
+        assert result["filled"] == 1
+        assert result["attached"] == [{"label": "Resume/CV", "filename": "My Resume.pdf"}]
+        assert result["failures"] == []
+
+        resume_files = page.evaluate(
+            "() => Array.from(document.getElementById('resumeUpload').files).map((file) => file.name)"
+        )
+        assert resume_files == ["My Resume.pdf"]
+        assert page.evaluate("() => document.getElementById('coverLetterUpload').files.length") == 0
+        assert page.evaluate("() => window.__resumeFetchCount") == 1
+        resume_events = page.evaluate(
+            """() => {
+              const input = document.getElementById('resumeUpload');
+              return { size: input.files[0].size, type: input.files[0].type };
+            }"""
+        )
+        assert resume_events["size"] == len(b"%PDF-1.4 sample resume bytes")
+        assert resume_events["type"] == "application/pdf"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_does_not_replace_user_chosen_resume_file():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    resume_b64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+    profile = {"firstName": "Test", "lastName": "Candidate", "resumeFileName": "My Resume.pdf", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(RESUME_UPLOAD_PAGE)
+        install_chrome_mock_with_resume(
+            page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        page.evaluate(
+            """() => {
+              const transfer = new DataTransfer();
+              transfer.items.add(new File(['user chosen'], 'user-resume.pdf', { type: 'application/pdf' }));
+              document.getElementById('resumeUpload').files = transfer.files;
+            }"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        fill_response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: [] }, null, (response) => resolve(response));
+            })"""
+        )
+        assert fill_response["ok"] is True, fill_response
+        result = fill_response["result"]
+        assert result["filled"] == 0
+        assert result["attached"] == []
+        assert result["failures"] == []
+
+        resume_files = page.evaluate(
+            "() => Array.from(document.getElementById('resumeUpload').files).map((file) => file.name)"
+        )
+        assert resume_files == ["user-resume.pdf"]
+        assert page.evaluate("() => window.__resumeFetchCount") == 0
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_reports_resume_fetch_failure_only_when_resume_input_exists():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {"firstName": "Test", "lastName": "Candidate", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+    missing_resume = {"ok": False, "error": "No resume file configured. Set RESUME_FILE_PATH in backend/env.private."}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(RESUME_UPLOAD_PAGE)
+        install_chrome_mock_with_resume(page, profile, settings, missing_resume)
+        page.add_script_tag(path=str(content_script_path))
+
+        fill_response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: [] }, null, (response) => resolve(response));
+            })"""
+        )
+        assert fill_response["ok"] is True, fill_response
+        result = fill_response["result"]
+        assert result["filled"] == 0
+        assert result["attached"] == []
+        assert result["failures"] == [{"label": "Resume/CV", "error": missing_resume["error"]}]
+        assert page.evaluate("() => document.getElementById('resumeUpload').files.length") == 0
+
+        no_upload_page = browser.new_page()
+        no_upload_page.set_content("<form><label>Full name<input name='fullName'></label></form>")
+        install_chrome_mock_with_resume(no_upload_page, profile, settings, missing_resume)
+        no_upload_page.add_script_tag(path=str(content_script_path))
+
+        fill_response = no_upload_page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: [] }, null, (response) => resolve(response));
+            })"""
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert fill_response["result"]["failures"] == []
+        assert fill_response["result"]["attached"] == []
+        assert no_upload_page.evaluate("() => window.__resumeFetchCount") == 0
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_page_field_context_reflects_answers_filled_mid_loop():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {"firstName": "Test", "lastName": "Candidate", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <fieldset>
+                <legend>Do you have relatives employed by this company?</legend>
+                <label><input type="radio" name="relatives" value="Yes">Yes</label>
+                <label><input type="radio" name="relatives" value="No">No</label>
+              </fieldset>
+              <label>If yes, which relative?<input name="whichRelative"></label>
+            </form>
+            """
+        )
+        install_chrome_mock_with_resume(page, profile, settings, {"ok": False, "error": "unused"})
+        page.add_script_tag(path=str(content_script_path))
+
+        def get_context():
+            response = page.evaluate(
+                """() => new Promise((resolve) => {
+                  window.__autofillListener({ type: 'GET_PAGE_FIELD_CONTEXT' }, null, (response) => resolve(response));
+                })"""
+            )
+            assert response["ok"] is True
+            return response["context"]
+
+        def relatives_entry(context):
+            matches = [entry for entry in context if "relatives" in entry["label"].lower()]
+            assert matches, context
+            return matches[0]
+
+        before = relatives_entry(get_context())
+        assert before["answered"] is False
+        assert before["currentValue"] == ""
+
+        scan = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'SCAN_FIELDS' }, null, (response) => resolve(response));
+            })"""
+        )
+        group = next(field for field in scan["fields"] if field["name"] == "relatives")
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            [
+                {
+                    "index": group["index"],
+                    "label": group.get("label", ""),
+                    "name": group.get("name", ""),
+                    "id": group.get("id", ""),
+                    "tag": group.get("tag", ""),
+                    "type": group.get("type", ""),
+                    "value": "No",
+                    "source": "rule",
+                    "confidence": 0.9,
+                }
+            ],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert fill_response["result"]["filled"] >= 1
+        assert page.locator("input[name='relatives'][value='No']").is_checked()
+
+        after = relatives_entry(get_context())
+        assert after["answered"] is True
+        assert "No" in after["currentValue"]
 
         browser.close()

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,7 +235,10 @@ def map_fields():
     # models keep answering them from candidate facts instead of form logic.
     conditional_mappings = [
         mapping
-        for mapping in (conditional_not_applicable_mapping(field, page) for field in fields)
+        for mapping in (
+            conditional_not_applicable_mapping(field, page) or authoritative_policy_mapping(field, profile)
+            for field in fields
+        )
         if mapping is not None
     ]
     resolved_indexes = {mapping["index"] for mapping in conditional_mappings}
@@ -263,6 +266,9 @@ def map_fields():
             "warning": f"Mapper request failed: {exc}",
             "aiUsage": ai_usage_snapshot(),
         }), 200
+
+    mappings = mappings + compact_retry_unanswered_option_fields(remaining_fields, mappings, profile, page)
+    mappings = rewrite_third_person_narratives(remaining_fields, mappings, profile)
 
     return jsonify({"mappings": conditional_mappings + mappings, "aiUsage": ai_usage_snapshot()})
 
@@ -303,6 +309,37 @@ def audit_fields():
         "warning": warning,
         "aiUsage": ai_usage_snapshot(),
     })
+
+
+def resume_file_path() -> Path | None:
+    configured = os.environ.get("RESUME_FILE_PATH", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_file() else None
+
+    resumes_dir = ROOT / "resumes"
+    if resumes_dir.is_dir():
+        pdfs = sorted(resumes_dir.glob("*.pdf"))
+        if pdfs:
+            return pdfs[0]
+    return None
+
+
+@app.route("/resume-file", methods=["GET", "OPTIONS"])
+def resume_file():
+    """Serve the candidate's resume so the extension can attach it to
+    Resume/CV file inputs. Path comes from RESUME_FILE_PATH in env.private,
+    falling back to the first PDF in autofill_extension/resumes/."""
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+    path = resume_file_path()
+    if path is None:
+        return jsonify({"error": "No resume file configured. Set RESUME_FILE_PATH in backend/env.private."}), 404
+
+    response = send_file(path, mimetype="application/pdf", as_attachment=False)
+    response.headers["X-Resume-Filename"] = path.name
+    return response
 
 
 @app.route("/track-application", methods=["POST", "OPTIONS"])
@@ -2209,6 +2246,209 @@ def conditional_not_applicable_mapping(field: Any, page: dict[str, Any]) -> dict
         "confidence": 0.99,
         "source": "policy",
     }
+
+
+def compact_nvidia_call(system: str, payload: dict[str, Any], max_tokens: int = 900) -> dict[str, Any]:
+    """Small focused completion — the model follows instructions reliably in
+    short prompts where the full mapper prompt drowns them out."""
+    record_ai_request()
+    response = requests.post(
+        os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
+        headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"},
+        json={
+            "model": model_name(),
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            "response_format": {"type": "json_object"},
+            "chat_template_kwargs": {"thinking": False},
+        },
+        timeout=45,
+    )
+    response.raise_for_status()
+    return parse_json_object(message_json_content(response))
+
+
+def compact_candidate_facts(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "workAuthorization": profile.get("workAuthorization"),
+        "needsSponsorship": profile.get("needsSponsorship"),
+        "canadianCitizen": profile.get("canadianCitizen"),
+        "usPermanentResident": profile.get("usPermanentResident"),
+        "veteranStatus": profile.get("veteranStatus"),
+        "demographics": profile.get("demographics", {}),
+    }
+
+
+def compact_retry_unanswered_option_fields(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+    page: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Re-ask unmapped multi-option fields with a focused prompt.
+
+    In the full mapper prompt the model tends to answer option checklists with
+    a bare Yes/No, which enforce_option_values rightly refuses to coerce. A
+    compact single-field prompt reliably yields the exact option label.
+    """
+    mapped = {m.get("index") for m in mappings if isinstance(m, dict)}
+    retried: list[dict[str, Any]] = []
+
+    for field in fields:
+        if len(retried) >= 4:
+            break
+        if not isinstance(field, dict) or field.get("index") in mapped:
+            continue
+        options = normalized_options(field)
+        if len(options) < 2:
+            if field.get("tag") == "textarea" and field.get("required"):
+                narrative = compact_narrative_answer(field, profile, page)
+                if narrative:
+                    retried.append({"index": field["index"], "value": narrative, "confidence": 0.6, "source": "llm"})
+            continue
+
+        try:
+            data = compact_nvidia_call(
+                (
+                    "You answer one job-application question for a candidate. "
+                    "Return ONLY JSON: {\"value\": \"exact option label\"} (or a JSON array of labels for select-all-that-apply). "
+                    "The value MUST be copied verbatim from the supplied options — never a bare Yes or No unless that exact option exists. "
+                    "Use candidateFacts (citizenship, residency, eligibility, demographics) to pick only factually true options. "
+                    "If the question says 'if you selected ... in the prior question' and pageContext shows the prior answer was a "
+                    "'none of the above' style option, you MUST pick the 'Not applicable' style option. "
+                    "If no option can be chosen truthfully, return {\"value\": null}."
+                ),
+                {
+                    "question": field.get("label") or field.get("questionText") or "",
+                    "options": [option.get("label") or option.get("value") for option in options],
+                    "candidateFacts": compact_candidate_facts(profile),
+                    "pageContext": (page.get("context") if isinstance(page, dict) else None) or [],
+                },
+            )
+        except Exception:
+            app.logger.exception("Compact retry failed")
+            continue
+
+        value = value_from_options(data.get("value"), options) if data.get("value") else None
+        if value:
+            mapping = {"index": field["index"], "value": value, "confidence": 0.7, "source": "llm"}
+            write_llm_trace("mapper.compact_retry", {"field": field.get("label"), "value": value})
+            retried.append(mapping)
+
+    return retried
+
+
+def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], page: dict[str, Any]) -> str | None:
+    """Focused single-question answer for a required narrative field the bulk
+    mapper skipped, using only that field's retrieved context."""
+    try:
+        data = compact_nvidia_call(
+            (
+                "You write one job-application answer as the candidate, strictly in first person (I/my/me) — "
+                "never mention the candidate's name. Use only facts from retrievedContext; do not invent experience. "
+                "Obey any special instructions in the question exactly (required opening phrase, bullet limits, word caps). "
+                "Default to 2-3 concise sentences. Return ONLY JSON: {\"value\": \"answer\"}. "
+                "If retrievedContext has no relevant material, return {\"value\": null}."
+            ),
+            {
+                "question": field.get("label") or field.get("questionText") or "",
+                "retrievedContext": retrieved_context_for_field(field, profile, page),
+            },
+            max_tokens=1200,
+        )
+    except Exception:
+        app.logger.exception("Compact narrative retry failed")
+        return None
+
+    value = data.get("value")
+    if isinstance(value, str) and value.strip():
+        write_llm_trace("mapper.compact_narrative", {"field": field.get("label"), "value": value[:200]})
+        return value.strip()
+    return None
+
+
+def rewrite_third_person_narratives(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Rewrite narrative answers that slipped into third person (candidate's name)."""
+    first_name = str(profile.get("firstName") or "").strip()
+    if not first_name:
+        return mappings
+
+    field_by_index = {f.get("index"): f for f in fields if isinstance(f, dict)}
+    name_pattern = re.compile(rf"\b{re.escape(first_name)}\b", re.IGNORECASE)
+    result = []
+
+    for mapping in mappings:
+        value = mapping.get("value") if isinstance(mapping, dict) else None
+        field = field_by_index.get(mapping.get("index")) if isinstance(mapping, dict) else None
+        is_narrative = isinstance(field, dict) and (field.get("tag") == "textarea" or not normalized_options(field))
+
+        if not (is_narrative and isinstance(value, str) and name_pattern.search(value)):
+            result.append(mapping)
+            continue
+
+        try:
+            data = compact_nvidia_call(
+                (
+                    "Rewrite the candidate's answer strictly in first person (I/my/me). "
+                    "Never mention the candidate's name. Preserve any required opening phrase, bullet structure, and length limits exactly. "
+                    "Do not add or remove facts. Return ONLY JSON: {\"value\": \"rewritten answer\"}."
+                ),
+                {"answer": value},
+            )
+            rewritten = data.get("value")
+            if isinstance(rewritten, str) and rewritten.strip() and not name_pattern.search(rewritten):
+                write_llm_trace("mapper.first_person_rewrite", {"before": value[:200], "after": rewritten[:200]})
+                result.append({**mapping, "value": rewritten.strip()})
+                continue
+        except Exception:
+            app.logger.exception("First-person rewrite failed")
+
+        result.append(mapping)
+
+    return result
+
+
+def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[str, Any] | None:
+    """Deterministic policy answer for categories where the profile is the
+    sole authority and LLM 'judgment' only introduces errors: messaging/
+    subscription consent, sponsorship, and work eligibility. These fields
+    bypass the model entirely."""
+    if not isinstance(field, dict) or not isinstance(field.get("index"), int):
+        return None
+
+    haystack = field_policy_haystack(field)
+    policies = default_answer_policies(profile)
+    options = normalized_options(field)
+    answer = None
+
+    if any(term in haystack for term in ["whatsapp", "sms", "text message", "messaging"]) and re.search(
+        r"consent|receive|opt.?in|communicat|follow.?up|talent acquisition|recruit|hiring|job opportunit", haystack
+    ):
+        answer = best_available_option(policies["recruitingMessages"], options) or policies["recruitingMessages"]
+    elif any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
+        answer = best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
+    elif has_sponsorship_terms(haystack) and not is_work_eligibility_question(haystack):
+        answer = best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
+    elif is_work_eligibility_question(haystack):
+        authorization = stated_work_authorization(profile)
+        if authorization:
+            if semantic_yes_no_value(normalize_for_option(authorization)) == "no":
+                answer = best_available_option("No", options) or "No"
+            else:
+                answer = best_authorization_option(options) or best_available_option(authorization, options) or authorization
+
+    if not answer:
+        return None
+
+    return {"index": field["index"], "value": answer, "confidence": 0.95, "source": "policy"}
 
 
 def message_json_content(response: Any) -> str:

@@ -181,9 +181,16 @@ async function fillSelectedMappings() {
   lastFillResult = response.result;
   trackButton.disabled = false;
   addMessage("agent", `Filled ${response.result.filled} selected field(s). Please review the page before submitting.`);
+  reportResumeAttachments(response.result);
   reportFillFailures(response.result);
   renderVerification(response.result.verification);
   assistantStatus.textContent = "Filled";
+}
+
+function reportResumeAttachments(result) {
+  for (const item of result?.attached || []) {
+    addMessage("agent", `Attached ${item.filename || "your resume"} to the ${item.label || "Resume/CV"} upload field.`);
+  }
 }
 
 function reportFillFailures(result) {
@@ -276,12 +283,15 @@ async function askAiForMissingAnswersImpl() {
     const field = missingFields[index];
     const fieldForModel = toBackendField(field, 0);
     setAiWorking(true, `Asking AI ${index + 1}/${missingFields.length}: ${truncateDebug(field.label || "field")}`);
+    // Answers filled earlier in this loop can unlock or change later conditional
+    // questions, so refresh the page context before each single-field request.
+    const freshContext = await getFreshPageFieldContext();
     const response = await chrome.runtime.sendMessage({
       type: "MAP_FIELDS_WITH_BACKEND",
       payload: {
         fields: [fieldForModel],
         profile,
-        page: pageContext
+        page: freshContext ? { ...pageContext, context: freshContext } : pageContext
       }
     });
     updateAiUsage(response?.payload?.aiUsage);
@@ -321,6 +331,7 @@ async function askAiForMissingAnswersImpl() {
     lastFillResult = fillResponse.result;
     trackButton.disabled = false;
     addMessage("agent", `Audited, added, and filled ${fillResponse.result.filled} answer(s). Please review them before continuing.`);
+    reportResumeAttachments(fillResponse.result);
     reportFillFailures(fillResponse.result);
     await refreshPreviewAfterAiFill();
     renderVerification(fillResponse.result.verification);
@@ -328,6 +339,17 @@ async function askAiForMissingAnswersImpl() {
   } else {
     addMessage("agent", `Added ${aiMappings.length} AI answer(s) to the review list, but I could not fill them automatically. Keep them checked and click Fill selected.`);
     reportRemainingRequiredFields(lastPreview);
+  }
+}
+
+async function getFreshPageFieldContext() {
+  try {
+    const response = await sendToActiveTab({ type: "GET_PAGE_FIELD_CONTEXT" });
+    return response?.ok && Array.isArray(response.context) && response.context.length
+      ? response.context
+      : null;
+  } catch (error) {
+    return null;
   }
 }
 
@@ -873,7 +895,21 @@ async function sendFrameAwareMessage(tab, message) {
     return aggregateDropdownDebugResponses(successful, frames.length);
   }
 
+  if (message.type === "GET_PAGE_FIELD_CONTEXT") {
+    return aggregatePageFieldContextResponses(successful);
+  }
+
   return successful[0]?.response || { ok: false, error: accessErrorMessage(tab.url) };
+}
+
+function aggregatePageFieldContextResponses(successful) {
+  const context = [];
+
+  for (const { response } of successful) {
+    context.push(...(response.context || []));
+  }
+
+  return { ok: true, context: context.slice(0, 60) };
 }
 
 async function getTabFrames(tabId) {
@@ -1033,6 +1069,7 @@ function aggregateFillResponses(successful, frameCount) {
     frameCount,
     accessibleFrameCount: successful.length,
     failures: [],
+    attached: [],
     verification: {
       matched: 0,
       mismatched: [],
@@ -1046,6 +1083,7 @@ function aggregateFillResponses(successful, frameCount) {
     result.mapped += Number(frameResult.mapped || 0);
     result.filled += Number(frameResult.filled || 0);
     result.failures.push(...(frameResult.failures || []));
+    result.attached.push(...(frameResult.attached || []));
     result.verification.matched += Number(frameResult.verification?.matched || 0);
     result.verification.mismatched.push(...(frameResult.verification?.mismatched || []));
     result.verification.unreadable.push(...(frameResult.verification?.unreadable || []));
@@ -1109,9 +1147,15 @@ function renderReview(preview) {
     label.textContent = task.label || "Resume upload";
     const value = document.createElement("span");
     value.className = "review-value";
-    value.textContent = task.resumeFileName
-      ? `Upload ${task.resumeFileName} manually if the page still needs it.`
-      : "Upload your resume manually if the page still needs it.";
+    if (task.automatic) {
+      value.textContent = task.resumeFileName
+        ? `I will attach ${task.resumeFileName} automatically when filling.`
+        : "I will attach your resume automatically when filling.";
+    } else {
+      value.textContent = task.resumeFileName
+        ? `Upload ${task.resumeFileName} manually if the page still needs it.`
+        : "Upload your resume manually if the page still needs it.";
+    }
     body.append(label, value);
     item.append(body);
     reviewList.append(item);

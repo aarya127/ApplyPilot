@@ -139,6 +139,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === "FETCH_RESUME_FILE") {
+    fetchResumeFile()
+      .then((payload) => sendResponse({ ok: true, ...payload }))
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
+
+    return true;
+  }
+
   return false;
 });
 
@@ -242,6 +250,52 @@ async function getAiUsage() {
   }
 
   return response.json();
+}
+
+async function fetchResumeFile() {
+  const { settings } = await chrome.storage.local.get("settings");
+  const endpoint = joinUrl(settings?.backendBaseUrl, "/resume-file");
+
+  if (!endpoint) {
+    throw new Error("Backend base URL is not configured.");
+  }
+
+  // Content scripts cannot fetch the local backend from https pages (page CSP),
+  // so the resume bytes are fetched here and shipped back as base64.
+  const response = await fetchWithLocalhostFallback(endpoint, { method: "GET" });
+
+  if (!response.ok) {
+    let detail = `Resume file request failed with ${response.status}`;
+    try {
+      const body = await response.json();
+      if (body?.error) {
+        detail = body.error;
+      }
+    } catch (error) {
+      // Non-JSON error body; keep the status message.
+    }
+    throw new Error(detail);
+  }
+
+  const buffer = await response.arrayBuffer();
+
+  return {
+    filename: response.headers.get("X-Resume-Filename") || "resume.pdf",
+    mimeType: response.headers.get("Content-Type") || "application/pdf",
+    bytes: arrayBufferToBase64(buffer)
+  };
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  let binary = "";
+
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+
+  return btoa(binary);
 }
 
 async function fetchWithLocalhostFallback(endpoint, options) {

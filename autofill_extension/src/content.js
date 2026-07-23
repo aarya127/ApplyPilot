@@ -128,6 +128,11 @@
       return true;
     }
 
+    if (message?.type === "GET_PAGE_FIELD_CONTEXT") {
+      sendResponse({ ok: true, context: buildPageFieldContext(scanFields()) });
+      return false;
+    }
+
     if (message?.type === "GET_AUTOFILL_STATUS") {
       sendResponse({ ok: true, state });
       return false;
@@ -186,20 +191,38 @@
       }),
       unmappedFields,
       debugFields: plan.fields.map(debugFieldForPreview),
-      manualTasks: unmappedFields
-        .filter((field) => field.needsManualUpload)
-        .map((field) => ({
-          index: field.index,
-          label: field.label,
-          task: "Upload resume manually",
-          resumeFileName: plan.profile.resumeFileName || ""
-        })),
+      manualTasks: buildManualTasks(unmappedFields, plan.profile),
       page: {
         url: location.href,
         title: document.title,
         context: buildPageFieldContext(plan.fields)
       }
     };
+  }
+
+  function buildManualTasks(unmappedFields, profile) {
+    const willAttachResume = findResumeFileInputs().some((input) => !input.files?.length);
+    const tasks = unmappedFields
+      .filter((field) => field.needsManualUpload)
+      .filter((field) => !(willAttachResume && isResumeContextText(field.label)))
+      .map((field) => ({
+        index: field.index,
+        label: field.label,
+        task: "Upload resume manually",
+        resumeFileName: profile.resumeFileName || ""
+      }));
+
+    if (willAttachResume) {
+      tasks.push({
+        index: -1,
+        label: "Resume/CV",
+        task: "Attach resume automatically",
+        automatic: true,
+        resumeFileName: profile.resumeFileName || ""
+      });
+    }
+
+    return tasks;
   }
 
   function debugFieldForPreview(field) {
@@ -328,6 +351,7 @@
       .filter((mapping) => hasValue(mapping.value));
     let filled = 0;
     const failures = [];
+    const attached = [];
 
     try {
       if (await fillWorkdayTargetCountry(profile, settings || {})) {
@@ -386,6 +410,11 @@
       filled += await fillWorkdayEducationDropdownFallback(profile);
       filled += await fillWorkdayHearAboutUsFallback(profile);
       filled += await fillWorkdayAddressFallback(profile, settings || {});
+
+      const resumeAttach = await attachResumeToResumeInputs();
+      filled += resumeAttach.attached.length;
+      failures.push(...resumeAttach.failures);
+      attached.push(...resumeAttach.attached);
     } finally {
       state.isApplying = false;
     }
@@ -407,6 +436,7 @@
       mapped: mappings.length,
       filled,
       failures,
+      attached,
       verification
     };
   }
@@ -447,6 +477,137 @@
 
   function mappingValueMatchesField(actual, expected) {
     return valueMatches(actual, expected) || optionMatches(actual, "", expected);
+  }
+
+  const RESUME_FILE_CONTEXT_PATTERN = /resume|\bcv\b|curriculum vitae/i;
+  const NON_RESUME_FILE_CONTEXT_PATTERN = /cover\s*letter|transcript|portfolio|\bother\b/i;
+
+  async function attachResumeToResumeInputs() {
+    const inputs = findResumeFileInputs();
+
+    if (!inputs.length) {
+      return { attached: [], failures: [] };
+    }
+
+    // Never replace a file the user already chose.
+    const pending = inputs.filter((input) => !input.files?.length);
+
+    if (!pending.length) {
+      return { attached: [], failures: [] };
+    }
+
+    let payload;
+    try {
+      payload = await fetchResumeFileFromBackend();
+    } catch (error) {
+      return { attached: [], failures: [{ label: "Resume/CV", error: error.message }] };
+    }
+
+    const file = new File(
+      [base64ToUint8Array(payload.bytes)],
+      payload.filename || "resume.pdf",
+      { type: payload.mimeType || "application/pdf" }
+    );
+    const attached = [];
+    const failures = [];
+
+    for (const input of pending) {
+      try {
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+        attached.push({ label: "Resume/CV", filename: file.name });
+      } catch (error) {
+        failures.push({ label: "Resume/CV", error: error.message });
+      }
+    }
+
+    return { attached, failures };
+  }
+
+  function findResumeFileInputs() {
+    // Resume inputs are often visually hidden behind an "Attach" button (Greenhouse),
+    // so unlike scanFields this deliberately does not require visibility.
+    return Array.from(document.querySelectorAll("input[type='file']"))
+      .filter((input) => !input.disabled)
+      .filter(isResumeFileInput);
+  }
+
+  function isResumeFileInput(input) {
+    // The input's own context (attributes + label) wins over surrounding headings, so a
+    // "Cover Letter" input inside a "Resume/CV" section is still skipped.
+    for (const text of fileInputContextTexts(input)) {
+      if (!text) {
+        continue;
+      }
+
+      if (NON_RESUME_FILE_CONTEXT_PATTERN.test(text)) {
+        return false;
+      }
+
+      if (RESUME_FILE_CONTEXT_PATTERN.test(text)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isResumeContextText(text) {
+    const value = String(text || "");
+    return RESUME_FILE_CONTEXT_PATTERN.test(value) && !NON_RESUME_FILE_CONTEXT_PATTERN.test(value);
+  }
+
+  function fileInputContextTexts(input) {
+    const ownText = compactText([
+      input.getAttribute("name") || "",
+      input.id || "",
+      input.getAttribute("aria-label") || "",
+      getLabelText(input)
+    ].join(" "));
+    const container = input.closest("section, fieldset");
+    const containerHeading = container
+      ? compactText(container.querySelector("h1, h2, h3, h4, h5, h6, legend, [role='heading']")?.textContent || "")
+      : "";
+    const headingText = compactText([containerHeading, precedingHeadingText(input)].join(" "));
+
+    return [ownText, headingText];
+  }
+
+  function precedingHeadingText(input) {
+    const headings = Array.from(document.querySelectorAll("h1, h2, h3, h4, h5, h6, legend, [role='heading']"))
+      .filter((heading) => heading.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    const nearest = headings[headings.length - 1];
+    return compactText(nearest?.textContent || "");
+  }
+
+  async function fetchResumeFileFromBackend() {
+    let response;
+    try {
+      response = await chrome.runtime.sendMessage({ type: "FETCH_RESUME_FILE" });
+    } catch (error) {
+      throw new Error(`Could not reach the extension background: ${error.message}`);
+    }
+
+    if (!response?.ok || !response.bytes) {
+      throw new Error(response?.error || "The backend did not return a resume file.");
+    }
+
+    return response;
+  }
+
+  function base64ToUint8Array(base64) {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+
+    return bytes;
   }
 
   function scanFields() {
@@ -2554,7 +2715,8 @@
   }
 
   function mapCompanyQuestion(field, profile, haystack) {
-    if (/(whatsapp|sms|text messages?|messaging).*(recruit|hiring)|recruit.*(whatsapp|sms|text messages?|messaging)/.test(haystack)) {
+    if (/(whatsapp|sms|text messages?|messaging)/.test(haystack)
+      && /(recruit|hiring|talent acquisition|job opportunit|consent|receive|opt.?in|communicat|follow.?up)/.test(haystack)) {
       return buildMapping(field, profile.answers?.recruitingMessages || "No", "rule", 0.9);
     }
 
@@ -3117,11 +3279,25 @@
   }
 
   async function ensureEducationRows(targetCount) {
-    if (targetCount < 1) {
+    // A single-entry profile never needs "Add another" when the form already
+    // renders an education block with fields — row-count miscounts on
+    // Degree-only blocks would otherwise create empty rows on every run.
+    if (targetCount <= 1 && educationSectionHasAnyField()) {
       return;
     }
 
     await ensureRowsForSection(targetCount, countEducationRows, () => findAddButtonForSection(/education|school|university/));
+  }
+
+  function educationSectionHasAnyField() {
+    return scanFieldsWithoutPreparation().some((field) => {
+      const element = field.elementRef?.deref?.();
+      if (!element) {
+        return false;
+      }
+      const sectionHeading = normalize(`${nearestExplicitSectionHeadingText(element)} ${nearestSectionHeadingText(element)}`);
+      return /\beducation\b/.test(sectionHeading);
+    });
   }
 
   async function ensureWebsiteRows(targetCount) {

@@ -122,7 +122,9 @@ def map_field(field: dict[str, Any], profile: dict[str, Any]) -> tuple[Any, str]
     if re.search(r"contractor", text) and re.search(r"work|working|employed", text):
         return profile.get("answers", {}).get("workedAsContractorForCompany", "No"), "rule"
 
-    if re.search(r"whatsapp|sms|text messages?|messaging", text) and re.search(r"recruit|hiring", text):
+    if re.search(r"whatsapp|sms|text messages?|messaging", text) and re.search(
+        r"recruit|hiring|talent acquisition|job opportunit|consent|receive|opt.?in|communicat|follow.?up", text
+    ):
         return profile.get("answers", {}).get("recruitingMessages", "No"), "rule"
 
     if re.search(r"veteran|protected veteran|military service", text):

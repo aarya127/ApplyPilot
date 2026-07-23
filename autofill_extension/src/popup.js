@@ -435,9 +435,15 @@ function renderReview(preview) {
     label.textContent = task.label || "Resume upload";
     const value = document.createElement("span");
     value.className = "review-value";
-    value.textContent = task.resumeFileName
-      ? `Manual task: upload ${task.resumeFileName}`
-      : "Manual task: upload your resume";
+    if (task.automatic) {
+      value.textContent = task.resumeFileName
+        ? `Will attach ${task.resumeFileName} automatically when filling`
+        : "Will attach your resume automatically when filling";
+    } else {
+      value.textContent = task.resumeFileName
+        ? `Manual task: upload ${task.resumeFileName}`
+        : "Manual task: upload your resume";
+    }
     body.append(label, value);
     item.append(body);
     reviewList.append(item);
