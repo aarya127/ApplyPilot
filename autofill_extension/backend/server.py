@@ -230,24 +230,41 @@ def map_fields():
     profile = payload.get("profile", {})
     page = payload.get("page", {})
 
+    # Conditional "if you selected ... in the prior question" fields whose
+    # answer is mechanically derivable from page context bypass the LLM —
+    # models keep answering them from candidate facts instead of form logic.
+    conditional_mappings = [
+        mapping
+        for mapping in (conditional_not_applicable_mapping(field, page) for field in fields)
+        if mapping is not None
+    ]
+    resolved_indexes = {mapping["index"] for mapping in conditional_mappings}
+    remaining_fields = [
+        field for field in fields
+        if not (isinstance(field, dict) and field.get("index") in resolved_indexes)
+    ]
+
     if not api_key():
         return jsonify({
-            "mappings": [],
+            "mappings": conditional_mappings,
             "warning": "NVIDIA_API_KEY is not configured",
             "aiUsage": ai_usage_snapshot(),
         })
 
+    if not remaining_fields:
+        return jsonify({"mappings": conditional_mappings, "aiUsage": ai_usage_snapshot()})
+
     try:
-        mappings = call_nvidia_mapper(fields, profile, page)
+        mappings = call_nvidia_mapper(remaining_fields, profile, page)
     except Exception as exc:
         app.logger.exception("Mapper request failed")
         return jsonify({
-            "mappings": policy_mappings(fields, profile),
+            "mappings": conditional_mappings + policy_mappings(remaining_fields, profile),
             "warning": f"Mapper request failed: {exc}",
             "aiUsage": ai_usage_snapshot(),
         }), 200
 
-    return jsonify({"mappings": mappings, "aiUsage": ai_usage_snapshot()})
+    return jsonify({"mappings": conditional_mappings + mappings, "aiUsage": ai_usage_snapshot()})
 
 
 @app.route("/audit-fields", methods=["POST", "OPTIONS"])
@@ -584,18 +601,28 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
         "defaultPolicies": default_answer_policies(profile),
         "demographics": profile.get("demographics", {}),
         "veteranStatus": profile.get("veteranStatus"),
-        "resumeFacts": profile.get("resumeFacts", {}),
-        "resumeTranscript": resume_transcript(profile),
         "candidateContext": candidate_context(profile),
         "savedAnswers": profile.get("answers", {}),
     }
     serializable_fields = [serialize_field_for_model(field, profile, page) for field in fields]
+
+    # Keep the prompt small for this model: each field already carries targeted
+    # retrievedContext, and candidateContext summarizes the profile. Ship the
+    # full resume transcript only when a narrative answer may need it.
+    has_narrative_field = any(
+        (field.get("tag") == "textarea") or not normalized_options(field)
+        for field in fields
+        if isinstance(field, dict)
+    )
+    if has_narrative_field:
+        minimized_profile["resumeTranscript"] = resume_transcript(profile)
 
     return json.dumps(
         {
             "instructions": (
                 "Return JSON in this shape: "
                 "{\"mappings\":[{\"index\":0,\"value\":\"answer\",\"confidence\":0.0,\"source\":\"llm\"}]}. "
+                "Return one mapping entry for EVERY field index listed in fields — do not stop after the first field; use the field's own index value. "
                 "Return the most accurate truthful answer for each question. "
                 "When context is insufficient, skip the field instead of guessing. "
                 "Use exact option labels when a field has options. "
@@ -609,7 +636,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "Prefer explicit profile facts and resume facts over inference. "
                 "Use savedAnswers only when they clearly match the same current question; ignore generic or low-information saved answers for policy questions. "
                 f"Act as {display_name}; answer eligibility/default-policy questions according to defaultPolicies. "
-                "Use resumeTranscript to decide whether the candidate has worked at a named company; if the named company is absent from the transcript and savedAnswers do not say otherwise, answer No. "
+                "Use resumeTranscript (when present) or candidateContext work history to decide whether the candidate has worked at a named company; if the named company is absent and savedAnswers do not say otherwise, answer No. "
                 "Use candidateContext as the full compact source of truth for profile facts, work history, education, links, preferences, eligibility, and saved answers. "
                 "For relatives, family, spouse, domestic partner, contractors, dealers, affiliates, group/community affiliations, memberships, or company-specific conflict questions, answer No/None of the above by default unless savedAnswers or resumeTranscript explicitly says Yes. "
                 "For email subscriptions, newsletters, marketing emails, promotional emails, and job alerts, answer No unless savedAnswers explicitly says Yes. "
@@ -622,8 +649,14 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "For textarea/free-text custom questions, answer in 2-3 concise sentences using only supplied facts. "
                 "Write custom narrative answers in first person as the candidate using I/my. "
                 f"Never write narrative answers in third person as {display_name} or he/she/they. "
-                "Skip fields that cannot be answered safely."
+                "When a savedAnswer is written in third person, rewrite it fully into first person before returning it; never include the candidate's name inside a narrative answer. "
+                "For multi-option checkbox groups and select-all-that-apply questions, never answer with a bare Yes or No; return the exact option label(s) that are factually true for the candidate based on workEligibility (citizenship, permanent residency) and candidateContext. "
+                "For questions that reference a prior question (e.g. 'If you selected ... in the prior question'), use pageContext to find the prior question and its current answer; when the prior answer was a 'none of the above' style option you MUST choose the 'Not applicable' style option here when one exists, even if other options are also factually true. "
+                "If the question follows special instructions (required opening phrase, bullet limits, word caps), obey them exactly. "
+                "For narrative/textarea questions, always produce an answer when savedAnswers, resume facts, or the profile contain relevant material; only skip a narrative question when no relevant facts exist at all. "
+                "Skip optioned fields that cannot be answered safely."
             ),
+            "pageContext": page.get("context") or [],
             "page": page,
             "profile": minimized_profile,
             "fields": serializable_fields,
@@ -1843,6 +1876,45 @@ def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
     if constrained_value is not None:
         return constrained_value
 
+    # A bare yes/no answer may only coerce onto an option set that encodes a
+    # yes/no dichotomy (e.g. "I am not a protected veteran"). On longer
+    # checklists ("None of these apply to me", citizenship lists) fuzzy
+    # matching invents answers, so skip instead.
+    if desired in {"yes", "no"}:
+        for option in options:
+            label = option.get("label", "")
+            option_value = option.get("value", "")
+            if desired in {normalize_for_option(label), normalize_for_option(option_value)}:
+                return label or option_value
+
+        real_options = [
+            option for option in options
+            if not re.search(r"select one|choose|please select", normalize_for_option(option.get("label", "")))
+        ]
+        if len(real_options) <= 3:
+            leading_hits = [
+                option for option in real_options
+                if re.match(rf"{desired}\b", normalize_for_option(option.get("label") or option.get("value") or ""))
+            ]
+            if len(leading_hits) == 1:
+                hit = leading_hits[0]
+                return hit.get("label") or hit.get("value")
+
+            # Semantic tier: decline/prefer-not options also read as "no", so
+            # exclude them before requiring a unique match.
+            semantic_hits = [
+                option for option in real_options
+                if semantic_yes_no_value(normalize_for_option(option.get("label") or option.get("value") or "")) == desired
+                and not re.search(
+                    r"decline|prefer not|do not want to answer|don t want to answer|rather not",
+                    normalize_for_option(option.get("label") or option.get("value") or ""),
+                )
+            ]
+            if len(semantic_hits) == 1:
+                hit = semantic_hits[0]
+                return hit.get("label") or hit.get("value")
+        return None
+
     for option in options:
         label = option.get("label", "")
         option_value = option.get("value", "")
@@ -2090,6 +2162,53 @@ def normalize_for_option(value: Any) -> str:
     return " ".join(
         "".join(char.lower() if char.isalnum() else " " for char in str(value or "")).split()
     )
+
+
+def conditional_not_applicable_mapping(field: Any, page: dict[str, Any]) -> dict[str, Any] | None:
+    """Deterministically answer 'If you selected ... in the prior question' fields.
+
+    When the field's label gates on the prior question NOT being a
+    'none of the above' answer, the page context shows the prior answer WAS
+    'none of the above', and a 'Not applicable' option exists, that option is
+    the only form-logically correct answer.
+    """
+    if not isinstance(field, dict) or not isinstance(field.get("index"), int):
+        return None
+
+    label = str(field.get("label") or field.get("questionText") or "")
+    if not re.search(r"if you selected .{0,80}(prior|previous|above) question", label, re.IGNORECASE):
+        return None
+    if not re.search(r"other than .{0,10}none of the above", label, re.IGNORECASE):
+        return None
+
+    not_applicable = next(
+        (
+            option.get("label") or option.get("value")
+            for option in field.get("options") or []
+            if isinstance(option, dict)
+            and re.search(r"not applicable", str(option.get("label") or option.get("value") or ""), re.IGNORECASE)
+        ),
+        None,
+    )
+    if not not_applicable:
+        return None
+
+    context = page.get("context") if isinstance(page, dict) else None
+    prior_was_none = any(
+        isinstance(entry, dict)
+        and re.search(r"none of the above", str(entry.get("currentValue") or ""), re.IGNORECASE)
+        and re.search(r"select all that apply|applies to you|confirm whether", str(entry.get("label") or ""), re.IGNORECASE)
+        for entry in (context or [])
+    )
+    if not prior_was_none:
+        return None
+
+    return {
+        "index": field["index"],
+        "value": not_applicable,
+        "confidence": 0.99,
+        "source": "policy",
+    }
 
 
 def message_json_content(response: Any) -> str:

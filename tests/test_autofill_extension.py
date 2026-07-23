@@ -3952,3 +3952,385 @@ def test_content_script_scan_skips_open_dropdown_option_lists():
             assert "results found" not in field["label"].lower()
 
         browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_does_not_add_education_rows_on_repeat_runs_for_degree_only_blocks():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "education": [
+            {"school": "University of Waterloo", "degree": "Bachelor's Degree"},
+        ],
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    # Databricks-style Greenhouse education block: the row contains ONLY a Degree dropdown
+    # (no School/University field). Counting education rows by school fields alone returned
+    # 0 here, so every preview/fill run clicked "Add another" again and piled up empty rows.
+    html = """
+      <form>
+        <h2>Education</h2>
+        <div id="education">
+          <div class="education-row">
+            <div data-automation-id="formField-degree">
+              <div data-automation-id="formLabel">Degree*</div>
+              <button class="degree" type="button" aria-haspopup="listbox">Select...</button>
+              <div class="listbox degree-options" role="listbox" hidden></div>
+            </div>
+          </div>
+          <button id="addEducation" type="button">Add another</button>
+        </div>
+      </form>
+      <script>
+        const DEGREES = ["Bachelor's Degree", "Master's Degree"];
+        function fillListbox(container, values) {
+          container.innerHTML = '';
+          values.forEach((value) => {
+            const option = document.createElement('div');
+            option.setAttribute('role', 'option');
+            option.textContent = value;
+            container.appendChild(option);
+          });
+        }
+        function wire(root) {
+          fillListbox(root.querySelector('.degree-options'), DEGREES);
+          root.querySelectorAll('button[aria-haspopup="listbox"]').forEach((button) => {
+            const list = button.parentElement.querySelector('.listbox');
+            button.addEventListener('click', () => { list.hidden = !list.hidden; });
+            button.addEventListener('keydown', (event) => { if (event.key === 'Escape') list.hidden = true; });
+            list.querySelectorAll('[role="option"]').forEach((option) => {
+              option.addEventListener('click', () => {
+                button.textContent = option.textContent;
+                button.setAttribute('data-selected', option.textContent);
+                list.hidden = true;
+              });
+            });
+          });
+        }
+        wire(document.querySelector('.education-row'));
+        document.getElementById('addEducation').addEventListener('click', () => {
+          const row = document.querySelector('.education-row').cloneNode(true);
+          row.querySelectorAll('button').forEach((button) => {
+            button.textContent = 'Select...';
+            button.removeAttribute('data-selected');
+          });
+          row.querySelectorAll('.listbox').forEach((list) => { list.hidden = true; });
+          document.getElementById('education').insertBefore(row, document.getElementById('addEducation'));
+          wire(row);
+        });
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(html)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        # Two full preview + fill cycles: the single profile entry already has a row on the
+        # page, so no run may click "Add another".
+        for _ in range(2):
+            preview = page.evaluate(
+                """() => new Promise((resolve) => {
+                  window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+                })"""
+            )
+            assert preview["ok"] is True
+            assert page.locator(".education-row").count() == 1
+
+            fill_response = page.evaluate(
+                """(mappings) => new Promise((resolve) => {
+                  window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+                })""",
+                preview["result"]["mappings"],
+            )
+            assert fill_response["ok"] is True, fill_response
+            assert page.locator(".education-row").count() == 1
+
+        # The lone row still received the degree from the single education entry.
+        assert page.locator(".education-row").nth(0).locator("button.degree").inner_text() == "Bachelor's Degree"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_greenhouse_work_authorization_react_select_with_profile_yes():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "workAuthorization": "Yes",
+        "needsSponsorship": "No",
+        "answers": {"workAuthorization": "Yes", "sponsorship": "No"},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "autoMapAmbiguousFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    # Greenhouse renders required Yes/No custom questions as non-searchable react-selects:
+    # the combobox input is readOnly, the current value lives in a sibling single-value
+    # node, typing is ignored, and the option menu opens only on a real mousedown on the
+    # control. This exact widget previously fell through every path (never scanned, never
+    # mapped, never asked) and ended the run stuck on "Select...".
+    html = """
+      <form>
+        <div class="select__container">
+          <label for="question_wa">Are you legally authorized to work in the country in which you are applying?*</label>
+          <div class="select">
+            <div class="select__control" id="wa-control">
+              <div class="select__value-container">
+                <div class="select__placeholder" id="wa-value">Select...</div>
+                <div class="select__input-container">
+                  <input id="question_wa" class="select__input" role="combobox" aria-expanded="false"
+                         aria-haspopup="true" aria-autocomplete="list" autocomplete="off" type="text"
+                         value="" readonly inputmode="none">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </form>
+      <script>
+        const OPTIONS = ['Select...', 'Yes', 'No'];
+        const control = document.getElementById('wa-control');
+        const input = document.getElementById('question_wa');
+        let menu = null;
+        function openMenu() {
+          if (menu) return;
+          menu = document.createElement('div');
+          menu.className = 'select__menu';
+          const list = document.createElement('div');
+          list.setAttribute('role', 'listbox');
+          OPTIONS.forEach((label) => {
+            const option = document.createElement('div');
+            option.setAttribute('role', 'option');
+            option.className = 'select__option';
+            option.textContent = label;
+            option.addEventListener('click', () => {
+              document.getElementById('wa-value').textContent = label;
+              document.getElementById('wa-value').className = 'select__single-value';
+              input.setAttribute('data-selected', label);
+              closeMenu();
+            });
+            list.appendChild(option);
+          });
+          menu.appendChild(list);
+          control.parentElement.appendChild(menu);
+          input.setAttribute('aria-expanded', 'true');
+        }
+        function closeMenu() {
+          if (!menu) return;
+          menu.remove();
+          menu = null;
+          input.setAttribute('aria-expanded', 'false');
+        }
+        control.addEventListener('mousedown', () => { menu ? closeMenu() : openMenu(); });
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') closeMenu();
+        });
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.route("https://job-boards.greenhouse.io/**", lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto("https://job-boards.greenhouse.io/databricks/jobs/1")
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings = preview["result"]["mappings"]
+        work_auth = next(
+            (m for m in mappings if "legally authorized" in m["label"].lower()),
+            None,
+        )
+        assert work_auth is not None, mappings
+        assert work_auth["value"] == "Yes"
+
+        # The preview also carries the compact page context used for conditional questions.
+        context = preview["result"]["page"]["context"]
+        assert any("legally authorized" in entry["label"].lower() for entry in context)
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            mappings,
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert fill_response["result"]["filled"] >= 1
+        assert fill_response["result"]["failures"] == []
+        assert page.locator("#wa-value").inner_text() == "Yes"
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_reports_unfilled_mapped_fields_as_failures():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {"answers": {}, "demographics": {}}
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    html = """
+      <form>
+        <label for="fullName">Full name</label>
+        <input id="fullName" name="fullName" type="text">
+        <label for="color">Favorite color</label>
+        <select id="color" name="color">
+          <option value="">Select...</option>
+          <option value="red">Red</option>
+          <option value="green">Green</option>
+        </select>
+        <label for="agree">I agree to the terms</label>
+        <input id="agree" name="agree" type="checkbox" checked>
+      </form>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(html)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        scan = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'SCAN_FIELDS' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert scan["ok"] is True
+        by_name = {field["name"]: field for field in scan["fields"]}
+
+        def mapping_for(name, value):
+            field = by_name[name]
+            return {
+                "index": field["index"],
+                "label": field.get("label", ""),
+                "name": field.get("name", ""),
+                "id": field.get("id", ""),
+                "tag": field.get("tag", ""),
+                "type": field.get("type", ""),
+                "value": value,
+                "source": "rule",
+                "confidence": 0.9,
+            }
+
+        mappings = [
+            # Fills normally.
+            mapping_for("fullName", "Jane Doe"),
+            # A yes/no answer aimed at a select with no matching option: fillSelect returns
+            # false and this previously vanished without a trace.
+            mapping_for("color", "Yes"),
+            # Checkbox already in the desired state: not a failure, but also not newly filled.
+            mapping_for("agree", "Yes"),
+        ]
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            mappings,
+        )
+        assert fill_response["ok"] is True, fill_response
+        result = fill_response["result"]
+
+        assert result["filled"] == 1
+        assert page.locator("#fullName").input_value() == "Jane Doe"
+        assert page.locator("#agree").is_checked()
+
+        failures = result["failures"]
+        assert len(failures) == 1, failures
+        assert "favorite color" in failures[0]["label"].lower()
+        assert failures[0]["error"] == "no matching option"
+
+        browser.close()

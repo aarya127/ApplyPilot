@@ -196,7 +196,8 @@
         })),
       page: {
         url: location.href,
-        title: document.title
+        title: document.title,
+        context: buildPageFieldContext(plan.fields)
       }
     };
   }
@@ -263,7 +264,7 @@
       ...mapRepeatableWebsiteFields(fields, profile)
     ];
     const backendMappings = settings?.autoMapAmbiguousFields === true
-      ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field)), profile)
+      ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field)), profile, fields)
       : [];
     const mappings = mergeMappings([...canonicalMappings, ...profileContactMappings, ...structuralPolicyMappings, ...localMappings, ...repeatableMappings], backendMappings, fields)
       .concat(buildRawStructuralPolicyMappings(fields, profile))
@@ -365,6 +366,16 @@
             confirmFilledElement(element);
             markFilled(element, mapping);
             filled += 1;
+          } else if (field.type !== "file" && !isFillSatisfied(element, mapping, field)) {
+            // A silent false return with a value to fill means the control rejected it
+            // (e.g. no dropdown option matched); surface it instead of dropping it.
+            failures.push({
+              index: mapping.index,
+              label: displayLabelForField(field),
+              error: field.tag === "select" || field.options?.length || isOptionLikeField(field)
+                ? "no matching option"
+                : "fill failed"
+            });
           }
         } catch (error) {
           failures.push({ index: mapping.index, label: field.label, error: error.message });
@@ -1184,6 +1195,12 @@
         options = await waitForDropdownOptions(trigger);
       }
 
+      if (!options.length) {
+        openDropdownWithPointer(trigger);
+        await sleep(250);
+        options = await waitForDropdownOptions(trigger);
+      }
+
       closeDynamicDropdown(trigger);
 
       if (active && active !== trigger && typeof active.focus === "function") {
@@ -1195,6 +1212,13 @@
       closeDynamicDropdown(trigger);
       return [];
     }
+  }
+
+  // React-select style widgets open on mousedown on the control, not on a synthetic
+  // click(), so a full pointer sequence (which bubbles up to the control) is needed to
+  // reveal their options when a plain click and ArrowDown did nothing.
+  function openDropdownWithPointer(trigger) {
+    clickOption(trigger);
   }
 
   function dropdownTrigger(element) {
@@ -3134,7 +3158,26 @@
   }
 
   function countEducationRows() {
-    return countFieldsMatchingInSection(/school|university/, isEducationField);
+    // Some Greenhouse boards (e.g. Databricks) render education rows with only a Degree
+    // dropdown and no School field, which made a school-only count return 0 on every run
+    // and re-click "Add another" each time. Count row instances as the max across every
+    // per-row field kind so an existing row is always detected and adding stays idempotent.
+    return Math.max(
+      countFieldsMatchingInSection(/school|university/, isEducationField),
+      countEducationRowFields(/\bdegree\b/),
+      countEducationRowFields(/\bdiscipline\b|field of study|\bmajor\b/)
+    );
+  }
+
+  function countEducationRowFields(pattern) {
+    return scanFieldsWithoutPreparation()
+      .filter((field) => {
+        // Match on the field's own label only: sibling fields in the same row often carry
+        // "Degree" in their surrounding text, which would double-count a single row.
+        const primary = normalize([field.label, field.name, field.id, field.placeholder].join(" "));
+        return pattern.test(primary) && isEducationField(field, primary);
+      })
+      .length;
   }
 
   function countWebsiteRows() {
@@ -4471,7 +4514,52 @@
     return value;
   }
 
-  async function getBackendMappings(fields, profile) {
+  // Compact snapshot of every scanned form field, in DOM order, so the model can resolve
+  // conditional questions ("If you selected ... in the prior question") against the prior
+  // questions and their current answers. Kept small: capped text and at most 60 entries.
+  function buildPageFieldContext(fields) {
+    const entries = fields.map((field) => ({
+      field,
+      element: field.elementRef?.deref?.() || field.choiceRefs?.[0]?.deref?.() || null
+    }));
+
+    entries.sort((a, b) => {
+      if (!a.element || !b.element || a.element === b.element) {
+        return 0;
+      }
+
+      const position = a.element.compareDocumentPosition(b.element);
+      if (position & Node.DOCUMENT_POSITION_FOLLOWING) {
+        return -1;
+      }
+      return position & Node.DOCUMENT_POSITION_PRECEDING ? 1 : 0;
+    });
+
+    return entries.slice(0, 60).map(({ field }) => {
+      const currentValue = compactText(String(pageContextValueForField(field) ?? "")).slice(0, 120);
+      return {
+        label: compactText(displayLabelForField(field)).slice(0, 120),
+        currentValue,
+        answered: Boolean(currentValue) && !isPlaceholderValue(currentValue)
+      };
+    });
+  }
+
+  function pageContextValueForField(field) {
+    if (field.choiceRefs?.length) {
+      return (field.choiceRefs || [])
+        .map((ref) => ref.deref?.())
+        .filter((choice) => choice && (choice.checked || choice.getAttribute?.("aria-checked") === "true"))
+        .map((choice) => choiceLabel(choice) || choiceValue(choice))
+        .filter(Boolean)
+        .join("; ");
+    }
+
+    const element = field.elementRef?.deref?.();
+    return element && isFillable(element) ? getCurrentValue(element) : field.value;
+  }
+
+  async function getBackendMappings(fields, profile, allFields = fields) {
     const serializableFields = fields.map(({ elementRef, ...field }) => field);
 
     try {
@@ -4482,7 +4570,8 @@
           profile,
           page: {
             url: location.href,
-            title: document.title
+            title: document.title,
+            context: buildPageFieldContext(allFields)
           }
         }
       });
@@ -4785,6 +4874,69 @@
     return Boolean(currentOption && desiredOption && normalize(currentOption) === normalize(desiredOption));
   }
 
+  // After fillElement returns false, decide whether the element already holds the desired
+  // state (fine) or the fill genuinely failed (must be reported as a failure).
+  function isFillSatisfied(element, mapping, field) {
+    const tag = element.tagName.toLowerCase();
+    const type = (element.getAttribute("type") || "").toLowerCase();
+    const role = (element.getAttribute("role") || "").toLowerCase();
+
+    if (type === "checkbox" || role === "checkbox" || (field.type === "checkbox" && field.choiceRefs?.length)) {
+      return isCheckboxInDesiredState(element, mapping, field);
+    }
+
+    if (type === "radio" || role === "radio" || (field.type === "radio" && field.choiceRefs?.length)) {
+      return isRadioGroupInDesiredState(element, mapping, field);
+    }
+
+    if (tag === "select") {
+      const option = Array.from(element.options)
+        .find((item) => optionMatches(item.textContent || "", item.value, mapping.value));
+      return Boolean(option) && element.value === option.value;
+    }
+
+    return isAlreadyCorrectlyFilledElement(element, mapping, field)
+      || mappingValueMatchesField(getCurrentValue(element), mapping.value);
+  }
+
+  function isCheckboxInDesiredState(element, mapping, field) {
+    const choices = (field.choiceRefs || []).map((ref) => ref.deref?.()).filter(Boolean);
+    if (choices.length) {
+      const values = Array.isArray(mapping.value)
+        ? mapping.value
+        : String(mapping.value).split(/\s*[;,]\s*/).filter(Boolean);
+      return choices.some((choice) => (
+        values.some((item) => optionMatches(choiceLabel(choice), choiceValue(choice), item))
+        && (choice.checked || choice.getAttribute?.("aria-checked") === "true")
+      ));
+    }
+
+    const shouldCheck = /^(true|yes|y|1|agree|checked)$/i.test(String(mapping.value).trim());
+    const isChecked = element.getAttribute("role") === "checkbox"
+      ? element.getAttribute("aria-checked") === "true"
+      : Boolean(element.checked);
+    return isChecked === shouldCheck;
+  }
+
+  function isRadioGroupInDesiredState(element, mapping, field) {
+    const choices = (field.choiceRefs || []).map((ref) => ref.deref?.()).filter(Boolean);
+    if (choices.length) {
+      return choices.some((choice) => (
+        optionMatches(choiceLabel(choice), choiceValue(choice), mapping.value)
+        && (choice.checked || choice.getAttribute?.("aria-checked") === "true")
+      ));
+    }
+
+    const name = element.getAttribute("name");
+    const candidates = name
+      ? Array.from(document.querySelectorAll(`input[type="radio"][name="${cssEscape(name)}"]`))
+      : [element];
+    return candidates.some((radio) => (
+      optionMatches(getLabelText(radio), radio.value || radio.getAttribute("aria-label") || "", mapping.value)
+      && (radio.checked || radio.getAttribute("aria-checked") === "true")
+    ));
+  }
+
   function isAiMapping(mapping) {
     return /llm|ai|policy/.test(normalize(mapping.source || ""));
   }
@@ -4936,6 +5088,11 @@
     trigger.focus();
     trigger.click();
     await sleep(250);
+
+    if (!visibleOptionElements(trigger).length) {
+      openDropdownWithPointer(trigger);
+      await sleep(250);
+    }
 
     const initialOptions = visibleOptionElements(trigger);
     const optionValue = optionConstrainedValue(optionsFromElements(initialOptions), desiredValue) || desiredValue;
@@ -5873,16 +6030,19 @@
       if (current !== shouldCheck) {
         element.click();
       }
-      return true;
+      // Only report a fill when the state actually changed; a checkbox that was already in
+      // the desired state must not count as newly filled.
+      return current !== shouldCheck;
     }
 
-    if (element.checked !== shouldCheck) {
+    const changed = element.checked !== shouldCheck;
+    if (changed) {
       element.click();
     }
 
     element.checked = shouldCheck;
     dispatchFormEvents(element);
-    return true;
+    return changed;
   }
 
   function setEditableText(element, value) {
@@ -5988,9 +6148,13 @@
     const style = window.getComputedStyle(element);
     const type = (element.getAttribute("type") || "").toLowerCase();
     const isDropdownButton = type === "button" && Boolean(dropdownTrigger(element));
+    // Non-searchable react-selects (Greenhouse renders required Yes/No questions this way)
+    // mark their combobox input readOnly. They are still fillable through option clicks,
+    // so only plain read-only text inputs are excluded from the scan.
+    const isReadOnlyDropdown = Boolean(element.readOnly) && isListboxTrigger(element);
 
     return !element.disabled
-      && !element.readOnly
+      && (!element.readOnly || isReadOnlyDropdown)
       && type !== "hidden"
       && type !== "submit"
       && (type !== "button" || isDropdownButton)
@@ -6031,7 +6195,26 @@
       return element.checked ? element.value : "";
     }
 
-    return element.value || element.textContent || "";
+    const direct = element.value || element.textContent || "";
+    if (!compactText(direct) && (element.getAttribute("role") || "").toLowerCase() === "combobox") {
+      // React-select keeps the chosen option in a sibling single-value node, never in the
+      // combobox input itself, so read it from the surrounding control.
+      const containers = [
+        element.closest("[class*='value-container' i]"),
+        element.closest("[class*='control' i]"),
+        element.closest("[class*='select' i]")
+      ].filter(Boolean);
+
+      for (const container of containers) {
+        const selected = container.querySelector("[class*='single-value' i], [class*='singlevalue' i]");
+        const text = compactText(selected?.textContent || "");
+        if (text) {
+          return text;
+        }
+      }
+    }
+
+    return direct;
   }
 
   function hasValue(value) {

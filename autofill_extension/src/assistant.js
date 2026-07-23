@@ -181,8 +181,22 @@ async function fillSelectedMappings() {
   lastFillResult = response.result;
   trackButton.disabled = false;
   addMessage("agent", `Filled ${response.result.filled} selected field(s). Please review the page before submitting.`);
+  reportFillFailures(response.result);
   renderVerification(response.result.verification);
   assistantStatus.textContent = "Filled";
+}
+
+function reportFillFailures(result) {
+  const failures = result?.failures || [];
+
+  if (!failures.length) {
+    return;
+  }
+
+  addMessage("agent", `I could not fill ${failures.length} mapped field(s). You can answer them below or click Ask AI to retry them.`);
+  for (const failure of failures.slice(0, 8)) {
+    addMessage("agent", `${failure.label || `Field ${Number(failure.index) + 1}`}: ${failure.error || "fill failed"}`);
+  }
 }
 
 async function saveNewAnswersFromReview() {
@@ -236,7 +250,7 @@ async function askAiForMissingAnswersImpl() {
   const auditMappings = await auditCurrentAutofillAnswers(lastPreview, profile, pageContext);
   const missingFields = (lastPreview?.unmappedFields || []).filter(isAiAskableField);
   const skippedOptionFields = (lastPreview?.unmappedFields || []).filter((field) => (
-    isOptionLikeField(field) && !(field.options || []).length
+    isOptionLikeField(field) && !(field.options || []).length && !field.required
   ));
 
   if (!missingFields.length && !auditMappings.length) {
@@ -307,6 +321,7 @@ async function askAiForMissingAnswersImpl() {
     lastFillResult = fillResponse.result;
     trackButton.disabled = false;
     addMessage("agent", `Audited, added, and filled ${fillResponse.result.filled} answer(s). Please review them before continuing.`);
+    reportFillFailures(fillResponse.result);
     await refreshPreviewAfterAiFill();
     renderVerification(fillResponse.result.verification);
     reportRemainingRequiredFields(lastPreview);
@@ -565,7 +580,10 @@ function isAiAskableField(field) {
     return false;
   }
 
-  if (isOptionLikeField(field) && !(field.options || []).length) {
+  // Dropdown-like fields whose options could not be read are normally skipped, but a
+  // required one must still reach AI: the content script only applies safe yes/no style
+  // policy answers to unoptioned dropdowns, and it fills them through option clicks.
+  if (isOptionLikeField(field) && !(field.options || []).length && !field.required) {
     return false;
   }
 
@@ -886,6 +904,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
   const unmappedFields = [];
   const manualTasks = [];
   const debugFields = [];
+  const pageFieldContext = [];
 
   for (const { frame, response } of successful) {
     const result = response.result || {};
@@ -924,6 +943,8 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
         frameUrl: frame.url || ""
       });
     }
+
+    pageFieldContext.push(...(result.page?.context || []));
   }
 
   return {
@@ -939,7 +960,8 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
       manualTasks,
       page: {
         url: tab.url || "",
-        title: tab.title || ""
+        title: tab.title || "",
+        context: pageFieldContext.slice(0, 60)
       }
     }
   };
