@@ -169,7 +169,12 @@ def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
                         {"label": "I am authorized to work in the United States for any employer"},
                         {"label": "I require sponsorship"},
                     ],
-                }
+                },
+                {
+                    "index": 1,
+                    "label": "How Did You Hear About Us?",
+                    "options": [{"label": "LinkedIn"}, {"label": "Other"}],
+                },
             ],
             "profile": {"workAuthorization": "Yes"},
             "page": {},
@@ -177,13 +182,21 @@ def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
     )
 
     assert response.status_code == 200
+    # Eligibility is answered authoritatively before the mapper runs; the
+    # non-authoritative field falls back to policy when the mapper fails.
     assert response.json["mappings"] == [
         {
             "index": 0,
             "value": "I am authorized to work in the United States for any employer",
+            "confidence": 0.95,
+            "source": "policy",
+        },
+        {
+            "index": 1,
+            "value": "LinkedIn",
             "confidence": 0.78,
             "source": "policy",
-        }
+        },
     ]
     assert "Mapper request failed" in response.json["warning"]
 
@@ -1154,10 +1167,10 @@ def test_content_script_previews_and_fills_sample_form():
                 <label>Legal Middle Name<input name="middleName"></label>
                 <label>Second Last Name<input name="secondLastName"></label>
                 <label>Address Line 2<input name="address_line_2"></label>
-                <label>Country/Region<input name="country_region"></label>
+                <label>Country/Region *<input name="country_region" required></label>
                 <label>Company Name<input name="companyName"></label>
                 <label>If Yes Which Country Were You Last Assigned to?<input name="conditionalCountry"></label>
-                <label>I agree to the Alternate Dispute Resolution statement above<input type="checkbox" name="adrAgree"></label>
+                <label>I agree to the Alternate Dispute Resolution statement above *<input type="checkbox" name="adrAgree" required></label>
                 <label>Consent to cookies from provider LinkedIn<input name="linkedinCookieConsent"></label>
                 <section>
                   <h2>Voluntary Self-Identification of Disability</h2>
@@ -1409,7 +1422,7 @@ def test_content_script_saved_answers_can_fill_remembered_company_history_questi
             """
             <form>
               <label>Have you ever been employed by ExampleCo?
-                <select name="exampleCo"><option>Select One</option><option>Yes</option><option>No</option></select>
+                <select name="exampleCo" required><option>Select One</option><option>Yes</option><option>No</option></select>
               </label>
             </form>
             """
@@ -2176,17 +2189,17 @@ def test_content_script_surfaces_unknown_questions_uploads_and_saved_answers():
         page.set_content(
             """
             <form>
-              <label>Do you have experience with Kubernetes?<input name="k8s"></label>
-              <label>Who is your current or previous employer?<input name="employer"></label>
-              <label>What is your current or previous job title?<input name="jobTitle"></label>
-              <label>Have you ever been employed by ExampleCo or an ExampleCo affiliate?<select name="companyAffiliate"><option></option><option>Yes</option><option>No</option></select></label>
-              <label>Do you opt-in to receive WhatsApp messages from ExampleCo Recruiting?<select name="whatsapp"><option></option><option>Yes</option><option>No</option></select></label>
-              <label>Gender<select name="gender"><option></option><option>Female</option><option>Male</option><option>I do not wish to answer</option></select></label>
-              <label>Are you Hispanic/Latino?<select name="hispanic"><option></option><option>Yes, I am Hispanic or Latino</option><option>No, I am not Hispanic or Latino</option><option>I do not wish to answer</option></select></label>
-              <label>Race<select name="race"><option></option><option>Black or African American</option><option>Asian (Not Hispanic or Latino)</option><option>I do not wish to answer</option></select></label>
-              <label>Are you a protected veteran?<select name="veteran"><option></option><option>I identify as one or more of the classifications of a protected veteran</option><option>I am not a protected Veteran</option><option>I do not wish to answer</option></select></label>
+              <label>Do you have experience with Kubernetes?<input name="k8s" required></label>
+              <label>Who is your current or previous employer?<input name="employer" required></label>
+              <label>What is your current or previous job title?<input name="jobTitle" required></label>
+              <label>Have you ever been employed by ExampleCo or an ExampleCo affiliate?<select name="companyAffiliate" required><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Do you opt-in to receive WhatsApp messages from ExampleCo Recruiting?<select name="whatsapp" required><option></option><option>Yes</option><option>No</option></select></label>
+              <label>Gender<select name="gender" required><option></option><option>Female</option><option>Male</option><option>I do not wish to answer</option></select></label>
+              <label>Are you Hispanic/Latino?<select name="hispanic" required><option></option><option>Yes, I am Hispanic or Latino</option><option>No, I am not Hispanic or Latino</option><option>I do not wish to answer</option></select></label>
+              <label>Race<select name="race" required><option></option><option>Black or African American</option><option>Asian (Not Hispanic or Latino)</option><option>I do not wish to answer</option></select></label>
+              <label>Are you a protected veteran?<select name="veteran" required><option></option><option>I identify as one or more of the classifications of a protected veteran</option><option>I am not a protected Veteran</option><option>I do not wish to answer</option></select></label>
               <label>Upload Resume<input type="file" name="resume"></label>
-              <label>What is your favorite database?<input name="database"></label>
+              <label>What is your favorite database?<input name="database" required></label>
             </form>
             """
         )
@@ -2317,51 +2330,51 @@ def test_content_script_groups_ashby_style_choice_questions():
             """
             <form>
               <label>Name<input name="name" placeholder="Please enter your first and last name"></label>
-              <label>What AI projects have you built in your spare time outside of work?<textarea name="aiProjects"></textarea></label>
+              <label>What AI projects have you built in your spare time outside of work?<textarea name="aiProjects" required></textarea></label>
               <fieldset>
                 <legend>Are you located within ~50 miles of Seattle, WA; Boston, MA; Washington DC; or Austin, TX?</legend>
-                <label><input type="radio" name="nearOffice" value="Yes">Yes</label>
+                <label><input type="radio" name="nearOffice" value="Yes" required>Yes</label>
                 <label><input type="radio" name="nearOffice" value="No">No</label>
               </fieldset>
               <label>Location <input name="location" placeholder="REQUIRED: Enter your city, region/state, and country"></label>
               <label>Zip Code / Postal Code<input name="zip"></label>
               <fieldset>
                 <legend>Pronouns</legend>
-                <label><input type="radio" name="pronouns" value="He/Him">He/Him</label>
+                <label><input type="radio" name="pronouns" value="He/Him" required>He/Him</label>
                 <label><input type="radio" name="pronouns" value="She/Her">She/Her</label>
                 <label><input type="radio" name="pronouns" value="They/Them">They/Them</label>
               </fieldset>
               <fieldset>
                 <legend>Can you provide proof of authorization to work in the country for which job you are applying for?</legend>
-                <label><input type="radio" name="authorized" value="Yes">Yes</label>
+                <label><input type="radio" name="authorized" value="Yes" required>Yes</label>
                 <label><input type="radio" name="authorized" value="No">No</label>
               </fieldset>
               <fieldset>
                 <legend>Will you now or in the future require employer sponsorship to work in the country for which job you are applying for?</legend>
-                <label><input type="radio" name="sponsor" value="Yes">Yes</label>
+                <label><input type="radio" name="sponsor" value="Yes" required>Yes</label>
                 <label><input type="radio" name="sponsor" value="No">No</label>
               </fieldset>
               <fieldset>
                 <legend>What is your current age?</legend>
-                <label><input type="radio" name="age" value="Under 30">Under 30</label>
+                <label><input type="radio" name="age" value="Under 30" required>Under 30</label>
                 <label><input type="radio" name="age" value="I prefer not to answer">I prefer not to answer</label>
               </fieldset>
               <fieldset>
                 <legend>What is your gender identity?</legend>
-                <label><input type="radio" name="genderIdentity" value="Man">Man</label>
+                <label><input type="radio" name="genderIdentity" value="Man" required>Man</label>
                 <label><input type="radio" name="genderIdentity" value="Woman">Woman</label>
                 <label><input type="radio" name="genderIdentity" value="Another Gender Identity">Another Gender Identity</label>
               </fieldset>
               <fieldset>
                 <legend>Race</legend>
-                <label><input type="radio" name="race" value="Hispanic or Latino">Hispanic or Latino</label>
+                <label><input type="radio" name="race" value="Hispanic or Latino" required>Hispanic or Latino</label>
                 <label><input type="radio" name="race" value="White (Not Hispanic or Latino)">White (Not Hispanic or Latino)</label>
                 <label><input type="radio" name="race" value="Asian (Not Hispanic or Latino)">Asian (Not Hispanic or Latino)</label>
                 <label><input type="radio" name="race" value="Decline to self-identify">Decline to self-identify</label>
               </fieldset>
               <fieldset>
                 <legend>Veteran Status</legend>
-                <label><input type="radio" name="veteran" value="I identify as one or more of the classifications of protected veteran listed above">I identify as one or more of the classifications of protected veteran listed above</label>
+                <label><input type="radio" name="veteran" value="I identify as one or more of the classifications of protected veteran listed above" required>I identify as one or more of the classifications of protected veteran listed above</label>
                 <label><input type="radio" name="veteran" value="I am not a protected veteran">I am not a protected veteran</label>
                 <label><input type="radio" name="veteran" value="I decline to self-identify for protected veteran status">I decline to self-identify for protected veteran status</label>
               </fieldset>
@@ -2467,11 +2480,11 @@ def test_content_script_keeps_ashby_profile_links_and_location_separate():
             """
             <form>
               <div class="ashby-section">
-                <div class="field-row"><div>LinkedIn Profile</div><input name="linkedin" placeholder="Type here..."></div>
-                <div class="field-row"><div>Current Location</div><input name="currentLocation" placeholder="Start typing..."></div>
-                <div class="field-row"><div>Github Link</div><input name="github" placeholder="Type here..."></div>
-                <div class="field-row"><div>School</div><input name="school"></div>
-                <div class="field-row"><div>Graduation Date</div><input name="graduationDate"></div>
+                <div class="field-row"><div>LinkedIn Profile</div><input name="linkedin" placeholder="Type here..." aria-required="true"></div>
+                <div class="field-row"><div>Current Location</div><input name="currentLocation" placeholder="Start typing..." aria-required="true"></div>
+                <div class="field-row"><div>Github Link</div><input name="github" placeholder="Type here..." aria-required="true"></div>
+                <div class="field-row"><div>School</div><input name="school" aria-required="true"></div>
+                <div class="field-row"><div>Graduation Date</div><input name="graduationDate" aria-required="true"></div>
               </div>
             </form>
             """
@@ -2588,20 +2601,20 @@ def test_content_script_expands_and_fills_greenhouse_employment_history():
         page.set_content(
             """
             <form>
-              <label>Zip / postal code<input name="zip"></label>
-              <label>May we contact your current employer?<select name="contactEmployer"><option></option><option>Yes</option><option>No</option></select></label>
-              <label>This position is based in the United States. Do you currently reside in commutable proximity to an ExampleCo office located in San Francisco or are you open to relocating?<input name="commutable"></label>
-              <label>What is your current or previous job title?<input name="jobTitle"></label>
+              <label>Zip / postal code<input name="zip" required></label>
+              <label>May we contact your current employer?<select name="contactEmployer" required><option></option><option>Yes</option><option>No</option></select></label>
+              <label>This position is based in the United States. Do you currently reside in commutable proximity to an ExampleCo office located in San Francisco or are you open to relocating?<input name="commutable" required></label>
+              <label>What is your current or previous job title?<input name="jobTitle" required></label>
               <section id="employment">
                 <h2>Employment</h2>
                 <div class="employment-row">
-                  <label>Company<input name="company[]"></label>
-                  <label>Job Title<input name="title[]"></label>
-                  <label>Location<input name="location[]"></label>
-                  <label>From<input name="from[]"></label>
-                  <label>To<input name="to[]"></label>
-                  <label>Role Description<textarea name="description[]"></textarea></label>
-                  <label>I currently work here<input type="checkbox" name="current[]"></label>
+                  <label>Company<input name="company[]" required></label>
+                  <label>Job Title<input name="title[]" required></label>
+                  <label>Location<input name="location[]" required></label>
+                  <label>From<input name="from[]" required></label>
+                  <label>To<input name="to[]" required></label>
+                  <label>Role Description<textarea name="description[]" required></textarea></label>
+                  <label>I currently work here<input type="checkbox" name="current[]" required></label>
                 </div>
                 <button id="addEmployment" type="button">Add another</button>
               </section>
@@ -2893,7 +2906,7 @@ def test_content_script_maps_workday_experience_locations_from_resume_not_home_a
                 <h3>Work Experience 1</h3>
                 <label>Job Title*<input name="title1"></label>
                 <label>Company*<input name="company1"></label>
-                <label>Location<input name="location1"></label>
+                <label>Location*<input name="location1"></label>
                 <label>Location Month<input name="startMonth1"></label>
                 <label>Location Year<input name="startYear1"></label>
                 <label>Role Description<textarea name="description1"></textarea></label>
@@ -2902,7 +2915,7 @@ def test_content_script_maps_workday_experience_locations_from_resume_not_home_a
                 <h3>Work Experience 2</h3>
                 <label>Job Title*<input name="title2"></label>
                 <label>Company*<input name="company2"></label>
-                <label>Location<input name="location2"></label>
+                <label>Location*<input name="location2"></label>
                 <label>Location Month<input name="startMonth2"></label>
                 <label>Location Year<input name="startYear2"></label>
                 <label>Role Description<textarea name="description2"></textarea></label>
@@ -3093,9 +3106,9 @@ def test_content_script_does_not_use_education_add_button_for_work_experience():
               <section id="education">
                 <h2>Education</h2>
                 <div class="education-row">
-                  <label>School<input name="school[]"></label>
-                  <label>Degree<select name="degree[]"><option>Select...</option><option>Bachelor's Degree</option></select></label>
-                  <label>Discipline<input name="discipline[]"></label>
+                  <label>School<input name="school[]" required></label>
+                  <label>Degree<select name="degree[]" required><option>Select...</option><option>Bachelor's Degree</option></select></label>
+                  <label>Discipline<input name="discipline[]" required></label>
                   <label>Start date month<input name="start_date_month[]"></label>
                   <label>Start date year<input name="start_date_year[]"></label>
                   <label>End date month<input name="end_date_month[]"></label>
@@ -3198,7 +3211,7 @@ def test_content_script_discovers_custom_dropdown_options_before_mapping():
             """
             <form>
               <label id="veteran-label">Veteran Status</label>
-              <button id="veteran" type="button" aria-labelledby="veteran-label" aria-haspopup="listbox" aria-controls="veteran-options">Select...</button>
+              <button id="veteran" type="button" aria-labelledby="veteran-label" aria-haspopup="listbox" aria-controls="veteran-options" aria-required="true">Select...</button>
               <div id="veteran-options" role="listbox" hidden>
                 <div role="option">I identify as one or more of the classifications of protected veteran listed above</div>
                 <div role="option">I am not a protected veteran</div>
@@ -4628,5 +4641,363 @@ def test_content_script_page_field_context_reflects_answers_filled_mid_loop():
         after = relatives_entry(get_context())
         assert after["answered"] is True
         assert "No" in after["currentValue"]
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_only_required_fields_plus_contact_basics():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "fullName": "Test Candidate",
+        "email": "test@example.com",
+        "phone": "5550100000",
+        "answers": {
+            "custom:notice-period": "2 weeks",
+            "custom:best-time-to-call": "Morning",
+            "custom:favorite-snack": "Apples",
+        },
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        # Contact basics carry no required markers on purpose: they must still fill.
+        # "Notice period *" is required via a trailing asterisk only (no attribute).
+        page.set_content(
+            """
+            <form>
+              <label>First name<input name="firstName"></label>
+              <label>Last name<input name="lastName"></label>
+              <label>Email<input name="email" type="email"></label>
+              <label>Mobile phone<input name="phone" type="tel"></label>
+              <label>Notice period *<input name="noticePeriod"></label>
+              <label>Why do you want to work here? *<textarea name="why"></textarea></label>
+              <label>Best time to call<select name="bestTime"><option value=""></option><option>Morning</option><option>Evening</option></select></label>
+              <label>Favorite snack<input name="snack"></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }})
+                  }}
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings_by_name = {mapping["name"]: mapping for mapping in preview["result"]["mappings"]}
+
+        # Contact basics still fill despite the missing required markers.
+        assert mappings_by_name["firstName"]["value"] == "Test"
+        assert mappings_by_name["lastName"]["value"] == "Candidate"
+        assert mappings_by_name["email"]["value"] == "test@example.com"
+        assert mappings_by_name["phone"]["value"] == "5550100000"
+        # Required (asterisk-marked) field fills from saved answers.
+        assert mappings_by_name["noticePeriod"]["value"] == "2 weeks"
+        # Optional fields are never mapped, even when a saved answer exists.
+        assert "bestTime" not in mappings_by_name
+        assert "snack" not in mappings_by_name
+
+        # Optional fields are not asked either; they are surfaced as skipped-optional.
+        unmapped_labels = [field["label"] for field in preview["result"]["unmappedFields"]]
+        assert any("Why do you want to work here?" in label for label in unmapped_labels)
+        assert not any("Best time to call" in label for label in unmapped_labels)
+        assert not any("Favorite snack" in label for label in unmapped_labels)
+        skipped_labels = [field["label"] for field in preview["result"]["skippedOptionalFields"]]
+        assert any("Best time to call" in label for label in skipped_labels)
+        assert any("Favorite snack" in label for label in skipped_labels)
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='firstName']").input_value() == "Test"
+        assert page.locator("[name='noticePeriod']").input_value() == "2 weeks"
+        assert page.locator("[name='bestTime']").input_value() == ""
+        assert page.locator("[name='snack']").input_value() == ""
+
+        browser.close()
+
+
+ASSISTANT_PANEL_HTML = """
+<div id="assistant-panel" style="display:none">
+  <div id="chatLog"></div>
+  <form id="chatForm"><input id="chatInput"></form>
+  <div id="reviewList"></div>
+  <span id="assistantStatus"></span>
+  <div id="aiStatusPanel"></div>
+  <span id="aiStatusText"></span>
+  <span id="aiUsageText"></span>
+  <button id="scanButton"></button>
+  <button id="previewButton"></button>
+  <button id="askAiButton"></button>
+  <button id="fillSelectedButton"></button>
+  <button id="saveAnswersButton"></button>
+  <button id="trackButton"></button>
+  <button id="optionsButton"></button>
+</div>
+"""
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_assistant_one_shot_audit_fixes_and_fills_required_fields_only():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    assistant_script_path = ROOT / "autofill_extension/src/assistant.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            ASSISTANT_PANEL_HTML
+            + """
+            <form>
+              <label>Preferred start date *<input name="startDate" value="Never" required></label>
+              <label>Team preference *<select name="teamPreference" required><option value=""></option><option>Platform</option><option>Product</option></select></label>
+              <label>Favorite snack<input name="snack"></label>
+            </form>
+            """
+        )
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.__auditPayloads = [];
+              window.__mapFieldsPayloads = [];
+              const respond = (message) => {{
+                if (message?.type === 'AUDIT_FIELDS_WITH_BACKEND') {{
+                  window.__auditPayloads.push(message.payload);
+                  const decisions = (message.payload.fields || []).map((field) => {{
+                    if (/preferred start date/i.test(field.label || '')) {{
+                      return {{ index: field.index, action: 'correct', value: 'March 2026', confidence: 0.9, source: 'audit', reason: 'Wrong answer' }};
+                    }}
+                    if (/team preference/i.test(field.label || '')) {{
+                      return {{ index: field.index, action: 'fill', value: 'Platform', confidence: 0.9, source: 'audit', reason: 'Required and empty' }};
+                    }}
+                    return {{ index: field.index, action: 'keep', value: '', confidence: 0.9, source: 'audit', reason: 'Looks fine' }};
+                  }});
+                  return {{ ok: true, payload: {{ corrections: [], decisions, issues: [] }} }};
+                }}
+                if (message?.type === 'MAP_FIELDS_WITH_BACKEND') {{
+                  window.__mapFieldsPayloads.push(message.payload);
+                  return {{ ok: true, payload: {{ mappings: [] }} }};
+                }}
+                if (message?.type === 'GET_AI_USAGE') {{
+                  return {{ ok: true, payload: {{ aiUsage: {{ requestsLastMinute: 0, limitPerMinute: 40, remainingThisMinute: 40 }} }} }};
+                }}
+                if (message?.type === 'FETCH_RESUME_FILE') {{
+                  return {{ ok: false, error: 'No resume in this test.' }};
+                }}
+                return {{ ok: true, payload: {{}} }};
+              }};
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async (message) => respond(message),
+                  openOptionsPage: () => {{}}
+                }},
+                storage: {{
+                  local: {{
+                    get: async () => ({{ candidateProfile: profile, settings }}),
+                    set: async () => {{}}
+                  }}
+                }},
+                tabs: {{
+                  query: async () => [{{ id: 1, url: 'https://example.com/apply', title: 'Apply' }}],
+                  sendMessage: (tabId, message, options) => new Promise((resolve) => {{
+                    window.__autofillListener(message, null, resolve);
+                  }})
+                }},
+                scripting: {{
+                  executeScript: async () => []
+                }},
+                webNavigation: {{
+                  getAllFrames: async () => [{{ frameId: 0, url: '' }}]
+                }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+        page.add_script_tag(path=str(assistant_script_path))
+
+        page.evaluate("() => document.getElementById('askAiButton').click()")
+        page.wait_for_function(
+            """() => document.getElementById('aiStatusText').textContent === 'AI idle'
+              && window.__auditPayloads.length > 0"""
+        )
+
+        # ONE audit request, carrying only required fields (filled and empty) plus a
+        # fresh page context snapshot.
+        audit_payloads = page.evaluate("() => window.__auditPayloads")
+        assert len(audit_payloads) == 1
+        payload = audit_payloads[0]
+        labels = [field["label"] for field in payload["fields"]]
+        assert any("Preferred start date" in label for label in labels)
+        assert any("Team preference" in label for label in labels)
+        assert not any("Favorite snack" in label for label in labels), labels
+        assert isinstance(payload["page"]["context"], list) and payload["page"]["context"]
+        assert all("currentValue" in entry for entry in payload["page"]["context"])
+        mappings_by_index = {mapping["index"]: mapping for mapping in payload["mappings"]}
+        start_field = next(field for field in payload["fields"] if "Preferred start date" in field["label"])
+        team_field = next(field for field in payload["fields"] if "Team preference" in field["label"])
+        assert mappings_by_index[start_field["index"]]["value"] == "Never"
+        assert mappings_by_index[team_field["index"]]["value"] == ""
+
+        # "correct" replaced the wrong value and "fill" answered the empty required field.
+        assert page.locator("[name='startDate']").input_value() == "March 2026"
+        assert page.locator("[name='teamPreference']").input_value() == "Platform"
+        assert page.locator("[name='snack']").input_value() == ""
+
+        # Everything required was handled by the one-shot audit, so the per-field
+        # Ask-AI loop had nothing left to do.
+        assert page.evaluate("() => window.__mapFieldsPayloads") == []
+        chat_text = page.evaluate("() => document.getElementById('chatLog').textContent")
+        assert "AI corrections" in chat_text
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_runs_workday_resume_autofill_before_field_fills():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    resume_b64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "email": "test@example.com",
+        "resumeFileName": "My Resume.pdf",
+        "answers": {},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(
+            """
+            <div data-automation-id="quickApplyUpload">
+              <button type="button" data-automation-id="autofillWithResume">Autofill with Resume</button>
+              <input id="resumeUpload" type="file" aria-label="Resume/CV upload" style="display:none">
+            </div>
+            <form id="app-form">
+              <label>Email Address<input name="email" type="email"></label>
+              <label>Legal first name *<input name="firstName" required></label>
+            </form>
+            <script>
+              window.__order = [];
+              // Simulate the ATS parsing the attached resume: a new field appears.
+              document.getElementById('resumeUpload').addEventListener('change', () => {
+                window.__order.push('resume-attached');
+                const label = document.createElement('label');
+                label.append('Parsed by resume *');
+                const input = document.createElement('input');
+                input.name = 'parsedByResume';
+                input.required = true;
+                label.appendChild(input);
+                document.getElementById('app-form').appendChild(label);
+              });
+              document.querySelectorAll('#app-form input').forEach((element) => {
+                element.addEventListener('input', () => window.__order.push('fill:' + element.name));
+              });
+            </script>
+            """
+        )
+        install_chrome_mock_with_resume(
+            page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        fill_response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'AUTOFILL_PAGE' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert fill_response["ok"] is True, fill_response
+        result = fill_response["result"]
+
+        order = page.evaluate("() => window.__order")
+        # The resume attach ran FIRST, before any field mapping was applied.
+        assert order and order[0] == "resume-attached", order
+        assert "fill:email" in order and order.index("fill:email") > 0
+        assert "fill:firstName" in order and order.index("fill:firstName") > 0
+
+        # The scan happened after the ATS parse, so it saw the parsed field too.
+        assert result["scanned"] == 3
+        assert {"label": "Resume/CV", "filename": "My Resume.pdf"} in result["attached"]
+        assert page.evaluate("() => window.__resumeFetchCount") == 1
+
+        resume_files = page.evaluate(
+            "() => Array.from(document.getElementById('resumeUpload').files).map((file) => file.name)"
+        )
+        assert resume_files == ["My Resume.pdf"]
+        assert page.locator("[name='email']").input_value() == "test@example.com"
+        assert page.locator("[name='firstName']").input_value() == "Test"
 
         browser.close()

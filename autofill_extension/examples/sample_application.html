@@ -129,20 +129,20 @@
         <section>
           <h2>Address</h2>
           <div class="grid">
-            <label>Street address<input name="address_line_1"></label>
-            <label>City<input name="city"></label>
-            <label>Province / State<input name="region"></label>
-            <label>Postal code / ZIP<input name="postal_code"></label>
-            <label>Country<input name="country"></label>
+            <label>Street address *<input name="address_line_1" required></label>
+            <label>City *<input name="city" required></label>
+            <label>Province / State *<input name="region" required></label>
+            <label>Postal code / ZIP *<input name="postal_code" required></label>
+            <label>Country *<input name="country" required></label>
           </div>
         </section>
 
         <section>
           <h2>Education</h2>
           <div class="grid">
-            <label>University / College<input name="school"></label>
-            <label>Degree or program<input name="degree"></label>
-            <label>Expected graduation date<input name="graduation"></label>
+            <label>University / College *<input name="school" required></label>
+            <label>Degree or program *<input name="degree" required></label>
+            <label>Expected graduation date *<input name="graduation" required></label>
             <label>Current location<input name="currentLocation"></label>
           </div>
         </section>
@@ -152,7 +152,7 @@
           <div class="grid">
             <label>
               Are you legally authorized to work in Canada?
-              <select name="work_authorization">
+              <select name="work_authorization" required>
                 <option value="">Select one</option>
                 <option>Yes</option>
                 <option>No</option>
@@ -161,7 +161,7 @@
 
             <label>
               Are you a Canadian citizen?
-              <select name="canadian_citizen">
+              <select name="canadian_citizen" required>
                 <option value="">Select one</option>
                 <option>Yes</option>
                 <option>No</option>
@@ -170,7 +170,7 @@
 
             <label>
               Are you a United States lawful permanent resident?
-              <select name="us_permanent_resident">
+              <select name="us_permanent_resident" required>
                 <option value="">Select one</option>
                 <option>Yes</option>
                 <option>No</option>
@@ -180,14 +180,14 @@
             <fieldset>
               <legend>Will you now or in the future require visa sponsorship?</legend>
               <div class="radio-row">
-                <label><input type="radio" name="sponsorship" value="Yes">Yes</label>
+                <label><input type="radio" name="sponsorship" value="Yes" required>Yes</label>
                 <label><input type="radio" name="sponsorship" value="No">No</label>
               </div>
             </fieldset>
 
-            <label>Salary expectation<input name="salaryExpectation"></label>
-            <label>Relocation preference<input name="relocation"></label>
-            <label>Are you subject to a non-compete or similar agreement?<input name="subject_to_agreement"></label>
+            <label>Salary expectation *<input name="salaryExpectation" required></label>
+            <label>Relocation preference *<input name="relocation" required></label>
+            <label>Are you subject to a non-compete or similar agreement? *<input name="subject_to_agreement" required></label>
           </div>
         </section>
 

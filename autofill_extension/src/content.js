@@ -90,7 +90,8 @@
     scanCount: 0,
     isApplying: false,
     dynamicRunCount: 0,
-    lastPreviewFields: []
+    lastPreviewFields: [],
+    nativeResumeParseAttempted: false
   };
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -152,6 +153,9 @@
 
     return {
       ...result,
+      filled: result.filled + (plan.resumeFirst?.attached?.length || 0),
+      attached: [...(plan.resumeFirst?.attached || []), ...(result.attached || [])],
+      failures: [...(result.failures || []), ...(plan.resumeFirst?.failures || [])],
       scanned: plan.fields.length,
       mapped: plan.mappings.length
     };
@@ -161,6 +165,7 @@
     const plan = await buildAutofillPlan();
     const mappedIndexes = new Set(plan.mappings.map((mapping) => mapping.index));
     const unmappedFields = plan.fields
+      .filter(isTargetField)
       .filter((field) => !mappedIndexes.has(field.index) || isAiOnlyField(field))
       .filter(shouldAskForField)
       .map(({ elementRef, ...field }) => ({
@@ -170,6 +175,24 @@
         needsManualUpload: field.type === "file",
         unfilledReason: unfilledReasonForField(field, mappedIndexes)
       }));
+    const skippedOptionalFields = plan.fields
+      .filter((field) => !isTargetField(field))
+      .map((field) => ({
+        index: field.index,
+        label: displayLabelForField(field),
+        reason: "skipped: optional"
+      }));
+    const manualTasks = buildManualTasks(unmappedFields, plan.profile);
+
+    if (plan.resumeFirst?.attached?.length) {
+      manualTasks.push({
+        index: -1,
+        label: "Resume/CV",
+        task: "Attached resume for the site's own resume autofill",
+        automatic: true,
+        resumeFileName: plan.profile.resumeFileName || ""
+      });
+    }
 
     return {
       scanned: plan.fields.length,
@@ -190,8 +213,9 @@
         };
       }),
       unmappedFields,
+      skippedOptionalFields,
       debugFields: plan.fields.map(debugFieldForPreview),
-      manualTasks: buildManualTasks(unmappedFields, plan.profile),
+      manualTasks,
       page: {
         url: location.href,
         title: document.title,
@@ -243,7 +267,8 @@
       options: field.options || [],
       haystack: fieldHaystack(field),
       isPolicy: isAiOnlyField(field),
-      shouldAsk: shouldAskForField(field)
+      shouldAsk: shouldAskForField(field),
+      target: isTargetField(field)
     };
   }
 
@@ -273,10 +298,14 @@
       "settings"
     ]);
     const profile = candidateProfile || {};
+    // ATS-native resume autofill (Workday etc.) runs before the scan so the site's own
+    // parser can populate fields and the plan sees the post-parse state.
+    const resumeFirst = await runNativeResumeParseFirst();
     await prepareRepeatableSections(profile);
     const fields = scanFields();
     await enrichDynamicDropdownOptions(fields);
     state.lastPreviewFields = fields.map(({ elementRef, choiceRefs, ...field }) => field);
+    const fieldByIndex = new Map(fields.map((field) => [field.index, field]));
     const canonicalMappings = buildCanonicalMappings(fields, profile, settings || {});
     const profileContactMappings = buildProfileContactMappings(fields, profile, settings || {});
     const structuralPolicyMappings = buildStructuralPolicyMappings(fields, profile);
@@ -287,14 +316,50 @@
       ...mapRepeatableWebsiteFields(fields, profile)
     ];
     const backendMappings = settings?.autoMapAmbiguousFields === true
-      ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field)), profile, fields)
+      ? await getBackendMappings(fields.filter((field) => !isAiOnlyField(field) && isTargetField(field)), profile, fields)
       : [];
     const mappings = mergeMappings([...canonicalMappings, ...profileContactMappings, ...structuralPolicyMappings, ...localMappings, ...repeatableMappings], backendMappings, fields)
       .concat(buildRawStructuralPolicyMappings(fields, profile))
       .filter((mapping, index, all) => all.findIndex((item) => item.index === mapping.index) === index)
-      .filter((mapping) => !isAlreadyCorrectlyFilledMapping(mapping, fields));
+      .filter((mapping) => !isAlreadyCorrectlyFilledMapping(mapping, fields))
+      // Only required fields (plus universal identity/contact basics) are ever filled;
+      // everything else optional is skipped silently.
+      .filter((mapping) => {
+        const field = fieldByIndex.get(mapping.index);
+        return !field || isTargetField(field);
+      });
 
-    return { fields, mappings, profile };
+    return { fields, mappings, profile, resumeFirst };
+  }
+
+  // Single gate for both the autofill plan and every AI path: act only on required
+  // fields. Identity/contact basics and the resume attach are universally expected by
+  // ATS forms even when not marked required, so they stay in scope.
+  function isTargetField(field) {
+    return field.required === true || isUniversalBaselineField(field);
+  }
+
+  function isUniversalBaselineField(field) {
+    if (field.type === "file") {
+      return true;
+    }
+
+    const kind = classifyFieldKind(field);
+    if (
+      kind === FIELD_KIND.FIRST_NAME
+      || kind === FIELD_KIND.LAST_NAME
+      || kind === FIELD_KIND.FULL_NAME
+      || kind === FIELD_KIND.EMAIL
+      || kind === FIELD_KIND.PHONE
+    ) {
+      return true;
+    }
+
+    const primary = primaryFieldHaystack(field);
+    return /\b(preferred|chosen)\s+name\b/.test(primary)
+      || isPhoneCountryCodeField(primary)
+      || isGreenhousePhoneCountryCodeLikeField(field)
+      || isGreenhouseBarePhoneCountryFallbackField(field, primary);
   }
 
   async function debugDropdowns() {
@@ -363,7 +428,7 @@
         hydrateFieldsFromPreview(fields);
         mappings = mergeMappings(
           reindexMappingsByIdentity(mappings, fields),
-          fields.map((field) => mapField(field, profile, settings || {})).filter(Boolean),
+          fields.filter(isTargetField).map((field) => mapField(field, profile, settings || {})).filter(Boolean),
           fields
         );
       }
@@ -481,6 +546,67 @@
 
   const RESUME_FILE_CONTEXT_PATTERN = /resume|\bcv\b|curriculum vitae/i;
   const NON_RESUME_FILE_CONTEXT_PATTERN = /cover\s*letter|transcript|portfolio|\bother\b/i;
+  const NATIVE_RESUME_AUTOFILL_AUTOMATION_ID_PATTERN = /quickapplyupload|autofillwithresume/i;
+  const NATIVE_RESUME_AUTOFILL_TEXT_PATTERN = /autofill with resume|apply with resume|upload.*resume.*autofill/i;
+
+  // Pages like Workday offer their own "autofill with resume" flow. When present, the
+  // resume is attached before scanning/filling so the ATS parser populates what it can
+  // and our scan sees the post-parse state. Everywhere else the resume attach keeps
+  // happening together with the fill (see applyMappings).
+  async function runNativeResumeParseFirst() {
+    if (state.nativeResumeParseAttempted || !hasNativeResumeAutofillFlow()) {
+      return null;
+    }
+
+    const pending = findResumeFileInputs().filter((input) => !input.files?.length);
+    if (!pending.length) {
+      return null;
+    }
+
+    state.nativeResumeParseAttempted = true;
+    const fieldCountBefore = countCandidateFieldElements();
+    const result = await attachResumeToResumeInputs();
+
+    if (result.attached.length) {
+      await waitForNativeResumeParse(fieldCountBefore);
+    }
+
+    return result;
+  }
+
+  function hasNativeResumeAutofillFlow() {
+    const automationMatch = Array.from(document.querySelectorAll("[data-automation-id]"))
+      .some((element) => NATIVE_RESUME_AUTOFILL_AUTOMATION_ID_PATTERN.test(element.getAttribute("data-automation-id") || ""));
+
+    if (automationMatch) {
+      return true;
+    }
+
+    return Array.from(document.querySelectorAll("button, [role='button'], label, [role='option'], [role='radio']"))
+      .some((element) => NATIVE_RESUME_AUTOFILL_TEXT_PATTERN.test(compactText(element.innerText || element.textContent || "")));
+  }
+
+  function countCandidateFieldElements() {
+    return document.querySelectorAll(FIELD_SELECTOR).length;
+  }
+
+  // Network-idle-ish wait: poll until the ATS parser changes the form (new fields appear)
+  // or give up after ~4s.
+  async function waitForNativeResumeParse(fieldCountBefore, timeoutMs = 4000) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      await sleep(250);
+
+      if (countCandidateFieldElements() !== fieldCountBefore) {
+        // Give the page one more beat to settle before scanning.
+        await sleep(250);
+        return true;
+      }
+    }
+
+    return false;
+  }
 
   async function attachResumeToResumeInputs() {
     const inputs = findResumeFileInputs();
@@ -745,7 +871,7 @@
       ariaAutocomplete: element.getAttribute("aria-autocomplete") || "",
       autocomplete: element.getAttribute("autocomplete") || "",
       dataAutomationId: element.getAttribute("data-automation-id") || "",
-      required: isRequiredElement(element, rawLabel),
+      required: isRequiredElement(element, [rawLabel, recoveredLabel, questionText].filter(Boolean).join(" ")),
       value: getCurrentValue(element),
       options,
       surroundingText: getSurroundingText(element),
@@ -812,7 +938,9 @@
       placeholder: "",
       ariaLabel: group.container?.getAttribute?.("aria-label") || first.getAttribute("aria-label") || "",
       autocomplete: "",
-      required: isRequiredElement(first, label),
+      // A choice group is required when any member input is required or the group
+      // label/question carries a required marker (e.g. a trailing asterisk).
+      required: group.elements.some((element) => isRequiredElement(element, [label, questionText].filter(Boolean).join(" "))),
       value: "",
       options,
       surroundingText: compactText(group.container?.innerText || ""),
@@ -6369,6 +6497,13 @@
 
     if ("checked" in element && (element.type === "checkbox" || element.type === "radio")) {
       return element.checked ? element.value : "";
+    }
+
+    if (element.tagName?.toLowerCase() === "select") {
+      // Never fall back to textContent here: an unanswered select would report the
+      // concatenated text of every option instead of an empty value.
+      const selected = element.selectedOptions?.[0];
+      return element.value || compactText(selected?.textContent || "");
     }
 
     const direct = element.value || element.textContent || "";

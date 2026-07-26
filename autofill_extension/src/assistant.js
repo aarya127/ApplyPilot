@@ -254,8 +254,18 @@ async function askAiForMissingAnswersImpl() {
     ...(lastPreview?.page || {}),
     targetCountry: settings?.targetCountry || ""
   };
-  const auditMappings = await auditCurrentAutofillAnswers(lastPreview, profile, pageContext);
-  const missingFields = (lastPreview?.unmappedFields || []).filter(isAiAskableField);
+  // ONE audit request covers every required field (filled and empty): it keeps correct
+  // answers, corrects wrong ones, and fills missing ones.
+  const auditMappings = await auditRequiredFields(lastPreview, profile, pageContext);
+  const auditedKeys = new Set(auditMappings.map((mapping) => (
+    `${Number.isInteger(mapping.frameId) ? mapping.frameId : 0}:${mapping.index}`
+  )));
+  // Only required fields that the one-shot audit could not answer go to the per-field
+  // Ask-AI loop (the backend's compact retry handles the hard ones).
+  const missingFields = (lastPreview?.unmappedFields || [])
+    .filter(isAiAskableField)
+    .filter((field) => field.required === true)
+    .filter((field) => !auditedKeys.has(`${Number.isInteger(field.frameId) ? field.frameId : 0}:${field.index}`));
   const skippedOptionFields = (lastPreview?.unmappedFields || []).filter((field) => (
     isOptionLikeField(field) && !(field.options || []).length && !field.required
   ));
@@ -353,32 +363,49 @@ async function getFreshPageFieldContext() {
   }
 }
 
-async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
-  const currentMappings = (preview?.mappings || []).filter((mapping) => (
-    mapping && mapping.value !== undefined && mapping.value !== null && String(mapping.value).trim()
+// One-shot AI check+fix+fill: sends EVERY required field (filled and empty) with its
+// current value and mapping to /audit-fields in a single request, then turns the
+// returned "correct" and "fill" decisions into review mappings.
+async function auditRequiredFields(preview, profile, pageContext) {
+  const requiredFields = (preview?.debugFields || []).filter((field) => (
+    field.required === true && field.type !== "file"
   ));
 
-  if (!currentMappings.length) {
+  if (!requiredFields.length) {
     return [];
   }
 
-  const fieldsForAudit = currentMappings.map((mapping, index) => toBackendField(fieldForPreviewMapping(preview, mapping), index));
-  const auditPayloadMappings = currentMappings.map((mapping, index) => ({
-    index,
-    value: currentAuditValue(preview, mapping),
-    plannedValue: mapping.value,
-    source: mapping.source,
-    confidence: mapping.confidence
-  }));
+  const mappingByKey = new Map((preview?.mappings || []).map((mapping) => [
+    `${Number.isInteger(mapping.frameId) ? mapping.frameId : 0}:${mapping.index}`,
+    mapping
+  ]));
 
-  setBusy(`Auditing ${currentMappings.length} filled answer(s) before asking AI...`);
+  const fieldsForAudit = requiredFields.map((field, index) => toBackendField(field, index));
+  const auditPayloadMappings = requiredFields.map((field, index) => {
+    const key = `${Number.isInteger(field.frameId) ? field.frameId : 0}:${field.index}`;
+    const mapping = mappingByKey.get(key);
+    const currentValue = String(field.value ?? "").trim();
+
+    return {
+      index,
+      value: currentValue && !isPlaceholderValue(currentValue) ? currentValue : String(mapping?.value ?? ""),
+      plannedValue: mapping?.value ?? "",
+      source: mapping?.source || "",
+      confidence: mapping?.confidence ?? 0
+    };
+  });
+
+  setBusy(`Running one AI check on ${requiredFields.length} required field(s)...`);
+  // Conditional questions must be judged with sibling answers visible, so the audit
+  // always carries a fresh page context snapshot.
+  const freshContext = await getFreshPageFieldContext();
   const response = await chrome.runtime.sendMessage({
     type: "AUDIT_FIELDS_WITH_BACKEND",
     payload: {
       fields: fieldsForAudit,
       mappings: auditPayloadMappings,
       profile,
-      page: pageContext
+      page: freshContext ? { ...pageContext, context: freshContext } : pageContext
     }
   });
 
@@ -389,18 +416,35 @@ async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
 
   updateAiUsage(response.payload?.aiUsage);
 
-  const corrections = response.payload?.corrections || [];
   const auditMappings = [];
-  for (const correction of corrections) {
-    const field = fieldsForAudit.find((item) => item.index === correction.index);
-    const value = String(correction.value ?? "").trim();
+  const answeredIndexes = new Set();
+  const addAuditMapping = (item, action) => {
+    if (!item || !Number.isInteger(item.index) || answeredIndexes.has(item.index)) {
+      return;
+    }
+
+    const field = fieldsForAudit.find((candidate) => candidate.index === item.index);
+    const value = String(item.value ?? "").trim();
     if (field && value) {
-      auditMappings.push(toPreviewMapping(field, correction));
+      answeredIndexes.add(item.index);
+      auditMappings.push(toPreviewMapping(field, { ...item, source: item.source || `audit-${action}` }));
+    }
+  };
+
+  const decisions = response.payload?.decisions || [];
+  for (const decision of decisions) {
+    if (decision?.action === "correct" || decision?.action === "fill") {
+      addAuditMapping(decision, decision.action);
     }
   }
 
+  // Older backends only report a corrections list; keep honoring it.
+  for (const correction of response.payload?.corrections || []) {
+    addAuditMapping(correction, "correct");
+  }
+
   if (auditMappings.length) {
-    addMessage("agent", `Audit found ${auditMappings.length} filled answer(s) to correct before continuing.`);
+    addMessage("agent", `AI corrections: ${auditMappings.length} required field(s) to fix or fill.`);
   }
 
   const issues = response.payload?.issues || [];
@@ -410,40 +454,14 @@ async function auditCurrentAutofillAnswers(preview, profile, pageContext) {
     }
   }
 
-  const decisions = response.payload?.decisions || [];
-  const corrected = decisions.filter((item) => item.action === "correct" || item.action === "fill").length;
+  const corrected = decisions.filter((item) => item.action === "correct").length;
+  const filledDecisions = decisions.filter((item) => item.action === "fill").length;
   const skipped = decisions.filter((item) => item.action === "skip").length;
-  if (decisions.length && (corrected || skipped)) {
-    addMessage("agent", `Audit protocol: ${decisions.length} checked, ${corrected} correction/fill decision(s), ${skipped} skipped as unsafe.`);
+  if (decisions.length && (corrected || filledDecisions || skipped)) {
+    addMessage("agent", `Audit protocol: ${decisions.length} required field(s) checked, ${corrected} correction(s), ${filledDecisions} fill(s), ${skipped} skipped as unsafe.`);
   }
 
   return auditMappings;
-}
-
-function fieldForPreviewMapping(preview, mapping) {
-  const frameId = Number.isInteger(mapping.frameId) ? mapping.frameId : 0;
-  const debugField = (preview?.debugFields || []).find((field) => {
-    const fieldFrameId = Number.isInteger(field.frameId) ? field.frameId : 0;
-    return fieldFrameId === frameId && field.index === mapping.index;
-  });
-
-  return {
-    ...(debugField || {}),
-    ...mapping,
-    value: debugField?.value ?? mapping.value,
-    options: debugField?.options || mapping.options || []
-  };
-}
-
-function currentAuditValue(preview, mapping) {
-  const field = fieldForPreviewMapping(preview, mapping);
-  const currentValue = String(field.value ?? "").trim();
-
-  if (currentValue && !isPlaceholderValue(currentValue)) {
-    return currentValue;
-  }
-
-  return mapping.value;
 }
 
 function toBackendField(field, index) {
@@ -938,6 +956,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
   let scanned = 0;
   const mappings = [];
   const unmappedFields = [];
+  const skippedOptionalFields = [];
   const manualTasks = [];
   const debugFields = [];
   const pageFieldContext = [];
@@ -945,6 +964,10 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
   for (const { frame, response } of successful) {
     const result = response.result || {};
     scanned += Number(result.scanned || 0);
+
+    for (const field of result.skippedOptionalFields || []) {
+      skippedOptionalFields.push({ ...field, frameId: frame.frameId });
+    }
 
     for (const mapping of result.mappings || []) {
       mappings.push({
@@ -992,6 +1015,7 @@ function aggregatePreviewResponses(successful, tab, frameCount) {
       accessibleFrameCount: successful.length,
       mappings,
       unmappedFields,
+      skippedOptionalFields,
       debugFields,
       manualTasks,
       page: {
@@ -1108,6 +1132,9 @@ function renderReview(preview) {
     ? ` across ${preview.accessibleFrameCount}/${preview.frameCount} accessible frame(s)`
     : "";
   addMessage("agent", `I scanned ${preview.scanned} field(s) and mapped ${preview.mapped}${frameText}. Review the checked cards, then fill selected.`);
+  if (preview.skippedOptionalFields?.length) {
+    addMessage("agent", `Skipped ${preview.skippedOptionalFields.length} optional field(s); only required fields and contact basics are filled.`);
+  }
 
   appendReviewHeading("Ready to fill");
   for (const mapping of preview.mappings) {
