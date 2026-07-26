@@ -1522,6 +1522,10 @@ def policy_answer_for_field(
     if is_family_or_relationship_conflict_question(haystack):
         return best_available_option("No", options) or "No"
 
+    if is_restrictive_agreement_question(haystack):
+        answer = profile.get("subjectToAgreement") or profile.get("answers", {}).get("subjectToAgreement") or "No"
+        return best_available_option(answer, options) or answer
+
     if any(term in haystack for term in ["group", "community", "communities", "affiliation", "affiliated", "membership", "member of", "belong to"]):
         return best_available_option(policies["groupAffiliations"], options) or best_available_option("None of the above", options) or policies["groupAffiliations"]
 
@@ -1567,6 +1571,13 @@ def is_previous_company_question(haystack: str) -> bool:
 
 def is_gpa_question(haystack: str) -> bool:
     return bool(re.search(r"overall result|grade point average|\bgpa\b|\bcgpa\b|academic average", haystack))
+
+
+def is_restrictive_agreement_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"bound by|non[- ]?compete|non[- ]?solicit|non[- ]?disclosure|restrictive covenant|restrict your ability|contractual obligation|garden leave", haystack)
+        or (re.search(r"confidentiality", haystack) and re.search(r"agreement|obligation|restrict", haystack))
+    )
 
 
 def is_years_of_experience_question(haystack: str) -> bool:
@@ -2475,6 +2486,9 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         )
         if stated not in (None, ""):
             answer = best_available_option(str(stated), options) or str(stated)
+    elif is_restrictive_agreement_question(haystack):
+        stated = profile.get("subjectToAgreement") or profile.get("answers", {}).get("subjectToAgreement") or "No"
+        answer = best_available_option(stated, options) or stated
 
     if not answer:
         return None

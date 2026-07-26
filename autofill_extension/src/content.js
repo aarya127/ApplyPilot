@@ -1894,6 +1894,13 @@
       return "";
     }
 
+    // A yes/no policy question can mention "employer"/"school" without being an
+    // identity field — e.g. "Are you bound by any agreements with a current or
+    // former employer...". Never classify these as a name/employer field.
+    if (isPolicyQuestionNotIdentity(field, primary)) {
+      return "";
+    }
+
     if (isWorkOrEducationIdentityField(primary)) {
       if (/employer|company/.test(primary)) {
         return FIELD_KIND.CURRENT_EMPLOYER;
@@ -3956,6 +3963,27 @@
     return /(current|previous|most recent|last).*(employer|company|school|university|college|education|job title|title|position|role)/.test(haystack)
       || /(employer|company|school|university|college|education|job title|title|position|role).*(current|previous|most recent|last|attended)/.test(haystack)
       || /work experience|employment history|last university attended|current\/previous employer/.test(haystack);
+  }
+
+  // A field whose label reads like a yes/no policy question rather than a
+  // request for an identity value (name/employer/school). These must never be
+  // filled with a profile identity value like the current employer's name.
+  function isPolicyQuestionNotIdentity(field, haystack) {
+    const hasYesNoOptions = (field.options || []).some((option) => {
+      const text = normalize(`${option.label || ""} ${option.value || ""}`);
+      return text === "yes" || text === "no";
+    });
+
+    const restrictiveAgreement = /bound by|non[- ]?compete|non[- ]?solicit|non[- ]?disclosure|restrictive covenant|restrict your ability|contractual obligation|confidentiality (agreement|or)|garden leave/.test(haystack);
+    const interrogative = /^(are|do|does|did|have|has|had|will|would|is|were|was|can|could|should|may)\s+(you|your)\b/.test(haystack.trim());
+
+    if (restrictiveAgreement) {
+      return true;
+    }
+
+    // "Are you ... employer ...?" style questions: interrogative opener plus a
+    // yes/no answer shape means it's a policy question, not an employer field.
+    return interrogative && hasYesNoOptions;
   }
 
   function normalizedWorkExperience(profile) {

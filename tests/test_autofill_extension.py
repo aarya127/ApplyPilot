@@ -3477,6 +3477,40 @@ def test_backend_health_without_key_reports_not_configured(monkeypatch, tmp_path
     assert "not configured" in response.json["keyError"]
 
 
+def test_backend_answers_restrictive_agreement_question_no_without_llm(monkeypatch, tmp_path):
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "LLM_TRACE_PATH", tmp_path / "llm_trace.private.jsonl")
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("restrictive-agreement question must not reach the LLM")
+
+    monkeypatch.setattr(server, "call_nvidia_mapper", _fail_if_called)
+
+    label = (
+        "Are you currently bound by any agreements with a current or former employer that may "
+        "restrict your ability to work for Scale AI or perform the duties of the position for which "
+        "you are applying? This includes, but is not limited to, non-compete agreements, "
+        "non-solicitation agreements, confidentiality or non-disclosure agreements, or any other "
+        "contractual obligations that could limit your employment activities."
+    )
+    client = server.app.test_client()
+    response = client.post(
+        "/map-fields",
+        json={
+            "fields": [{"index": 0, "label": label, "options": [{"label": "Yes"}, {"label": "No"}]}],
+            "profile": {"subjectToAgreement": "No", "currentOrPreviousEmployer": "Cognixion"},
+            "page": {},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json["mappings"] == [
+        {"index": 0, "value": "No", "confidence": 0.95, "source": "policy"}
+    ]
+
+
 def test_backend_mapper_key_rejection_returns_actionable_warning(monkeypatch, tmp_path):
     monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
     monkeypatch.setattr(server, "DB_PATH", tmp_path / "applications.sqlite3")
