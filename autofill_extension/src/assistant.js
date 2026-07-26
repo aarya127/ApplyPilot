@@ -12,6 +12,7 @@ const askAiButton = document.getElementById("askAiButton");
 const fillSelectedButton = document.getElementById("fillSelectedButton");
 const saveAnswersButton = document.getElementById("saveAnswersButton");
 const trackButton = document.getElementById("trackButton");
+const uploadResumeButton = document.getElementById("uploadResumeButton");
 const optionsButton = document.getElementById("optionsButton");
 const countryButtons = Array.from(document.querySelectorAll("[data-country]"));
 
@@ -77,6 +78,10 @@ saveAnswersButton.addEventListener("click", async () => {
 
 trackButton.addEventListener("click", async () => {
   await trackApplication();
+});
+
+uploadResumeButton.addEventListener("click", async () => {
+  await attachResumeToPage();
 });
 
 optionsButton.addEventListener("click", () => {
@@ -191,6 +196,68 @@ function reportResumeAttachments(result) {
   for (const item of result?.attached || []) {
     addMessage("agent", `Attached ${item.filename || "your resume"} to the ${item.label || "Resume/CV"} upload field.`);
   }
+}
+
+// On-demand résumé attach: reveals the Greenhouse-style "Attach" control if needed, then
+// uploads the résumé, independent of a full autofill run.
+async function attachResumeToPage() {
+  setBusy("Attaching your résumé to this page...");
+  const response = await sendToActiveTab({ type: "ATTACH_RESUME_NOW" });
+
+  if (!response?.ok) {
+    showError(response?.error || "I could not attach your résumé to this page.");
+    return;
+  }
+
+  reportOnDemandResumeAttachment(response.result);
+}
+
+function reportOnDemandResumeAttachment(result) {
+  const attached = result?.attached || [];
+  const failures = result?.failures || [];
+
+  if (attached.length) {
+    for (const item of attached) {
+      addMessage("agent", `Attached ${item.filename || "your résumé"} to ${item.label || "Resume/CV"}.`);
+    }
+    assistantStatus.textContent = "Résumé attached";
+    return;
+  }
+
+  if (failures.length) {
+    for (const failure of failures) {
+      addMessage("agent", describeResumeAttachFailure(failure));
+    }
+    assistantStatus.textContent = "Needs attention";
+    return;
+  }
+
+  if (result?.resumeInputPresent) {
+    addMessage("agent", "A résumé file is already attached to this page.");
+    assistantStatus.textContent = "Résumé attached";
+    return;
+  }
+
+  addMessage("agent", "No resume file input found on this page.");
+  assistantStatus.textContent = "No résumé field";
+}
+
+function describeResumeAttachFailure(failure) {
+  const error = String(failure?.error || "").toLowerCase();
+
+  if (/no resume file configured|resume_file_path|no resume configured|did not return a resume/.test(error)) {
+    return "Backend has no resume configured — set RESUME_FILE_PATH in backend/env.private.";
+  }
+
+  if (/could not reach|reach the local|reach the extension|backend at/.test(error)) {
+    return "Could not reach the backend. Start it and try again.";
+  }
+
+  if (/could not open the resume upload control/.test(error)) {
+    return "I found a résumé upload button but could not open the file picker on this page.";
+  }
+
+  return failure?.error || "I could not attach your résumé to this page.";
 }
 
 function reportFillFailures(result) {
@@ -917,7 +984,35 @@ async function sendFrameAwareMessage(tab, message) {
     return aggregatePageFieldContextResponses(successful);
   }
 
+  if (message.type === "ATTACH_RESUME_NOW") {
+    return aggregateAttachResumeResponses(successful, frames.length);
+  }
+
   return successful[0]?.response || { ok: false, error: accessErrorMessage(tab.url) };
+}
+
+function aggregateAttachResumeResponses(successful, frameCount) {
+  const attached = [];
+  const failures = [];
+  let resumeInputPresent = false;
+
+  for (const { response } of successful) {
+    const result = response.result || {};
+    attached.push(...(result.attached || []));
+    failures.push(...(result.failures || []));
+    resumeInputPresent = resumeInputPresent || Boolean(result.resumeInputPresent);
+  }
+
+  return {
+    ok: true,
+    result: {
+      attached,
+      failures,
+      resumeInputPresent,
+      frameCount,
+      accessibleFrameCount: successful.length
+    }
+  };
 }
 
 function aggregatePageFieldContextResponses(successful) {

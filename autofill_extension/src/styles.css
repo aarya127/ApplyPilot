@@ -209,7 +209,8 @@ h2 {
 }
 
 #askAiButton,
-#fillSelectedButton {
+#fillSelectedButton,
+#uploadResumeButton {
   grid-column: 1 / -1;
 }
 

@@ -4770,6 +4770,7 @@ ASSISTANT_PANEL_HTML = """
   <button id="fillSelectedButton"></button>
   <button id="saveAnswersButton"></button>
   <button id="trackButton"></button>
+  <button id="uploadResumeButton"></button>
   <button id="optionsButton"></button>
 </div>
 """
@@ -4999,5 +5000,226 @@ def test_content_script_runs_workday_resume_autofill_before_field_fills():
         assert resume_files == ["My Resume.pdf"]
         assert page.locator("[name='email']").input_value() == "test@example.com"
         assert page.locator("[name='firstName']").input_value() == "Test"
+
+        browser.close()
+
+
+# Models a real Greenhouse resume field: the actual <input type=file> is NOT in the DOM
+# until the "Attach" button is clicked, and the section also offers Dropbox / Google Drive
+# / Enter manually alternatives we must not click. A separate Cover Letter section has its
+# own "Attach" that must be left alone.
+GREENHOUSE_REVEAL_PAGE = """
+<form>
+  <fieldset id="resumeField">
+    <legend>Resume/CV</legend>
+    <button type="button" id="attachResumeBtn">Attach</button>
+    <button type="button">Dropbox</button>
+    <button type="button">Google Drive</button>
+    <button type="button">Enter manually</button>
+  </fieldset>
+  <fieldset id="coverField">
+    <legend>Cover Letter</legend>
+    <button type="button" id="attachCoverBtn">Attach</button>
+    <button type="button">Enter manually</button>
+  </fieldset>
+</form>
+<script>
+  window.__resumeAttachClicks = 0;
+  window.__coverAttachClicks = 0;
+  document.getElementById('attachResumeBtn').addEventListener('click', () => {
+    window.__resumeAttachClicks += 1;
+    if (document.getElementById('revealedResume')) { return; }
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'revealedResume';
+    input.setAttribute('aria-label', 'Resume/CV');
+    document.getElementById('resumeField').appendChild(input);
+  });
+  document.getElementById('attachCoverBtn').addEventListener('click', () => {
+    window.__coverAttachClicks += 1;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'revealedCover';
+    input.setAttribute('aria-label', 'Cover Letter');
+    document.getElementById('coverField').appendChild(input);
+  });
+</script>
+"""
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_reveals_greenhouse_resume_input_then_attaches():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    resume_b64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+    profile = {"firstName": "Test", "lastName": "Candidate", "resumeFileName": "My Resume.pdf", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(GREENHOUSE_REVEAL_PAGE)
+        install_chrome_mock_with_resume(
+            page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        # No resume file input exists yet: it only appears after the reveal click.
+        assert page.evaluate("() => document.querySelectorAll('input[type=file]').length") == 0
+
+        response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'ATTACH_RESUME_NOW' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert response["ok"] is True, response
+        result = response["result"]
+        assert result["attached"] == [{"label": "Resume/CV", "filename": "My Resume.pdf"}]
+        assert result["failures"] == []
+        assert result["resumeInputPresent"] is True
+
+        # The revealed resume input holds exactly the fetched résumé.
+        resume_files = page.evaluate(
+            "() => Array.from(document.getElementById('revealedResume').files).map((file) => file.name)"
+        )
+        assert resume_files == ["My Resume.pdf"]
+        assert page.evaluate("() => window.__resumeFetchCount") == 1
+
+        # Only the résumé "Attach" was clicked, never the cover letter's, and never Dropbox
+        # / Google Drive / Enter manually (there is still no cover letter input).
+        assert page.evaluate("() => window.__resumeAttachClicks") == 1
+        assert page.evaluate("() => window.__coverAttachClicks") == 0
+        assert page.evaluate("() => document.getElementById('revealedCover')") is None
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_attach_resume_now_reports_attached_result_and_clear_failure():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    resume_b64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+    profile = {"firstName": "Test", "lastName": "Candidate", "resumeFileName": "My Resume.pdf", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        # A page with an ordinary (present) resume input: the handler returns the attached
+        # result directly.
+        page = browser.new_page()
+        page.set_content(RESUME_UPLOAD_PAGE)
+        install_chrome_mock_with_resume(
+            page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'ATTACH_RESUME_NOW' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert response["ok"] is True, response
+        assert response["result"]["attached"] == [{"label": "Resume/CV", "filename": "My Resume.pdf"}]
+        assert response["result"]["failures"] == []
+        assert response["result"]["resumeInputPresent"] is True
+
+        # A page with no résumé control at all: a clear, exception-free failure signal.
+        no_control_page = browser.new_page()
+        no_control_page.set_content("<form><label>Full name<input name='fullName'></label></form>")
+        install_chrome_mock_with_resume(
+            no_control_page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        no_control_page.add_script_tag(path=str(content_script_path))
+
+        response = no_control_page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'ATTACH_RESUME_NOW' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert response["ok"] is True, response
+        assert response["result"]["attached"] == []
+        assert response["result"]["failures"] == []
+        assert response["result"]["resumeInputPresent"] is False
+        assert no_control_page.evaluate("() => window.__resumeFetchCount") == 0
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_attach_resume_now_uses_existing_visible_input_without_reveal():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    resume_b64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+    profile = {"firstName": "Test", "lastName": "Candidate", "resumeFileName": "My Resume.pdf", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "requireReviewBeforeSubmit": True}
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        # A resume input that is already present in the DOM (Workday / hidden inputs).
+        page = browser.new_page()
+        page.set_content(
+            """
+            <form>
+              <fieldset id="resumeField">
+                <legend>Resume/CV</legend>
+                <button type="button" id="attachBtn">Attach</button>
+                <input id="visibleResume" type="file" aria-label="Resume/CV">
+              </fieldset>
+            </form>
+            <script>
+              window.__attachClicks = 0;
+              document.getElementById('attachBtn').addEventListener('click', () => {
+                window.__attachClicks += 1;
+              });
+            </script>
+            """
+        )
+        install_chrome_mock_with_resume(
+            page,
+            profile,
+            settings,
+            {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": resume_b64},
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        response = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'ATTACH_RESUME_NOW' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert response["ok"] is True, response
+        assert response["result"]["attached"] == [{"label": "Resume/CV", "filename": "My Resume.pdf"}]
+
+        resume_files = page.evaluate(
+            "() => Array.from(document.getElementById('visibleResume').files).map((file) => file.name)"
+        )
+        assert resume_files == ["My Resume.pdf"]
+        assert page.evaluate("() => window.__resumeFetchCount") == 1
+        # The existing input was used directly; the reveal "Attach" was never clicked.
+        assert page.evaluate("() => window.__attachClicks") == 0
 
         browser.close()

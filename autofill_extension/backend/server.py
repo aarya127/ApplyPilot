@@ -527,7 +527,10 @@ def call_nvidia_auditor(
                     "For narrative textarea/free-text answers, write as the candidate in first person using I/my; "
                     f"never write in third person as {display_name} or he/she/they. "
                     "Never change name, email, phone, address, resume, experience, education, or link fields unless "
-                    "the retrieved profile facts explicitly show the visible value is wrong."
+                    "the retrieved profile facts explicitly show the visible value is wrong. "
+                    "For numeric answers such as years of experience, use only an explicitly stated profile value; "
+                    "never compute or infer a number from availability dates, graduation dates, or other unrelated dates. "
+                    "If no explicit value exists, skip the field rather than inventing a number like 0."
                 ),
             },
             {"role": "user", "content": prompt},
@@ -1466,6 +1469,17 @@ def policy_answer_for_field(
             return None
         return best_available_option(answer, options) or answer
 
+    if is_years_of_experience_question(haystack):
+        answers = profile.get("answers", {})
+        answer = (
+            answers.get("relevantYearsOfExperience")
+            or answers.get("yearsOfExperience")
+            or profile.get("yearsOfExperience")
+        )
+        if answer in (None, ""):
+            return None
+        return best_available_option(str(answer), options) or str(answer)
+
     if is_relocation_own_cost_question(haystack):
         answer = profile.get("answers", {}).get("relocateAtOwnCost") or "Yes"
         return best_available_option(answer, options) or answer
@@ -1553,6 +1567,14 @@ def is_previous_company_question(haystack: str) -> bool:
 
 def is_gpa_question(haystack: str) -> bool:
     return bool(re.search(r"overall result|grade point average|\bgpa\b|\bcgpa\b|academic average", haystack))
+
+
+def is_years_of_experience_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"years? of (relevant |related |professional |work |total )*experience", haystack)
+        or re.search(r"(total|number of|how many).{0,30}years?.{0,20}experience", haystack)
+        or re.search(r"experience.{0,20}in years", haystack)
+    )
 
 
 def is_relocation_own_cost_question(haystack: str) -> bool:
@@ -2444,6 +2466,15 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
                 answer = best_available_option("No", options) or "No"
             else:
                 answer = best_authorization_option(options) or best_available_option(authorization, options) or authorization
+    elif is_years_of_experience_question(haystack):
+        answers = profile.get("answers", {})
+        stated = (
+            answers.get("relevantYearsOfExperience")
+            or answers.get("yearsOfExperience")
+            or profile.get("yearsOfExperience")
+        )
+        if stated not in (None, ""):
+            answer = best_available_option(str(stated), options) or str(stated)
 
     if not answer:
         return None

@@ -129,6 +129,13 @@
       return true;
     }
 
+    if (message?.type === "ATTACH_RESUME_NOW") {
+      attachResumeOnDemand()
+        .then((result) => sendResponse({ ok: true, result }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
+      return true;
+    }
+
     if (message?.type === "GET_PAGE_FIELD_CONTEXT") {
       sendResponse({ ok: true, context: buildPageFieldContext(scanFields()) });
       return false;
@@ -546,6 +553,11 @@
 
   const RESUME_FILE_CONTEXT_PATTERN = /resume|\bcv\b|curriculum vitae/i;
   const NON_RESUME_FILE_CONTEXT_PATTERN = /cover\s*letter|transcript|portfolio|\bother\b/i;
+  // The "Attach" trigger (or "Upload resume") that reveals a hidden file input. Kept
+  // deliberately narrow so it never matches the Dropbox / Google Drive / "Enter manually"
+  // alternatives, which do not open the native file picker we can drive.
+  const RESUME_ATTACH_TRIGGER_TEXT_PATTERN = /^attach$|attach (resume|cv|file)|upload (resume|cv)/i;
+  const RESUME_ATTACH_TRIGGER_SKIP_PATTERN = /dropbox|google\s*drive|enter manually|paste|url/i;
   const NATIVE_RESUME_AUTOFILL_AUTOMATION_ID_PATTERN = /quickapplyupload|autofillwithresume/i;
   const NATIVE_RESUME_AUTOFILL_TEXT_PATTERN = /autofill with resume|apply with resume|upload.*resume.*autofill/i;
 
@@ -608,8 +620,34 @@
     return false;
   }
 
+  // Runs the reveal + attach flow on demand (from the side panel's "Attach résumé"
+  // button), independent of a full autofill run. The extra resumeInputPresent flag lets
+  // the panel tell "no resume field on this page" apart from a backend/reveal failure.
+  async function attachResumeOnDemand() {
+    const result = await attachResumeToResumeInputs();
+
+    return {
+      attached: result.attached,
+      failures: result.failures,
+      resumeInputPresent: findResumeFileInputs().length > 0
+    };
+  }
+
   async function attachResumeToResumeInputs() {
-    const inputs = findResumeFileInputs();
+    let inputs = findResumeFileInputs();
+
+    if (!inputs.length) {
+      // Greenhouse and similar render the Resume/CV field as "Attach / Dropbox / Google
+      // Drive / Enter manually" buttons and only inject the <input type=file> after the
+      // user clicks "Attach". Reveal it (once) so we can attach to it.
+      const reveal = await revealResumeFileInput();
+
+      if (reveal.failure) {
+        return { attached: [], failures: [reveal.failure] };
+      }
+
+      inputs = findResumeFileInputs();
+    }
 
     if (!inputs.length) {
       return { attached: [], failures: [] };
@@ -659,6 +697,98 @@
     return Array.from(document.querySelectorAll("input[type='file']"))
       .filter((input) => !input.disabled)
       .filter(isResumeFileInput);
+  }
+
+  // Greenhouse click-to-reveal: when no resume file input exists yet, find the resume
+  // "Attach" trigger, click it, and poll for the input the click injects. Returns a
+  // failure only when a resume trigger was found but no input appeared (a page without any
+  // resume control just returns an empty object so the caller can no-op silently).
+  async function revealResumeFileInput() {
+    const trigger = findResumeAttachTrigger();
+
+    if (!trigger) {
+      return {};
+    }
+
+    clickOption(trigger);
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 1500) {
+      await sleep(150);
+      if (findResumeFileInputs().length) {
+        return { revealed: true };
+      }
+    }
+
+    return { failure: { label: "Resume/CV", error: "could not open the resume upload control" } };
+  }
+
+  function findResumeAttachTrigger() {
+    const candidates = Array.from(document.querySelectorAll("button, a, label, [role='button']"))
+      .filter(isVisibleElement);
+
+    for (const element of candidates) {
+      const triggerText = compactText(element.innerText || element.textContent || element.value || "");
+
+      if (!RESUME_ATTACH_TRIGGER_TEXT_PATTERN.test(triggerText) || RESUME_ATTACH_TRIGGER_SKIP_PATTERN.test(triggerText)) {
+        continue;
+      }
+
+      if (isResumeContextElement(element)) {
+        return element;
+      }
+    }
+
+    return null;
+  }
+
+  // The trigger's own text plus its field-group/section context decide whether this
+  // "Attach" belongs to the resume field. Own/nearer context wins over farther headings,
+  // so a cover-letter "Attach" is rejected even when a resume heading exists elsewhere.
+  function isResumeContextElement(element) {
+    for (const text of resumeAttachContextTexts(element)) {
+      if (!text) {
+        continue;
+      }
+
+      if (NON_RESUME_FILE_CONTEXT_PATTERN.test(text)) {
+        return false;
+      }
+
+      if (RESUME_FILE_CONTEXT_PATTERN.test(text)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function resumeAttachContextTexts(element) {
+    const [ownText, headingText] = fileInputContextTexts(element);
+    return [ownText, resumeFieldGroupLabel(element), headingText];
+  }
+
+  // Nearest ancestor field group's label/legend text (Greenhouse renders "Resume/CV" as a
+  // sibling label of the Attach button, not a semantic heading precedingHeadingText sees).
+  function resumeFieldGroupLabel(element) {
+    let current = element.parentElement;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 5) {
+      const labelNode = current.querySelector?.("label, legend, [role='heading'], h1, h2, h3, h4, h5, h6, [class*='label' i]");
+
+      if (labelNode && !labelNode.contains(element)) {
+        const text = compactText(labelNode.textContent || "");
+        if (RESUME_FILE_CONTEXT_PATTERN.test(text) || NON_RESUME_FILE_CONTEXT_PATTERN.test(text)) {
+          return text;
+        }
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return "";
   }
 
   function isResumeFileInput(input) {
@@ -2712,6 +2842,13 @@
 
     if (isRelocationOwnCostQuestion(haystack)) {
       return buildMapping(field, profile.answers?.relocateAtOwnCost || "Yes", "rule", 0.88);
+    }
+
+    if (/years? of (relevant |related |professional |work |total )*experience|(total|number of|how many).{0,30}years?.{0,20}experience|experience.{0,20}in years/.test(haystack)) {
+      const years = profile.answers?.relevantYearsOfExperience || profile.answers?.yearsOfExperience || profile.yearsOfExperience;
+      if (hasValue(years)) {
+        return buildMapping(field, String(years), "rule", 0.85);
+      }
     }
 
     if (/(served|service).*(u\.?s\.?|united states).*(military|armed forces)|military service/.test(haystack)) {
