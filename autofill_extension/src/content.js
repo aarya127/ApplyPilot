@@ -872,16 +872,21 @@
       .filter((element) => !isJunkFieldElement(element));
     const choiceGroups = buildChoiceGroups(elements);
     const groupedElements = new Set(choiceGroups.flatMap((group) => group.elements));
+    // Ashby-style segmented Yes/No questions are plain <button> toggles that the
+    // FIELD_SELECTOR scan never captures; detect them as their own choice groups.
+    const buttonChoiceGroups = buildButtonChoiceGroups(groupedElements);
+    const groups = [...choiceGroups, ...buttonChoiceGroups];
+    const groupedAllElements = new Set(groups.flatMap((group) => group.elements));
     const fields = [];
     let index = 0;
 
-    for (const group of choiceGroups) {
+    for (const group of groups) {
       fields.push(buildChoiceGroupMetadata(group, index));
       index += 1;
     }
 
     for (const element of elements) {
-      if (groupedElements.has(element)) {
+      if (groupedAllElements.has(element)) {
         continue;
       }
 
@@ -1045,8 +1050,184 @@
     return Array.from(groups.values()).filter((group) => group.elements.length > 1);
   }
 
+  // Button choice groups (Ashby-style segmented toggles) are clusters of plain
+  // <button>/[role=button] controls that act as a single-select Yes/No (or short
+  // discrete) choice. FIELD_SELECTOR never captures them, so they are detected here.
+  // Deliberately conservative: form-action buttons (submit/next/attach/...), nav/menu/
+  // tab controls, long labels, and duplicate-label clusters are excluded so ordinary
+  // page chrome never becomes a field.
+  const CHOICE_BUTTON_ACTION_PATTERN = /^(submit|next|continue|proceed|back|previous|prev|cancel|close|dismiss|save|save and continue|save & continue|apply|attach|upload|browse|choose file|add|add another|add more|remove|delete|clear|reset|edit|update|search|filter|sort|sign in|signin|log in|login|logout|sign out|register|skip|dropbox|google drive|onedrive|box|enter manually|paste)$/;
+
+  function buildButtonChoiceGroups(excludeElements) {
+    const excluded = excludeElements instanceof Set ? excludeElements : new Set(excludeElements || []);
+    const candidates = Array.from(document.querySelectorAll("button, [role='button']"))
+      .filter((element) => !excluded.has(element))
+      .filter(isVisibleElement)
+      .filter(isChoiceButtonCandidate);
+    const groups = new Map();
+
+    for (const button of candidates) {
+      const container = buttonChoiceContainerFor(button);
+      if (!container) {
+        continue;
+      }
+
+      const key = elementGroupKey(container);
+      const existing = groups.get(key) || { key, container, elements: [], mode: "button" };
+      existing.elements.push(button);
+      groups.set(key, existing);
+    }
+
+    return Array.from(groups.values())
+      .map((group) => ({ ...group, elements: uniqueElements(group.elements) }))
+      .filter(isValidButtonChoiceGroup)
+      .map((group) => tagButtonChoiceGroup(group));
+  }
+
+  function isChoiceButtonCandidate(element) {
+    if (!element || element.disabled) {
+      return false;
+    }
+
+    const tag = element.tagName?.toLowerCase();
+    const type = (element.getAttribute("type") || "").toLowerCase();
+    if (tag === "button" && (type === "submit" || type === "reset")) {
+      return false;
+    }
+
+    // Dropdown/listbox openers and menu/nav/tab controls are not discrete choices.
+    if (element.getAttribute("aria-haspopup")) {
+      return false;
+    }
+
+    if (element.closest("[role='tablist'], [role='menu'], [role='menubar'], [role='toolbar'], nav, header, footer")) {
+      return false;
+    }
+
+    const label = compactText(element.innerText || element.textContent || element.value || element.getAttribute("aria-label") || "");
+    if (!label || label.length > 30) {
+      return false;
+    }
+
+    const normalized = normalize(label);
+    if (!normalized || CHOICE_BUTTON_ACTION_PATTERN.test(normalized)) {
+      return false;
+    }
+
+    return true;
+  }
+
+  // Smallest ancestor that directly clusters 2-5 candidate buttons — the segmented
+  // control wrapper, not the whole form.
+  function buttonChoiceContainerFor(button) {
+    let current = button.parentElement;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 5) {
+      const siblings = Array.from(current.querySelectorAll("button, [role='button']"))
+        .filter(isVisibleElement)
+        .filter(isChoiceButtonCandidate);
+
+      if (siblings.length >= 2 && siblings.length <= 5) {
+        return current;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return null;
+  }
+
+  function isValidButtonChoiceGroup(group) {
+    const buttons = group.elements;
+    if (buttons.length < 2 || buttons.length > 5) {
+      return false;
+    }
+
+    const labels = buttons.map((button) => compactText(button.innerText || button.textContent || button.value || button.getAttribute("aria-label") || ""));
+    if (labels.some((label) => !label || label.length > 30)) {
+      return false;
+    }
+
+    const normalizedLabels = labels.map(normalize);
+    // Real choice sets have distinct options; duplicate labels usually mean two separate
+    // questions got merged into one container, or these aren't options at all.
+    if (new Set(normalizedLabels).size !== normalizedLabels.length) {
+      return false;
+    }
+
+    const looksYesNo = normalizedLabels.some((label) => /^(yes|y)$/.test(label))
+      && normalizedLabels.some((label) => /^(no|n)$/.test(label));
+    const shortDiscrete = buttons.length <= 4 && labels.every((label) => label.length <= 24);
+    if (!looksYesNo && !shortDiscrete) {
+      return false;
+    }
+
+    // Only accept groups anchored to a form field: inside a <form>, or with a nearby
+    // required/question label. Keeps stray button clusters (page chrome) out.
+    const container = group.container;
+    const options = labels.map((label) => ({ label, value: label }));
+    const question = choiceGroupLabel(container, options)
+      || parentQuestionLabel(buttons[0], options)
+      || precedingQuestionLabel(buttons[0], options);
+    const fieldGroupText = compactText(buttonChoiceFieldGroup(group)?.innerText || "");
+    const inForm = Boolean(container.closest("form"));
+    const nearRequired = /\*/.test(fieldGroupText) || /\brequired\b/i.test(fieldGroupText) || Boolean(question);
+
+    return inForm || nearRequired;
+  }
+
+  // Enclosing field group of a button choice cluster: widen from the button wrapper up to
+  // the first ancestor carrying a question label/legend, but stop before the scope pulls
+  // in other inputs or another button group (so a neighbouring field's required marker
+  // never bleeds in).
+  function buttonChoiceFieldGroup(group) {
+    let current = group.container;
+    let depth = 0;
+
+    while (current && current !== document.body && depth < 5) {
+      const inputCount = current.querySelectorAll("input:not([type='hidden']), textarea, select").length;
+      const buttonCount = Array.from(current.querySelectorAll("button, [role='button']"))
+        .filter(isChoiceButtonCandidate).length;
+
+      if (inputCount > 0 || buttonCount > group.elements.length) {
+        break;
+      }
+
+      if (current.querySelector("label, legend, [role='heading'], h1, h2, h3, h4, h5, h6")) {
+        return current;
+      }
+
+      current = current.parentElement;
+      depth += 1;
+    }
+
+    return group.container;
+  }
+
+  function buttonChoiceRequired(group, labelText, fieldGroupText) {
+    const attrRequired = group.elements.some((element) => element.getAttribute("aria-required") === "true")
+      || group.container?.getAttribute?.("aria-required") === "true";
+    const context = compactText([labelText, fieldGroupText].join(" "));
+    return attrRequired || /\*/.test(context) || /\brequired\b/i.test(context);
+  }
+
+  function tagButtonChoiceGroup(group) {
+    if (group.container) {
+      group.container.dataset.applicationAutofillButtonChoice = "1";
+    }
+
+    for (const button of group.elements) {
+      button.dataset.applicationAutofillChoiceButton = "1";
+    }
+
+    return group;
+  }
+
   function buildChoiceGroupMetadata(group, index) {
     const first = group.elements[0];
+    const isButtonGroup = group.mode === "button";
     const options = group.elements.map((element) => ({
       label: choiceLabel(element),
       value: choiceValue(element)
@@ -1057,11 +1238,15 @@
     const label = isLowInformationText(initialLabel)
       ? parentQuestionLabel(first, options) || precedingQuestionLabel(first, options) || questionText || firstPolicyQuestionLine(nearbyText) || initialLabel
       : initialLabel;
+    // Button toggles carry no <label>/legend/innerText of their own worth using as the
+    // group's surrounding context, so pull the enclosing field group's text instead.
+    const fieldGroupText = isButtonGroup ? compactText(buttonChoiceFieldGroup(group)?.innerText || "") : "";
 
     return {
       index,
       tag: "choice-group",
-      type: group.mode,
+      // Single-select button toggles behave like a radio group for fill/verify routing.
+      type: isButtonGroup ? "radio" : group.mode,
       name: first.getAttribute("name") || "",
       id: first.id || "",
       label: capFieldLabel(label),
@@ -1069,15 +1254,21 @@
       ariaLabel: group.container?.getAttribute?.("aria-label") || first.getAttribute("aria-label") || "",
       autocomplete: "",
       // A choice group is required when any member input is required or the group
-      // label/question carries a required marker (e.g. a trailing asterisk).
-      required: group.elements.some((element) => isRequiredElement(element, [label, questionText].filter(Boolean).join(" "))),
+      // label/question carries a required marker (e.g. a trailing asterisk). Button
+      // toggles have no `required`/`aria-required`, so they read it from the question.
+      required: isButtonGroup
+        ? buttonChoiceRequired(group, [label, questionText].filter(Boolean).join(" "), fieldGroupText)
+        : group.elements.some((element) => isRequiredElement(element, [label, questionText].filter(Boolean).join(" "))),
       value: "",
       options,
-      surroundingText: compactText(group.container?.innerText || ""),
+      surroundingText: isButtonGroup ? fieldGroupText : compactText(group.container?.innerText || ""),
       questionText,
       nearbyText,
       answerKey: "",
-      elementRef: new WeakRef(first),
+      // For button groups the members are not fillable on their own (isFillable rejects
+      // type=button), so anchor the field to the container div, which fillChoiceGroup /
+      // getCurrentValue resolve back to the tagged option buttons.
+      elementRef: new WeakRef(isButtonGroup ? group.container : first),
       choiceRefs: group.elements.map((element) => new WeakRef(element))
     };
   }
@@ -4801,6 +4992,23 @@
     };
   }
 
+  function isTypedLocationLikeField(field) {
+    // A text-typeable combobox (not a fixed listbox/button) whose identity reads
+    // as a location/city/region field — safe to fill by typing + selecting.
+    const identity = normalize([field.label, field.placeholder, field.name, field.id, field.ariaLabel].join(" "));
+    if (!/\blocation\b|\bcity\b|\bstate\b|\bprovince\b|\bregion\b|town|municipality|where.*(live|located|based)/.test(identity)) {
+      return false;
+    }
+
+    if (/phone|country code|country.*phone/.test(identity)) {
+      return false;
+    }
+
+    const typeable = field.tag !== "button"
+      && (field.type === "combobox" || field.tag === "input" || /list|both/i.test(field.ariaAutocomplete || ""));
+    return typeable;
+  }
+
   function canAttemptUnoptionedOptionLikeMapping(field, value, source = "") {
     const haystack = fullFieldHaystack(field);
     const normalizedValue = normalize(value);
@@ -4810,6 +5018,13 @@
     }
 
     if (isGreenhouseTypedDropdownFallbackField(field) && hasValue(value)) {
+      return true;
+    }
+
+    // Location/city typeaheads (Ashby, Lever, etc.) reveal no options until the
+    // user types, so they arrive here with no discovered options. fillCombobox
+    // can still type the value and pick the matching suggestion, so allow it.
+    if (isTypedLocationLikeField(field) && hasValue(value)) {
       return true;
     }
 
@@ -5018,7 +5233,7 @@
     if (field.choiceRefs?.length) {
       return (field.choiceRefs || [])
         .map((ref) => ref.deref?.())
-        .filter((choice) => choice && (choice.checked || choice.getAttribute?.("aria-checked") === "true"))
+        .filter((choice) => choice && isChoiceSelected(choice))
         .map((choice) => choiceLabel(choice) || choiceValue(choice))
         .filter(Boolean)
         .join("; ");
@@ -5376,7 +5591,7 @@
         : String(mapping.value).split(/\s*[;,]\s*/).filter(Boolean);
       return choices.some((choice) => (
         values.some((item) => optionMatches(choiceLabel(choice), choiceValue(choice), item))
-        && (choice.checked || choice.getAttribute?.("aria-checked") === "true")
+        && isChoiceSelected(choice)
       ));
     }
 
@@ -5387,12 +5602,61 @@
     return isChecked === shouldCheck;
   }
 
+  // Unified "is this option currently chosen" test across radio inputs, ARIA
+  // radio/checkbox widgets, and plain button toggles. Inputs and ARIA controls keep the
+  // original checked/aria-checked semantics; the button-only cues (aria-pressed, selected
+  // classes, data-state) apply solely to button-style toggles so existing radio/checkbox
+  // groups are unaffected.
+  function isChoiceSelected(element) {
+    if (!element) {
+      return false;
+    }
+
+    if (element.checked === true) {
+      return true;
+    }
+
+    if (element.getAttribute?.("aria-checked") === "true") {
+      return true;
+    }
+
+    if (isButtonChoiceElement(element)) {
+      if (element.getAttribute("aria-pressed") === "true"
+        || element.getAttribute("aria-selected") === "true"
+        || element.getAttribute("aria-current") === "true") {
+        return true;
+      }
+
+      const dataState = (element.getAttribute("data-state") || "").toLowerCase();
+      if (["checked", "on", "active", "selected", "true"].includes(dataState)) {
+        return true;
+      }
+
+      const className = (element.getAttribute("class") || "").toLowerCase();
+      if (/(^|[\s_-])(selected|active|checked|is-selected|is-active|is-checked|pressed)([\s_-]|$)/.test(className)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function isButtonChoiceElement(element) {
+    if (!element) {
+      return false;
+    }
+
+    const tag = element.tagName?.toLowerCase();
+    const role = (element.getAttribute?.("role") || "").toLowerCase();
+    return tag === "button" || role === "button" || Boolean(element.dataset?.applicationAutofillChoiceButton);
+  }
+
   function isRadioGroupInDesiredState(element, mapping, field) {
     const choices = (field.choiceRefs || []).map((ref) => ref.deref?.()).filter(Boolean);
     if (choices.length) {
       return choices.some((choice) => (
         optionMatches(choiceLabel(choice), choiceValue(choice), mapping.value)
-        && (choice.checked || choice.getAttribute?.("aria-checked") === "true")
+        && isChoiceSelected(choice)
       ));
     }
 
@@ -5536,6 +5800,12 @@
           clickOption(choice);
         }
         choice.checked = true;
+      } else {
+        // Plain clickable toggle (Ashby-style segmented Yes/No). Click only when it is
+        // not already selected so an already-answered group is left untouched.
+        if (!isChoiceSelected(choice)) {
+          clickOption(choice);
+        }
       }
 
       dispatchFormEvents(choice);
@@ -6656,6 +6926,14 @@
   }
 
   function getCurrentValue(element) {
+    // A button choice group is anchored to its container; report the selected option
+    // button's label so verification and page-context read the real answer.
+    if (element?.dataset?.applicationAutofillButtonChoice) {
+      const selected = Array.from(element.querySelectorAll("[data-application-autofill-choice-button]"))
+        .find(isChoiceSelected);
+      return selected ? compactText(choiceLabel(selected) || choiceValue(selected)) : "";
+    }
+
     if (element.getAttribute("role") === "checkbox") {
       return element.getAttribute("aria-checked") || "";
     }

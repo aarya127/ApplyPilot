@@ -4277,6 +4277,117 @@ def test_content_script_fills_greenhouse_work_authorization_react_select_with_pr
 
 
 @pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_ashby_location_typeahead_from_profile():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Test",
+        "lastName": "Candidate",
+        "usaLocation": "Chicago, IL",
+        "usaCity": "Chicago",
+        "addresses": {"usa": {"city": "Chicago", "state": "IL", "country": "United States"}},
+        "answers": {"usaLocation": "Chicago, IL"},
+        "demographics": {},
+    }
+    settings = {
+        "autoFillDynamicFields": True,
+        "autoFillSensitiveFields": False,
+        "autoMapAmbiguousFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    # Ashby renders Location as a combobox whose option menu is empty until the
+    # user types — the suggestions come from a geo API keyed on the typed text.
+    # Previously the field arrived with no discovered options, buildMapping
+    # nulled the rule-computed "Chicago, IL", and it was never filled.
+    html = """
+      <form>
+        <label for="location">Location*</label>
+        <div class="ashby-select">
+          <input id="location" role="combobox" aria-autocomplete="list" aria-expanded="false"
+                 autocomplete="off" type="text" value="" placeholder="Start typing...">
+          <div id="menu"></div>
+        </div>
+      </form>
+      <script>
+        const input = document.getElementById('location');
+        const menu = document.getElementById('menu');
+        function render() {
+          menu.innerHTML = '';
+          const typed = input.value.trim().toLowerCase();
+          if (!typed) { input.setAttribute('aria-expanded', 'false'); return; }
+          // Suggestions appear only once text is typed.
+          ['Chicago, IL, USA', 'Chicago Heights, IL, USA'].filter((label) =>
+            label.toLowerCase().includes(typed.split(',')[0])
+          ).forEach((label) => {
+            const option = document.createElement('div');
+            option.setAttribute('role', 'option');
+            option.textContent = label;
+            option.addEventListener('click', () => {
+              input.value = label;
+              input.setAttribute('data-selected', label);
+              menu.innerHTML = '';
+              input.setAttribute('aria-expanded', 'false');
+            });
+            menu.appendChild(option);
+          });
+          input.setAttribute('aria-expanded', 'true');
+        }
+        input.addEventListener('input', render);
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.route("https://jobs.ashbyhq.com/**", lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto("https://jobs.ashbyhq.com/notion/abc/application")
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{ local: {{ get: async () => ({{ candidateProfile: profile, settings }}) }} }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True
+        mappings = preview["result"]["mappings"]
+        location = next((m for m in mappings if m["label"].lower().startswith("location")), None)
+        assert location is not None, mappings
+        assert "chicago" in location["value"].lower()
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            mappings,
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert "chicago" in page.locator("#location").input_value().lower()
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
 def test_content_script_reports_unfilled_mapped_fields_as_failures():
     from playwright.sync_api import sync_playwright
 
@@ -5255,5 +5366,306 @@ def test_attach_resume_now_uses_existing_visible_input_without_reveal():
         assert page.evaluate("() => window.__resumeFetchCount") == 1
         # The existing input was used directly; the reveal "Attach" was never clicked.
         assert page.evaluate("() => window.__attachClicks") == 0
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_fills_ashby_button_yes_no_choice_groups():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "email": "sample@example.com",
+        "phone": "5550100000",
+        "needsSponsorship": "No",
+        "answers": {"sponsorship": "No"},
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "autoMapAmbiguousFields": False,
+        "requireReviewBeforeSubmit": True,
+        "targetCountry": "usa",
+    }
+
+    # Ashby renders required Yes/No questions as a pair of clickable <button> toggles
+    # (no radios, no <select>). Selection is expressed with aria-pressed.
+    html = """
+      <form>
+        <div class="ashby-field">
+          <label class="ashby-label">Will you now or in the future require Notion to sponsor an immigration case in order to employ you? <span class="req">*</span></label>
+          <div class="segmented">
+            <button type="button" id="sponsorYes">Yes</button>
+            <button type="button" id="sponsorNo">No</button>
+          </div>
+        </div>
+        <div class="ashby-field">
+          <label class="ashby-label">Are you able to commit to working from one of our offices on Anchor Days each week? <span class="req">*</span></label>
+          <div class="segmented">
+            <button type="button" id="anchorYes">Yes</button>
+            <button type="button" id="anchorNo">No</button>
+          </div>
+        </div>
+      </form>
+      <script>
+        document.querySelectorAll('.segmented').forEach((group) => {
+          group.querySelectorAll('button').forEach((btn) => {
+            btn.addEventListener('click', () => {
+              btn.dataset.clicks = String((+(btn.dataset.clicks || 0)) + 1);
+              group.querySelectorAll('button').forEach((b) => {
+                b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+              });
+            });
+          });
+        });
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.route("https://jobs.ashbyhq.com/**", lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto("https://jobs.ashbyhq.com/notion/abc/application")
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{ local: {{ get: async () => ({{ candidateProfile: profile, settings }}) }} }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True, preview
+        mappings = preview["result"]["mappings"]
+        sponsor = next((m for m in mappings if "sponsor" in m["label"].lower()), None)
+        assert sponsor is not None, mappings
+        assert sponsor["value"] == "No", sponsor
+
+        # Both button groups are scanned: sponsorship gets a rule mapping, the Anchor Days
+        # office question surfaces on the askable (unmapped required) list.
+        askable_labels = [f["label"].lower() for f in preview["result"]["unmappedFields"]]
+        all_labels = [m["label"].lower() for m in mappings] + askable_labels
+        assert any("anchor days" in label for label in all_labels), preview["result"]
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            mappings,
+        )
+        assert fill_response["ok"] is True, fill_response
+
+        # Clicking selected "No" and left the group's selection correct.
+        assert page.locator("#sponsorNo").get_attribute("aria-pressed") == "true"
+        assert page.locator("#sponsorYes").get_attribute("aria-pressed") != "true"
+
+        sponsor_failures = [f for f in fill_response["result"]["failures"] if "sponsor" in (f.get("label") or "").lower()]
+        assert sponsor_failures == [], fill_response["result"]["failures"]
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_button_choice_detection_ignores_action_buttons():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "email": "sample@example.com",
+        "needsSponsorship": "No",
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "autoMapAmbiguousFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    # Action buttons (Submit/Next/Attach/Add another) live alongside a real radio group.
+    # None of the action buttons should be scanned as a choice field, and the radio group
+    # must still map + fill exactly as before.
+    html = """
+      <form>
+        <div class="toolbar">
+          <button type="button">Add another</button>
+          <button type="button">Attach</button>
+        </div>
+        <fieldset>
+          <legend>Will you now or in the future require employer sponsorship to work in the country for which you are applying? *</legend>
+          <label><input type="radio" name="sponsor" value="Yes" required>Yes</label>
+          <label><input type="radio" name="sponsor" value="No">No</label>
+        </fieldset>
+        <div class="actions">
+          <button type="button">Back</button>
+          <button type="button">Next</button>
+          <button type="submit">Submit</button>
+        </div>
+      </form>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(html)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{ local: {{ get: async () => ({{ candidateProfile: profile, settings }}) }} }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True, preview
+
+        # No field's options were built out of the action buttons.
+        action_words = {"submit", "next", "back", "attach", "add another"}
+        for field in preview["result"]["debugFields"]:
+            option_texts = {str(o.get("label", "")).lower() for o in (field.get("options") or [])}
+            assert not (option_texts & action_words), field
+
+        # The real radio group still maps to No.
+        mappings = preview["result"]["mappings"]
+        sponsor = next((m for m in mappings if "sponsor" in m["label"].lower()), None)
+        assert sponsor is not None, mappings
+        assert sponsor["value"] == "No", sponsor
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            mappings,
+        )
+        assert fill_response["ok"] is True, fill_response
+        assert page.locator("[name='sponsor'][value='No']").is_checked()
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_button_choice_group_already_answered_is_not_reclicked():
+    from playwright.sync_api import sync_playwright
+
+    content_script_path = ROOT / "autofill_extension/src/content.js"
+    profile = {
+        "firstName": "Sample",
+        "lastName": "Candidate",
+        "email": "sample@example.com",
+        "workAuthorization": "Yes",
+    }
+    settings = {
+        "autoFillDynamicFields": False,
+        "autoFillSensitiveFields": True,
+        "autoMapAmbiguousFields": False,
+        "requireReviewBeforeSubmit": True,
+    }
+
+    # "Yes" is already selected (aria-pressed) before autofill runs.
+    html = """
+      <form>
+        <div class="ashby-field">
+          <label class="ashby-label">Are you legally authorized to work in the United States? <span class="req">*</span></label>
+          <div class="segmented">
+            <button type="button" id="authYes" aria-pressed="true">Yes</button>
+            <button type="button" id="authNo" aria-pressed="false">No</button>
+          </div>
+        </div>
+      </form>
+      <script>
+        document.querySelectorAll('.segmented button').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            btn.dataset.clicks = String((+(btn.dataset.clicks || 0)) + 1);
+          });
+        });
+      </script>
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content(html)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.__autofillListener = null;
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{ local: {{ get: async () => ({{ candidateProfile: profile, settings }}) }} }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(content_script_path))
+
+        preview = page.evaluate(
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })"""
+        )
+        assert preview["ok"] is True, preview
+
+        # getCurrentValue reads the already-selected button, so page context sees it answered.
+        context = preview["result"]["page"]["context"]
+        entry = next((c for c in context if "authorized to work" in c["label"].lower()), None)
+        assert entry is not None, context
+        assert entry["answered"] is True, entry
+        assert entry["currentValue"] == "Yes", entry
+
+        fill_response = page.evaluate(
+            """(mappings) => new Promise((resolve) => {
+              window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, (response) => resolve(response));
+            })""",
+            preview["result"]["mappings"],
+        )
+        assert fill_response["ok"] is True, fill_response
+
+        # Already-correct group: still selected, and the button was never re-clicked.
+        assert page.locator("#authYes").get_attribute("aria-pressed") == "true"
+        assert page.locator("#authYes").get_attribute("data-clicks") in (None, "0")
+        assert page.locator("#authNo").get_attribute("aria-pressed") != "true"
 
         browser.close()
