@@ -695,7 +695,7 @@ function isAiAskableField(field) {
   }
 
   const label = String(field.label || "").trim().toLowerCase();
-  if (!label || /^(english|settings|phone extension)$/i.test(label)) {
+  if (!label || /^(english|settings|phone extension|clear selections?|clear|remove)$/i.test(label)) {
     return false;
   }
 
@@ -749,7 +749,7 @@ function isLowInformationText(value) {
 }
 
 function isPlaceholderValue(value) {
-  return /^(select one|select|choose|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
+  return /^(select( one| an option)?\s*(\.{1,3}|…)?|please select|choose( one)?|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
 }
 
 function isAiPolicyQuestion(haystack) {

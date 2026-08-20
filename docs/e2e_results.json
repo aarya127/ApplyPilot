@@ -6,7 +6,7 @@
         "AGENT: I can help fill this application step by step. Is this role in the USA or Canada?",
         "AGENT: Choose a country first, then preview. I will stop before final submission.",
         "AGENT: Building a review plan...",
-        "AGENT: I scanned 38 field(s) and mapped 21 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
+        "AGENT: I scanned 28 field(s) and mapped 15 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
         "AGENT: Skipped 3 optional field(s); only required fields and contact basics are filled.",
         "AGENT: Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request."
       ],
@@ -32,12 +32,6 @@
             "section": "Ready to fill",
             "label": "Email Email*",
             "value": "a268shah@uwaterloo.ca (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Country*",
-            "value": "+1 (rule, 88%)",
             "checked": true
           },
           {
@@ -78,32 +72,8 @@
           },
           {
             "section": "Ready to fill",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "https://www.linkedin.com/in/AaryaShah127 (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
             "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*",
             "value": "No (rule, 90%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*Select...",
-            "value": "No (rule, 90%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "https://www.linkedin.com/in/AaryaShah127 (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "School",
-            "value": "University of Waterloo (education, 92%)",
             "checked": true
           },
           {
@@ -115,7 +85,7 @@
           {
             "section": "Ready to fill",
             "label": "Discipline",
-            "value": "Statistics (education, 92%)",
+            "value": "Statistics & Decision Theory (education, 92%)",
             "checked": true
           },
           {
@@ -132,14 +102,8 @@
           },
           {
             "section": "Ready to fill",
-            "label": "What is your preferred work location?*",
-            "value": "Open to All (llm, 70%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "How did you learn about this position*",
-            "value": "Campus Job Posting/Board (llm, 70%)",
+            "label": "School",
+            "value": "Aarhus University (llm, 70%)",
             "checked": true
           },
           {
@@ -162,14 +126,14 @@
           },
           {
             "section": "I need your answer",
-            "label": "What is your preferred work location?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
+            "label": "What is your preferred work location?*",
+            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
             "section": "I need your answer",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
+            "label": "How did you learn about this position*",
+            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
@@ -180,31 +144,13 @@
           },
           {
             "section": "I need your answer",
-            "label": "Have you previously applied to work at Point72?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "Are you legally authorized to work in the United States?*",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
             "section": "I need your answer",
-            "label": "Are you legally authorized to work in the United States?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*",
-            "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*Select...",
             "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
             "checked": null
           },
@@ -216,20 +162,8 @@
           },
           {
             "section": "I need your answer",
-            "label": "Have you served in the military?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "In which language(s) are you fluent (written) other than English?*",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "In which language(s) are you fluent (written) other than English?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
             "checked": null
           },
           {
@@ -240,20 +174,8 @@
           },
           {
             "section": "I need your answer",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "In which language(s) are you fluent (spoken) other than English?*",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "In which language(s) are you fluent (spoken) other than English?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
             "checked": null
           }
         ]
@@ -495,13 +417,13 @@
         "AGENT: I can help fill this application step by step. Is this role in the USA or Canada?",
         "AGENT: Choose a country first, then preview. I will stop before final submission.",
         "AGENT: Building a review plan...",
-        "AGENT: I scanned 38 field(s) and mapped 21 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
+        "AGENT: I scanned 28 field(s) and mapped 15 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
         "AGENT: Skipped 3 optional field(s); only required fields and contact basics are filled.",
         "AGENT: Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request.",
         "AGENT: Filling the selected reviewed fields...",
-        "AGENT: Filled 22 selected field(s). Please review the page before submitting.",
+        "AGENT: Filled 16 selected field(s). Please review the page before submitting.",
         "AGENT: Attached Aarya_Resume.pdf to the Resume/CV upload field.",
-        "AGENT: Verification found 3 field(s) whose page value does not match the intended answer. Check the Verification section below."
+        "AGENT: Verification found 1 field(s) whose page value does not match the intended answer. Check the Verification section below."
       ],
       "review": {
         "status": "Filled",
@@ -525,12 +447,6 @@
             "section": "Ready to fill",
             "label": "Email Email*",
             "value": "a268shah@uwaterloo.ca (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Country*",
-            "value": "+1 (rule, 88%)",
             "checked": true
           },
           {
@@ -571,32 +487,8 @@
           },
           {
             "section": "Ready to fill",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "https://www.linkedin.com/in/AaryaShah127 (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
             "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*",
             "value": "No (rule, 90%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*Select...",
-            "value": "No (rule, 90%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "https://www.linkedin.com/in/AaryaShah127 (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "School",
-            "value": "University of Waterloo (education, 92%)",
             "checked": true
           },
           {
@@ -608,7 +500,7 @@
           {
             "section": "Ready to fill",
             "label": "Discipline",
-            "value": "Statistics (education, 92%)",
+            "value": "Statistics & Decision Theory (education, 92%)",
             "checked": true
           },
           {
@@ -625,14 +517,8 @@
           },
           {
             "section": "Ready to fill",
-            "label": "What is your preferred work location?*",
-            "value": "Open to All (llm, 70%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "How did you learn about this position*",
-            "value": "Campus Job Posting/Board (llm, 70%)",
+            "label": "School",
+            "value": "Aarhus University (llm, 70%)",
             "checked": true
           },
           {
@@ -655,14 +541,14 @@
           },
           {
             "section": "I need your answer",
-            "label": "What is your preferred work location?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
+            "label": "What is your preferred work location?*",
+            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
             "section": "I need your answer",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
+            "label": "How did you learn about this position*",
+            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
@@ -673,31 +559,13 @@
           },
           {
             "section": "I need your answer",
-            "label": "Have you previously applied to work at Point72?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "Are you legally authorized to work in the United States?*",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
             "section": "I need your answer",
-            "label": "Are you legally authorized to work in the United States?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*",
-            "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*Select...",
             "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
             "checked": null
           },
@@ -709,20 +577,8 @@
           },
           {
             "section": "I need your answer",
-            "label": "Have you served in the military?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "In which language(s) are you fluent (written) other than English?*",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "In which language(s) are you fluent (written) other than English?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
             "checked": null
           },
           {
@@ -733,38 +589,14 @@
           },
           {
             "section": "I need your answer",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "Required. Autofill has a rule, but this policy question is also available for AI review.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "In which language(s) are you fluent (spoken) other than English?*",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
           {
-            "section": "I need your answer",
-            "label": "In which language(s) are you fluent (spoken) other than English?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
             "section": "Verification",
-            "label": "15 field(s) verified on the page",
-            "value": "3 mismatch(es), 3 unreadable field(s)",
-            "checked": null
-          },
-          {
-            "section": "Verification",
-            "label": "Phone Phone*",
-            "value": "Expected \"647-767-8243\" but the page shows \"(647) 767-8243\".",
-            "checked": null
-          },
-          {
-            "section": "Verification",
-            "label": "LinkedIn ProfileWebsiteCurrent CompanyYears of Work Experience*Current TitleWhat is your preferred work location?*Select...How did you learn about this position*Select...Have you previously applied to work at Point72?*Select...Are you legally authorized to work in the United States?*Select...Will yo",
-            "value": "Expected \"https://www.linkedin.com/in/AaryaShah127\" but the page shows \"(empty)\".",
+            "label": "14 field(s) verified on the page",
+            "value": "1 mismatch(es)",
             "checked": null
           },
           {
@@ -815,7 +647,7 @@
         {
           "label": "School",
           "kind": "input:text",
-          "value": "University of Waterloo",
+          "value": "Aarhus University",
           "required": false
         },
         {
@@ -863,23 +695,23 @@
         {
           "label": "What is your preferred work location?*",
           "kind": "input:text",
-          "value": "Open to All",
-          "required": true
-        },
-        {
-          "label": "How did you learn about this position*",
-          "kind": "input:text",
-          "value": "Campus Job Posting/Board",
-          "required": true
-        },
-        {
-          "label": "Have you previously applied to work at Point72?*",
-          "kind": "input:text",
           "value": "",
           "required": true
         },
         {
           "label": "LinkedIn Profile",
+          "kind": "input:text",
+          "value": "",
+          "required": true
+        },
+        {
+          "label": "How did you learn about this position*",
+          "kind": "input:text",
+          "value": "",
+          "required": true
+        },
+        {
+          "label": "Have you previously applied to work at Point72?*",
           "kind": "input:text",
           "value": "",
           "required": true
@@ -1000,37 +832,30 @@
         "AGENT: I can help fill this application step by step. Is this role in the USA or Canada?",
         "AGENT: Choose a country first, then preview. I will stop before final submission.",
         "AGENT: Building a review plan...",
-        "AGENT: I scanned 38 field(s) and mapped 21 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
+        "AGENT: I scanned 28 field(s) and mapped 15 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
         "AGENT: Skipped 3 optional field(s); only required fields and contact basics are filled.",
         "AGENT: Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request.",
         "AGENT: Filling the selected reviewed fields...",
-        "AGENT: Filled 22 selected field(s). Please review the page before submitting.",
+        "AGENT: Filled 16 selected field(s). Please review the page before submitting.",
         "AGENT: Attached Aarya_Resume.pdf to the Resume/CV upload field.",
-        "AGENT: Verification found 3 field(s) whose page value does not match the intended answer. Check the Verification section below.",
-        "AGENT: I scanned 39 field(s) and mapped 4 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
+        "AGENT: Verification found 1 field(s) whose page value does not match the intended answer. Check the Verification section below.",
+        "AGENT: I scanned 27 field(s) and mapped 1 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
         "AGENT: Skipped 3 optional field(s); only required fields and contact basics are filled.",
         "AGENT: Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request.",
-        "AGENT: Running one AI check on 26 required field(s)...",
-        "AGENT: AI corrections: 5 required field(s) to fix or fill.",
-        "AGENT: Audit protocol: 26 required field(s) checked, 5 correction(s), 0 fill(s), 18 skipped as unsafe.",
-        "AGENT: Asking AI for 7 unanswered required/askable field(s), one at a time...",
-        "AGENT: I scanned 39 field(s) and mapped 13 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
+        "AGENT: Running one AI check on 17 required field(s)...",
+        "AGENT: AI corrections: 2 required field(s) to fix or fill.",
+        "AGENT: Audit protocol: 17 required field(s) checked, 2 correction(s), 0 fill(s), 12 skipped as unsafe.",
+        "AGENT: Asking AI for 3 unanswered required/askable field(s), one at a time...",
+        "AGENT: I scanned 27 field(s) and mapped 6 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
         "AGENT: Skipped 3 optional field(s); only required fields and contact basics are filled.",
         "AGENT: Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request.",
-        "AGENT: Audited, added, and filled 8 answer(s). Please review them before continuing.",
-        "AGENT: I scanned 39 field(s) and mapped 11 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
+        "AGENT: Audited, added, and filled 7 answer(s). Please review them before continuing.",
+        "AGENT: I scanned 27 field(s) and mapped 2 across 4/4 accessible frame(s). Review the checked cards, then fill selected.",
         "AGENT: Skipped 3 optional field(s); only required fields and contact basics are filled.",
         "AGENT: Some questions are not in your profile yet. You can answer them below, or click Ask AI to answer all visible missing fields in one request.",
-        "AGENT: Verification found 2 field(s) whose page value does not match the intended answer. Check the Verification section below.",
-        "AGENT: Still unresolved required field(s): 17.",
-        "AGENT: First Name First Name*: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: Last Name Last Name*: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: Email Email*: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: Country*: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: Years of Work Experience Years of Work Experience*: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: Current Title: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: What is your preferred work location?*: Required field was not filled by autofill. Ask AI or add a saved answer.",
-        "AGENT: How did you learn about this position*: Required field was not filled by autofill. Ask AI or add a saved answer."
+        "AGENT: Still unresolved required field(s): 2.",
+        "AGENT: In which language(s) are you fluent (written) other than English?*: Required field was not filled by autofill. Ask AI or add a saved answer.",
+        "AGENT: In which language(s) are you fluent (spoken) other than English?*: Required field was not filled by autofill. Ask AI or add a saved answer."
       ],
       "review": {
         "status": "Preview ready",
@@ -1040,68 +865,14 @@
         "cards": [
           {
             "section": "Ready to fill",
-            "label": "Phone Phone*",
-            "value": "647-767-8243 (rule, 92%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (saved-answer, 95%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
             "label": "Certifications ASAFSACACAIACFACIACPAEsq.Other",
             "value": "Other (llm, 70%)",
             "checked": true
           },
           {
             "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (llm, 70%)",
-            "checked": true
-          },
-          {
-            "section": "Ready to fill",
-            "label": "Clear selections",
-            "value": "Clear selections (llm, 70%)",
+            "label": "What is your preferred work location?*",
+            "value": "Open to All (llm, 70%)",
             "checked": true
           },
           {
@@ -1112,133 +883,7 @@
           },
           {
             "section": "I need your answer",
-            "label": "Clear selections",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "First Name First Name*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Last Name Last Name*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Email Email*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Country*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "School",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Degree",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Discipline",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "LinkedIn Profile",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Website",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Current Company",
-            "value": "No saved profile value or safe rule matched this field.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Years of Work Experience Years of Work Experience*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Current Title",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "What is your preferred work location?*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "How did you learn about this position*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Have you previously applied to work at Point72?*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Are you legally authorized to work in the United States?*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Will you now or in the future require sponsorship for employment visa status (e.g. H1B visa status)?*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Have you served in the military?*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
             "label": "In which language(s) are you fluent (written) other than English?*",
-            "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "In which language(s) are you fluent (written) other than English?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
-            "section": "I need your answer",
-            "label": "Privacy *",
             "value": "Required. Required field was not filled by autofill. Ask AI or add a saved answer.",
             "checked": null
           },
@@ -1249,27 +894,9 @@
             "checked": null
           },
           {
-            "section": "I need your answer",
-            "label": "In which language(s) are you fluent (spoken) other than English?*Select...",
-            "value": "Required. Dropdown options were not discoverable, so neither autofill nor AI can safely choose an option yet.",
-            "checked": null
-          },
-          {
             "section": "Verification",
             "label": "5 field(s) verified on the page",
-            "value": "2 mismatch(es), 1 unreadable field(s)",
-            "checked": null
-          },
-          {
-            "section": "Verification",
-            "label": "Clear selections",
-            "value": "Expected \"Clear selections\" but the page shows \"(empty)\".",
-            "checked": null
-          },
-          {
-            "section": "Verification",
-            "label": "Clear selections",
-            "value": "Expected \"Clear selections\" but the page shows \"(empty)\".",
+            "value": "",
             "checked": null
           }
         ]
@@ -1362,13 +989,19 @@
         {
           "label": "What is your preferred work location?*",
           "kind": "input:text",
-          "value": "Open to All",
+          "value": "",
+          "required": true
+        },
+        {
+          "label": "LinkedIn Profile",
+          "kind": "input:text",
+          "value": "",
           "required": true
         },
         {
           "label": "How did you learn about this position*",
           "kind": "input:text",
-          "value": "Campus Information Session",
+          "value": "Campus Job Posting/Board",
           "required": true
         },
         {
@@ -1397,12 +1030,6 @@
         },
         {
           "label": "In which language(s) are you fluent (written) other than English?*",
-          "kind": "input:text",
-          "value": "",
-          "required": true
-        },
-        {
-          "label": "LinkedIn Profile",
           "kind": "input:text",
           "value": "",
           "required": true

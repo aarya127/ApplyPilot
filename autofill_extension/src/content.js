@@ -174,6 +174,9 @@
     const unmappedFields = plan.fields
       .filter(isTargetField)
       .filter((field) => !mappedIndexes.has(field.index) || isAiOnlyField(field))
+      // A field already showing a real answer is resolved: the audit still reviews it,
+      // but it must not be re-asked or reported as "not filled" after a successful fill.
+      .filter((field) => !isAlreadyAnsweredField(field))
       .filter(shouldAskForField)
       .map(({ elementRef, ...field }) => ({
         ...field,
@@ -277,6 +280,15 @@
       shouldAsk: shouldAskForField(field),
       target: isTargetField(field)
     };
+  }
+
+  function isAlreadyAnsweredField(field) {
+    if (field.type === "file") {
+      return false;
+    }
+
+    const current = String(field.value || "").trim();
+    return hasValue(current) && !isPlaceholderValue(current);
   }
 
   function unfilledReasonForField(field, mappedIndexes) {
@@ -867,9 +879,14 @@
   }
 
   function scanFields() {
-    const elements = Array.from(document.querySelectorAll(FIELD_SELECTOR))
+    const matched = Array.from(document.querySelectorAll(FIELD_SELECTOR))
       .filter(isFillable)
       .filter((element) => !isJunkFieldElement(element));
+    // A widget can match twice — e.g. a react-select container ([aria-haspopup]) wrapping
+    // its own combobox input. Keep only the innermost match so each question scans once.
+    const elements = matched.filter((element) => (
+      !matched.some((other) => other !== element && element.contains(other))
+    ));
     const choiceGroups = buildChoiceGroups(elements);
     const groupedElements = new Set(choiceGroups.flatMap((group) => group.elements));
     // Ashby-style segmented Yes/No questions are plain <button> toggles that the
@@ -901,9 +918,45 @@
   }
 
   function isJunkFieldElement(element) {
-    return isInsideConsentUi(element)
+    return isAriaHiddenElement(element)
+      || isInsideConsentUi(element)
       || isStandaloneSearchElement(element)
+      || isDropdownAuxiliaryControl(element)
       || isInsideOpenOptionList(element);
+  }
+
+  // react-select style widgets keep a shadow required <input aria-hidden tabindex=-1>
+  // purely for native form validation. It carries the question's required flag but no
+  // label linkage, so scanning it yields a duplicate junk-labeled "required" field.
+  function isAriaHiddenElement(element) {
+    return element.getAttribute?.("aria-hidden") === "true"
+      || Boolean(element.closest?.("[aria-hidden='true']"));
+  }
+
+  // A select widget's own chrome — the ✕ "Clear selections" button or the "Toggle
+  // flyout" arrow that react-select style widgets render beside a chosen value — is not
+  // a question. Scanning it as a field (or clustering the pair into a fake Yes/No choice
+  // group) wastes Ask-AI calls on junk labels, saves garbage answers into the profile,
+  // and clicking the ✕ as a "fill" erases an already-selected answer.
+  function isDropdownAuxiliaryControl(element) {
+    if (element.getAttribute?.("data-testid") === "clear-selection") {
+      return true;
+    }
+
+    const accessibleLabel = normalize(
+      element.getAttribute?.("aria-label")
+      || element.getAttribute?.("title")
+      || element.innerText
+      || element.textContent
+      || ""
+    );
+    if (/^(clear( all)?( selections?| selected options?| search| value| values| field)?|remove( item| value)?|toggle( menu| flyout)?|open( menu| flyout)?|close( menu| flyout)?|show options|hide options)$/.test(accessibleLabel)) {
+      return true;
+    }
+
+    return Boolean(element.closest?.(
+      "[class*='clear-indicator' i], [class*='clearIndicator'], [class*='dropdown-indicator' i], [class*='dropdownIndicator'], [class*='indicatorContainer']"
+    ));
   }
 
   // An element that is itself an option list (role=listbox/option) or that lives inside an
@@ -976,8 +1029,26 @@
     return /^search( search)*$/.test(accessibleLabel);
   }
 
+  // Screen-reader guidance that select widgets weave into their accessible text once a
+  // value is chosen or the menu opens. It must never become part of a question label.
+  const DROPDOWN_A11Y_GUIDANCE_PATTERNS = [
+    /,?\s*\d+ of \d+(?:\.\d+)?\s*results? available\.?/gi,
+    /\d+\s*results? available\.?/gi,
+    /use up and down to choose options[^.]*\.?/gi,
+    /press (?:enter|escape|tab)[^.]*?(?:menu|option|options|select)\.?/gi,
+    /\bselect\.\.\.\s*$/i
+  ];
+
+  function stripDropdownA11yGuidance(value) {
+    let text = String(value || "");
+    for (const pattern of DROPDOWN_A11Y_GUIDANCE_PATTERNS) {
+      text = text.replace(pattern, " ");
+    }
+    return text;
+  }
+
   function capFieldLabel(value) {
-    const text = compactText(value);
+    const text = compactText(stripDropdownA11yGuidance(value));
     return text.length > MAX_FIELD_LABEL_LENGTH ? text.slice(0, MAX_FIELD_LABEL_LENGTH).trimEnd() : text;
   }
 
@@ -1097,6 +1168,11 @@
 
     // Dropdown/listbox openers and menu/nav/tab controls are not discrete choices.
     if (element.getAttribute("aria-haspopup")) {
+      return false;
+    }
+
+    // A select widget's ✕/arrow chrome must never cluster into a fake choice group.
+    if (isDropdownAuxiliaryControl(element)) {
       return false;
     }
 
@@ -1765,7 +1841,9 @@
       }
 
       const options = await discoverDynamicDropdownOptions(element);
-      if (options.length && options.length <= 40) {
+      // 100 keeps long-but-finite lists (language fluency has ~80 entries) usable for
+      // review dropdowns and the model, while still excluding country/dial-code lists.
+      if (options.length && options.length <= 100) {
         field.options = options;
       }
     }
@@ -5687,7 +5765,7 @@
   }
 
   function isPlaceholderValue(value) {
-    return /^(select one|select|choose|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
+    return /^(select( one| an option)?\s*(\.{1,3}|…)?|please select|choose( one)?|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
   }
 
   async function fillElement(element, mapping, field) {
@@ -6985,6 +7063,24 @@
 
     if (currentText === desiredText) {
       return true;
+    }
+
+    // Phone widgets reformat what was typed ("6477678243" -> "(647) 767-8243"); treat
+    // phone-like values as equal when their digits agree, so verification does not
+    // report a false mismatch and the field is not refilled.
+    const phoneLike = /^[\d\s()+.\-]{7,}$/;
+    if (phoneLike.test(currentText) && phoneLike.test(desiredText)) {
+      const currentDigits = currentText.replace(/\D+/g, "");
+      const desiredDigits = desiredText.replace(/\D+/g, "");
+      if (
+        currentDigits
+        && desiredDigits
+        && (currentDigits === desiredDigits
+          || currentDigits.endsWith(desiredDigits)
+          || desiredDigits.endsWith(currentDigits))
+      ) {
+        return true;
+      }
     }
 
     return normalizeDateValue(currentText) === normalizeDateValue(desiredText)

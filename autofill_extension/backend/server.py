@@ -25,7 +25,10 @@ DB_PATH = GENERATED_DIR / "applications.sqlite3"
 LLM_TRACE_PATH = GENERATED_DIR / "llm_trace.private.jsonl"
 PRIVATE_ENV_PATH = Path(__file__).resolve().parent / "env.private"
 NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-DEFAULT_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+# The omni "-reasoning" sibling hangs indefinitely on chat completions as of 2026-08
+# (requests never return even at 120s); this non-reasoning variant answers in <1s and
+# honors both chat_template_kwargs.thinking=false and response_format json_object.
+DEFAULT_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
 AI_RATE_LIMIT_PER_MINUTE = 40
 KEY_PROBE_TTL_SECONDS = 600
 _ai_request_times: deque[float] = deque()
@@ -744,6 +747,8 @@ def build_audit_prompt(
                 "Audit every currentAnswer against retrievedContext, candidateContext, defaultPolicies, and visible options. "
                 "For each answer, decide exactly one action: keep when accurate, correct when wrong, fill when blank and safely answerable, "
                 "or skip when unsafe. "
+                "When the currentAnswer already equals one of the visible option labels and is consistent with the candidate context, "
+                "keep it; never replace one plausible option with another equally plausible option. "
                 "The answer must be the most accurate truthful answer for the specific question. "
                 "Do not guess, do not choose an optimistic answer, and do not prefer Yes unless profile/policy facts support Yes. "
                 "Only include corrections for actions correct or fill. "
@@ -1571,6 +1576,19 @@ def is_previous_company_question(haystack: str) -> bool:
 
 def is_gpa_question(haystack: str) -> bool:
     return bool(re.search(r"overall result|grade point average|\bgpa\b|\bcgpa\b|academic average", haystack))
+
+
+def is_previous_application_question(haystack: str) -> bool:
+    """'Have you previously applied to work at X?' — a first-application fact the
+    profile owns; left to the model it answers Yes/No nondeterministically. Kept
+    distinct from previously-EMPLOYED questions, which have their own rule."""
+    if re.search(r"employ|worked (at|for)|paycheck|w-?2|contractor", haystack):
+        return False
+
+    return bool(
+        re.search(r"\b(have|has|did) you\b[^.?]{0,60}\bappl(?:y|ied)\b", haystack)
+        and re.search(r"\b(previously|ever|before|in the past)\b", haystack)
+    )
 
 
 def is_restrictive_agreement_question(haystack: str) -> bool:
@@ -2486,6 +2504,13 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         )
         if stated not in (None, ""):
             answer = best_available_option(str(stated), options) or str(stated)
+    elif is_previous_application_question(haystack):
+        stated = (
+            profile.get("answers", {}).get("previouslyAppliedToCompany")
+            or profile.get("answers", {}).get("previouslyApplied")
+            or "No"
+        )
+        answer = best_available_option(stated, options) or stated
     elif is_restrictive_agreement_question(haystack):
         stated = profile.get("subjectToAgreement") or profile.get("answers", {}).get("subjectToAgreement") or "No"
         answer = best_available_option(stated, options) or stated

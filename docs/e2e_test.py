@@ -156,12 +156,20 @@ def main():
             log(f"extension id: {ext_id}")
             time.sleep(2)  # let onInstalled defaults land first, then overwrite
 
-            sw.evaluate(
-                "(data) => chrome.storage.local.set(data)",
-                {"candidateProfile": candidate, "settings": settings},
-            )
-            check = sw.evaluate("() => chrome.storage.local.get(['candidateProfile','settings'])")
+            # onInstalled writes sample defaults asynchronously; keep re-seeding until
+            # the read-back shows our profile so the race cannot win.
+            for attempt in range(10):
+                sw.evaluate(
+                    "(data) => chrome.storage.local.set(data)",
+                    {"candidateProfile": candidate, "settings": settings},
+                )
+                time.sleep(1)
+                check = sw.evaluate("() => chrome.storage.local.get(['candidateProfile','settings'])")
+                if check["candidateProfile"].get("email") == candidate["email"]:
+                    break
             log(f"storage seeded: profile email={check['candidateProfile'].get('email')}, country={check['settings'].get('targetCountry')}")
+            if check["candidateProfile"].get("email") != candidate["email"]:
+                raise RuntimeError("could not seed candidateProfile (onInstalled kept overwriting)")
 
             job = ctx.pages[0] if ctx.pages else ctx.new_page()
             job.goto(JOB_URL, wait_until="domcontentloaded", timeout=60000)
@@ -180,7 +188,19 @@ def main():
                     pass
 
             assistant = ctx.new_page()
-            assistant.goto(f"chrome-extension://{ext_id}/src/assistant.html")
+            for attempt in range(3):
+                try:
+                    assistant.goto(
+                        f"chrome-extension://{ext_id}/src/assistant.html",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    break
+                except Exception as e:
+                    log(f"assistant goto attempt {attempt + 1} failed: {type(e).__name__}")
+                    if attempt == 2:
+                        raise
+                    time.sleep(2)
             time.sleep(1.5)
             # Route the panel's active-tab lookup at the job tab (side panel normally
             # rides along with it; here the panel lives in its own tab).
