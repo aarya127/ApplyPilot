@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html as html_lib
 import json
 import os
 import re
@@ -272,6 +273,8 @@ def map_fields():
 
     mappings = mappings + compact_retry_unanswered_option_fields(remaining_fields, mappings, profile, page)
     mappings = rewrite_third_person_narratives(remaining_fields, mappings, profile)
+    mappings = drop_contradictory_relocation_refusals(mappings, profile)
+    mappings = drop_employer_specific_narratives(mappings, remaining_fields)
 
     return jsonify({"mappings": conditional_mappings + mappings, "aiUsage": ai_usage_snapshot()})
 
@@ -304,6 +307,26 @@ def audit_fields():
             warning = f"Audit request failed: {exc}"
     else:
         warning = "NVIDIA_API_KEY is not configured; used deterministic audit only"
+
+    corrections = drop_contradictory_relocation_refusals(corrections, profile)
+    audit_field_by_index = {f.get("index"): f for f in fields if isinstance(f, dict)}
+
+    def is_unsafe_audit_write(decision: dict[str, Any]) -> bool:
+        if decision.get("action") not in ("correct", "fill"):
+            return False
+        if is_open_to_relocation(profile) and RELOCATION_REFUSAL_PATTERN.search(str(decision.get("value") or "")):
+            return True
+        # The model fabricates employer claims on "why us / what excites you" essays;
+        # only deterministic (profile/saved-answer) sources may write those.
+        field = audit_field_by_index.get(decision.get("index"))
+        return (
+            isinstance(field, dict)
+            and not normalized_options(field)
+            and is_employer_specific_question(field)
+            and not str(decision.get("source") or "").startswith(("deterministic", "profile", "policy"))
+        )
+
+    decisions = [decision for decision in decisions if not is_unsafe_audit_write(decision)]
 
     return jsonify({
         "corrections": corrections,
@@ -1159,7 +1182,15 @@ def deterministic_audit_report(
         if not field:
             continue
 
-        policy = policy_by_index.get(index) or deterministic_profile_mapping(field, profile)
+        # The authoritative layer (sponsorship, eligibility, years, previously-applied,
+        # restrictive agreements) must reach the audit too, not just /map-fields —
+        # otherwise the audit reports "no deterministic fact" for questions the
+        # profile actually owns and leaves them to the model.
+        policy = (
+            policy_by_index.get(index)
+            or authoritative_policy_mapping(field, profile)
+            or deterministic_profile_mapping(field, profile)
+        )
 
         current_value = mapping.get("value")
 
@@ -2324,14 +2355,47 @@ def compact_nvidia_call(system: str, payload: dict[str, Any], max_tokens: int = 
 
 
 def compact_candidate_facts(profile: dict[str, Any]) -> dict[str, Any]:
+    answers = profile.get("answers", {}) if isinstance(profile.get("answers"), dict) else {}
     return {
         "workAuthorization": profile.get("workAuthorization"),
         "needsSponsorship": profile.get("needsSponsorship"),
         "canadianCitizen": profile.get("canadianCitizen"),
         "usPermanentResident": profile.get("usPermanentResident"),
         "veteranStatus": profile.get("veteranStatus"),
+        "relocation": profile.get("relocation") or answers.get("relocation"),
+        "preferredUsaLocation": profile.get("usaPreferredLocation") or profile.get("usaLocation"),
         "demographics": profile.get("demographics", {}),
     }
+
+
+RELOCATION_REFUSAL_PATTERN = re.compile(
+    r"(would not|will not|cannot|can't|not able|unable|not willing|unwilling)\b.{0,50}\b(work from|relocat|commut|move)",
+    re.IGNORECASE,
+)
+
+
+def is_open_to_relocation(profile: dict[str, Any]) -> bool:
+    answers = profile.get("answers", {}) if isinstance(profile.get("answers"), dict) else {}
+    stated = str(profile.get("relocation") or answers.get("relocation") or "")
+    return bool(re.search(r"open|willing|yes", stated, re.IGNORECASE))
+
+
+def drop_contradictory_relocation_refusals(
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """The model must never decline relocation/commuting on the candidate's behalf.
+    When the profile says they are open to relocating, an "I would not be able to
+    relocate" style option is a profile contradiction that can auto-reject the
+    application — drop the mapping and leave the choice to the human."""
+    if not is_open_to_relocation(profile):
+        return mappings
+
+    return [
+        mapping
+        for mapping in mappings
+        if not RELOCATION_REFUSAL_PATTERN.search(str(mapping.get("value") or ""))
+    ]
 
 
 def compact_retry_unanswered_option_fields(
@@ -2356,7 +2420,7 @@ def compact_retry_unanswered_option_fields(
             continue
         options = normalized_options(field)
         if len(options) < 2:
-            if field.get("tag") == "textarea" and field.get("required"):
+            if field.get("required") and is_narrative_question_field(field):
                 narrative = compact_narrative_answer(field, profile, page)
                 if narrative:
                     retried.append({"index": field["index"], "value": narrative, "confidence": 0.6, "source": "llm"})
@@ -2393,14 +2457,152 @@ def compact_retry_unanswered_option_fields(
     return retried
 
 
+def is_narrative_question_field(field: dict[str, Any]) -> bool:
+    """Free-text questions deserve the focused narrative retry even when the ATS
+    renders them as a single-line <input> instead of <textarea> (e.g. Ashby essay
+    fields). Short structured inputs (names, salary, years) stay excluded: an
+    <input> qualifies only when its label reads like an actual question."""
+    if field.get("tag") == "textarea":
+        return True
+
+    if field.get("tag") != "input":
+        return False
+
+    if str(field.get("type") or "").lower() not in ("", "text", "input", "textbox"):
+        return False
+
+    label = str(field.get("label") or field.get("questionText") or "")
+    return "?" in label and len(label.split()) >= 5
+
+
+EMPLOYER_SPECIFIC_QUESTION_PATTERN = re.compile(
+    r"excites? you( the most)?|why (do you want|would you like|are you (interested|excited))"
+    r"|why .{0,30}\b(company|us|join|this (role|team|position))\b"
+    r"|what (do you know|interests? you) about",
+    re.IGNORECASE,
+)
+
+
+def is_employer_specific_question(field: dict[str, Any]) -> bool:
+    """Questions about the employer itself (their technology, why join them) cannot be
+    answered from the candidate's profile alone — the model reliably fabricates company
+    claims out of the candidate's own resume facts. They are answerable only with real
+    company context (see company_context_for_field); with none, they go to the human."""
+    label = str(field.get("label") or field.get("questionText") or "")
+    return bool(EMPLOYER_SPECIFIC_QUESTION_PATTERN.search(label))
+
+
+_page_text_cache: dict[str, tuple[float, str]] = {}
+_page_text_cache_lock = threading.Lock()
+PAGE_TEXT_CACHE_TTL_SECONDS = 3600
+
+
+def extract_urls_from_texts(*texts: Any) -> list[str]:
+    seen: set[str] = set()
+    urls: list[str] = []
+    for text in texts:
+        for match in re.findall(r"https?://[^\s\"'<>]+", str(text or "")):
+            url = match.rstrip(".,);:!?")
+            if url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
+
+
+def fetch_page_text(url: str, max_chars: int = 6000) -> str:
+    """Fetch a page and reduce it to plain text for LLM grounding. Cached, size-capped,
+    and silent on failure — grounding is best-effort, never a hard dependency."""
+    if not url.startswith(("http://", "https://")):
+        return ""
+
+    with _page_text_cache_lock:
+        cached = _page_text_cache.get(url)
+        if cached and time.time() - cached[0] < PAGE_TEXT_CACHE_TTL_SECONDS:
+            return cached[1]
+
+    text = ""
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"},
+            timeout=10,
+        )
+        content_type = response.headers.get("Content-Type", "")
+        if response.status_code == 200 and ("text/html" in content_type or "text/plain" in content_type):
+            raw = response.text[:600_000]
+            raw = re.sub(r"<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", raw, flags=re.S | re.I)
+            raw = re.sub(r"<[^>]+>", " ", raw)
+            raw = html_lib.unescape(raw)
+            text = re.sub(r"\s+", " ", raw).strip()[:max_chars]
+    except Exception:
+        app.logger.info("Company-context fetch failed for %s", url)
+
+    with _page_text_cache_lock:
+        _page_text_cache[url] = (time.time(), text)
+    return text
+
+
+def company_context_for_field(field: dict[str, Any], page: dict[str, Any] | None) -> str:
+    """Real employer text to ground 'why us / what excites you' answers: URLs the
+    question itself references (companies often link the page they want you to read),
+    then the job posting page, whose description says what the company does."""
+    urls = extract_urls_from_texts(
+        field.get("label"),
+        field.get("questionText"),
+        field.get("surroundingText"),
+        field.get("nearbyText"),
+    )
+    page_url = str((page or {}).get("url") or "")
+    if page_url and page_url not in urls:
+        urls.append(page_url)
+
+    chunks: list[str] = []
+    total = 0
+    for url in urls[:3]:
+        text = fetch_page_text(url)
+        if text:
+            chunks.append(f"[source: {url}] {text}")
+            total += len(text)
+        if total > 8000:
+            break
+
+    return "\n".join(chunks)[:9000]
+
+
+def drop_employer_specific_narratives(
+    mappings: list[dict[str, Any]],
+    fields: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    field_by_index = {f.get("index"): f for f in fields if isinstance(f, dict)}
+    kept = []
+    for mapping in mappings:
+        field = field_by_index.get(mapping.get("index")) if isinstance(mapping, dict) else None
+        if (
+            isinstance(field, dict)
+            and not normalized_options(field)
+            and is_employer_specific_question(field)
+            and str(mapping.get("source") or "").startswith("llm")
+        ):
+            continue
+        kept.append(mapping)
+    return kept
+
+
 def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], page: dict[str, Any]) -> str | None:
     """Focused single-question answer for a required narrative field the bulk
     mapper skipped, using only that field's retrieved context."""
+    if is_employer_specific_question(field):
+        return None
+
     try:
         data = compact_nvidia_call(
             (
                 "You write one job-application answer as the candidate, strictly in first person (I/my/me) — "
                 "never mention the candidate's name. Use only facts from retrievedContext; do not invent experience. "
+                "If the question asks about the employer specifically — which of their technologies or products excites you, "
+                "why you want to work there, what you know about them — and retrievedContext contains no facts about that "
+                "company, return {\"value\": null}. NEVER invent claims about the company or attribute the candidate's own "
+                "projects to it. "
                 "Obey any special instructions in the question exactly (required opening phrase, bullet limits, word caps). "
                 "Default to 2-3 concise sentences. Return ONLY JSON: {\"value\": \"answer\"}. "
                 "If retrievedContext has no relevant material, return {\"value\": null}."

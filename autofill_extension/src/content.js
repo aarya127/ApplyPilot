@@ -993,6 +993,14 @@
       return true;
     }
 
+    // ATS resume-autofill dropzones ("Upload your resume here to autofill key
+    // application fields... drag and drop here") scan as an unlabeled file input whose
+    // fallback label swallows the whole form's text. The real Resume field and the
+    // attach flows query file inputs directly, so dropping this artifact loses nothing.
+    if (/(drag and drop|drop your resume|parsing your resume|autofill (from|with) (your )?resume|upload your resume here)/i.test(text)) {
+      return true;
+    }
+
     const dialingCodes = text.match(/\+\d{1,4}/g);
     return Boolean(dialingCodes && dialingCodes.length >= 5);
   }
@@ -1335,7 +1343,9 @@
       required: isButtonGroup
         ? buttonChoiceRequired(group, [label, questionText].filter(Boolean).join(" "), fieldGroupText)
         : group.elements.some((element) => isRequiredElement(element, [label, questionText].filter(Boolean).join(" "))),
-      value: "",
+      // The group's current answer (checked members' labels) — without it, an already
+      // answered radio group audits as empty and is re-listed as unresolved.
+      value: choiceGroupCurrentLabel(group),
       options,
       surroundingText: isButtonGroup ? fieldGroupText : compactText(group.container?.innerText || ""),
       questionText,
@@ -1349,6 +1359,19 @@
     };
   }
 
+  function choiceGroupCurrentLabel(group) {
+    const selected = group.elements.filter((element) => (
+      ("checked" in element && element.checked === true)
+      || element.getAttribute?.("aria-checked") === "true"
+      || (group.mode === "button" && isChoiceSelected(element))
+    ));
+
+    return selected
+      .map((element) => compactText(choiceLabel(element) || choiceValue(element)))
+      .filter(Boolean)
+      .join(", ");
+  }
+
   function isChoiceControl(element) {
     const type = (element.getAttribute("type") || "").toLowerCase();
     const role = (element.getAttribute("role") || "").toLowerCase();
@@ -1360,7 +1383,33 @@
       || element.getAttribute("aria-required") === "true"
       || /\*/.test(label || "")
       || /\brequired\b/i.test(label || "")
-      || /\*/.test(getSurroundingText(element));
+      || /\*/.test(getSurroundingText(element))
+      || hasStyledRequiredMarker(element);
+  }
+
+  // Ashby-style forms mark required questions only visually: a "required" CSS class on
+  // the question label draws the asterisk via ::before/::after, so it never shows up in
+  // innerText or as a required/aria-required attribute. Without this check, required
+  // radio groups read as optional and the required-only pipeline never touches them.
+  function hasStyledRequiredMarker(element) {
+    const scope = element.closest?.(
+      "fieldset, [role='radiogroup'], [role='group'], [class*='fieldEntry' i], .form-group, .field, .question"
+    );
+    if (!scope) {
+      return false;
+    }
+
+    const markers = [scope, ...Array.from(scope.querySelectorAll("label, legend")).slice(0, 8)];
+    return markers.some((node) => {
+      const className = String(node.getAttribute?.("class") || "");
+      if (/(^|[\s_-])required([\s_-]|$)/i.test(className) && !/not-?required|optional/i.test(className)) {
+        return true;
+      }
+
+      return ["::before", "::after"].some((pseudo) => (
+        (window.getComputedStyle?.(node, pseudo)?.content || "").includes("*")
+      ));
+    });
   }
 
   function isStandaloneCheckbox(element) {
@@ -7017,7 +7066,16 @@
     }
 
     if ("checked" in element && (element.type === "checkbox" || element.type === "radio")) {
-      return element.checked ? element.value : "";
+      // Radios often carry no meaningful value attribute (checked -> "on"), and a group
+      // field is anchored to its FIRST radio; report the checked sibling's label so
+      // verification, audits, and the answered-check read the real answer.
+      if (element.type === "radio" && element.name) {
+        const group = Array.from(document.querySelectorAll(`input[type="radio"][name="${cssEscape(element.name)}"]`));
+        const selected = group.find((radio) => radio.checked);
+        return selected ? meaningfulChoiceValue(selected) : "";
+      }
+
+      return element.checked ? meaningfulChoiceValue(element) : "";
     }
 
     if (element.tagName?.toLowerCase() === "select") {
@@ -7047,6 +7105,15 @@
     }
 
     return direct;
+  }
+
+  function meaningfulChoiceValue(element) {
+    const value = String(element.value || "");
+    if (value && !/^(on|off|true|false|1|0)$/i.test(value)) {
+      return value;
+    }
+
+    return compactText(choiceLabel(element) || value);
   }
 
   function hasValue(value) {
