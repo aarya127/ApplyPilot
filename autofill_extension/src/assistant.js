@@ -381,8 +381,13 @@ async function askAiForMissingAnswersImpl() {
     const mapping = (response.payload?.mappings || []).find((item) => item.index === 0);
     const value = String(mapping?.value ?? "").trim();
 
-    if (field.answerKey && value) {
-      answers[field.answerKey] = value;
+    if (value) {
+      // Per-company judgment calls (which office, why-this-company essays) are answered
+      // fresh by the AI on every application — persisting them would freeze one
+      // company's answer and replay it from preview on the next one.
+      if (field.answerKey && !isPerApplicationJudgmentField(field)) {
+        answers[field.answerKey] = value;
+      }
       aiMappings.push(toPreviewMapping(fieldForModel, mapping));
     }
   }
@@ -750,6 +755,11 @@ function isLowInformationText(value) {
 
 function isPlaceholderValue(value) {
   return /^(select( one| an option)?\s*(\.{1,3}|…)?|please select|choose( one)?|none selected|no selection|mm\/yyyy|yyyy|mm\/dd\/yyyy|type here|\s*)$/i.test(String(value || "").trim());
+}
+
+function isPerApplicationJudgmentField(field) {
+  const label = String(field.label || field.questionText || "");
+  return /which (location|office)|office location|work from or relocate|relocate to\b|excites? you|why (do you want|would you like|are you (interested|excited))|what (do you know|interests? you) about/i.test(label);
 }
 
 function isAiPolicyQuestion(haystack) {

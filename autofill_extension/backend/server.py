@@ -2423,7 +2423,10 @@ def compact_retry_unanswered_option_fields(
             if field.get("required") and is_narrative_question_field(field):
                 narrative = compact_narrative_answer(field, profile, page)
                 if narrative:
-                    retried.append({"index": field["index"], "value": narrative, "confidence": 0.6, "source": "llm"})
+                    # "grounded-llm" marks an employer answer written from fetched company
+                    # text; drop_employer_specific_narratives only drops ungrounded "llm".
+                    source = "grounded-llm" if is_employer_specific_question(field) else "llm"
+                    retried.append({"index": field["index"], "value": narrative, "confidence": 0.6, "source": source})
             continue
 
         try:
@@ -2433,6 +2436,9 @@ def compact_retry_unanswered_option_fields(
                     "Return ONLY JSON: {\"value\": \"exact option label\"} (or a JSON array of labels for select-all-that-apply). "
                     "The value MUST be copied verbatim from the supplied options — never a bare Yes or No unless that exact option exists. "
                     "Use candidateFacts (citizenship, residency, eligibility, demographics) to pick only factually true options. "
+                    "When the options are office locations and candidateFacts.relocation shows the candidate is open to relocating, "
+                    "you MUST commit to one actual location — the one nearest preferredUsaLocation, or the company's primary office — "
+                    "and never a 'would not be able to relocate' style option. "
                     "If the question says 'if you selected ... in the prior question' and pageContext shows the prior answer was a "
                     "'none of the above' style option, you MUST pick the 'Not applicable' style option. "
                     "If no option can be chosen truthfully, return {\"value\": null}."
@@ -2590,26 +2596,33 @@ def drop_employer_specific_narratives(
 
 def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], page: dict[str, Any]) -> str | None:
     """Focused single-question answer for a required narrative field the bulk
-    mapper skipped, using only that field's retrieved context."""
-    if is_employer_specific_question(field):
+    mapper skipped, using only that field's retrieved context. Employer-specific
+    questions are answered ONLY when real company text could be fetched to ground
+    them — the model otherwise attributes the candidate's own projects to the
+    company; with no grounding they surface to the human instead."""
+    employer_specific = is_employer_specific_question(field)
+    company_context = company_context_for_field(field, page) if employer_specific else ""
+    if employer_specific and not company_context:
         return None
 
     try:
         data = compact_nvidia_call(
             (
                 "You write one job-application answer as the candidate, strictly in first person (I/my/me) — "
-                "never mention the candidate's name. Use only facts from retrievedContext; do not invent experience. "
-                "If the question asks about the employer specifically — which of their technologies or products excites you, "
-                "why you want to work there, what you know about them — and retrievedContext contains no facts about that "
-                "company, return {\"value\": null}. NEVER invent claims about the company or attribute the candidate's own "
-                "projects to it. "
+                "never mention the candidate's name. Facts about the CANDIDATE come only from retrievedContext; "
+                "do not invent experience. Facts about the COMPANY (its technology, products, mission) come ONLY "
+                "from companyContext — never from retrievedContext, and never invented. If the question asks about "
+                "the company and companyContext lacks the needed material, return {\"value\": null}. "
+                "Name a specific company technology/product from companyContext and connect it briefly to the "
+                "candidate's own experience when the question calls for it. "
                 "Obey any special instructions in the question exactly (required opening phrase, bullet limits, word caps). "
                 "Default to 2-3 concise sentences. Return ONLY JSON: {\"value\": \"answer\"}. "
-                "If retrievedContext has no relevant material, return {\"value\": null}."
+                "If there is no relevant material, return {\"value\": null}."
             ),
             {
                 "question": field.get("label") or field.get("questionText") or "",
                 "retrievedContext": retrieved_context_for_field(field, profile, page),
+                "companyContext": company_context,
             },
             max_tokens=1200,
         )
@@ -2619,7 +2632,10 @@ def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], pag
 
     value = data.get("value")
     if isinstance(value, str) and value.strip():
-        write_llm_trace("mapper.compact_narrative", {"field": field.get("label"), "value": value[:200]})
+        write_llm_trace(
+            "mapper.compact_narrative",
+            {"field": field.get("label"), "grounded": bool(company_context), "value": value[:200]},
+        )
         return value.strip()
     return None
 
