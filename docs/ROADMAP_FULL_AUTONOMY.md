@@ -10,31 +10,33 @@ answers are not safe to send unseen.
 - Nothing clicks **Next** or **Submit**.
 - Nothing signs in or creates accounts.
 - Nothing records an application unless you click **Track**.
-- On the forms it did reach, 9 of 15 got at least one wrong or made-up answer.
+- On the forms it did reach, 10 of 15 got at least one wrong or made-up answer.
 
 ### Baseline: test run of 2026-09-26
 
 We drove the real extension through Preview → Fill selected → Ask AI → Fill selected on 33 live
 postings across 14 applicant tracking systems (ATSs). Nothing was submitted and no accounts were
-created. The raw results are in `docs/e2e_runs/2026-09-26/` (gitignored).
+created. The raw results are in `docs/e2e_runs/2026-09-26/` (gitignored). The counts below apply
+the owner's decisions recorded at the end of this document: current location is Chicago, "How did
+you hear about us?" is LinkedIn, and employer requests to write without AI are ignored.
 
 | | Result |
 |---|---|
 | Postings tested | 33, on 14 ATSs |
 | Reached an application form | 15 of 33. The rest stopped at a sign-in/account wall (15) or a bot check (3). |
 | Required fields filled, on reachable forms | 128 of 135 (95%) |
-| Forms with at least one wrong, made-up, or misplaced answer | **9 of 15** |
-| Forms that would have been safe to submit unattended | **1 of 15** (Ramp). Instacart was correct apart from a made-up answer to "How did you hear about us?". |
+| Forms with at least one wrong, made-up, or misplaced answer | **10 of 15** |
+| Forms that would have been safe to submit unattended | **2 of 15** (Ramp, Databricks). Both still had tool problems outside the answers: Ask AI ran past 10 minutes on Ramp, and cookie switches were ticked on Databricks. |
 | Reachable forms with reCAPTCHA or hCaptcha scripts | 11 of 15 |
 
 Coverage is not the problem; correctness is. Details by ATS:
 
 | ATS | Jobs | Reached form | What happened |
 |---|---|---|---|
-| Greenhouse | 4 (2 embedded) | 4 | 64 of 66 required fields filled. Reddit left the required "I agree" consent empty. Discord got the wrong ethnicity. Three forms got a made-up "LinkedIn" as the answer to "How did you hear about us?". |
+| Greenhouse | 4 (2 embedded) | 4 | 64 of 66 required fields filled. Reddit left the required "I agree" consent empty. Discord got the wrong ethnicity. Instacart (a Canada job) said the candidate lives in Mississauga, Ontario. |
 | Lever | 3 | 3 | 29 of 34 required fields filled. Errors: a name field set to "I"; "full legal name" set to the LinkedIn URL; the email address typed into an essay box; a garbage LinkedIn URL; "Current location" never filled. |
-| Ashby | 3 | 3 | All required fields filled. OpenAI: the LinkedIn URL went into a date picker, and an arbitration agreement was accepted. Cohere: "Name" set to "I". Ramp: clean, but Ask AI ran past 10 minutes. |
-| Workable | 1 | 1 | The employer asked for an essay "in your own words"; the tool wrote one with AI and answered "Yes" to "is everything in this application your own". |
+| Ashby | 3 | 3 | All required fields filled. OpenAI: the LinkedIn URL went into a date picker, and an arbitration agreement was accepted. Cohere: "Name" set to "I", and location set to Mississauga. Ramp: clean, but Ask AI ran past 10 minutes. |
+| Workable | 1 | 1 | The job description asked for the first answer to start with a specific phrase. The tool missed the instruction, then answered "YES" to "Did you start with the exact phrase?". |
 | Breezy | 1 | 1 | The phone number was typed into Full Name, Email, Company and Title. |
 | Jobvite | 1 | 1 | Contact details filled, résumé not attached. |
 | JazzHR | 1 | 1 | Made-up references, a made-up DoD certification, a mixed Canada/US address, and the candidate named as their own referrer. |
@@ -91,8 +93,9 @@ by the kind of failure and ordered by how much harm the failure would do once su
      model that used to hang.
    - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout.
    - Make `/health` fail loudly on a 410, and show that in the side panel.
-   - Consider a paid provider that announces deprecations in advance. The free endpoint also returns
-     intermittent 403 and 503 errors.
+   - The owner chose to stay on the free endpoint, which retires models without notice and returns
+     intermittent 403 and 503 errors. The fallback chain and alert are therefore required, not
+     optional. The model ranking in Model choice gives the order for the chain.
 2. **Put a time limit on Ask AI.** On Spotify (Lever) and Ramp (Ashby), Ask AI was still "Working"
    after 10 minutes. Give the per-field loop an overall deadline and hand off whatever is left.
 
@@ -120,28 +123,32 @@ by the kind of failure and ordered by how much harm the failure would do once su
    Fix: match options on whole words, and map demographics deterministically from
    `profile.demographics` with no AI step. If the profile's value isn't among the options, hand off.
    Never fall back to a fuzzy match.
-7. **Where the candidate is right now.** Discord's "Are you currently located in the US?" got "Yes",
-   and G2 Ops' "Where are you currently located?" got "Chicago". But `profile.location` is Waterloo,
-   ON; Chicago is the *preferred* US location. Add an explicit `currentLocation` / `currentCountry`
-   fact and use it for "currently located" questions.
+7. **Where the candidate lives right now.** The owner confirmed it is Chicago. On the two Canada jobs,
+   the tool used the Canadian address instead: Instacart got "(CAN) Ontario" for "Which state or
+   province do you currently live in?" and Mississauga as the city, and Cohere got Mississauga. The
+   profile's own `location` field still says Waterloo, ON.
+   - Add `currentLocation: "Chicago, IL"` and `currentCountry: "United States"`.
+   - Use them for every "currently located / live / based" question, whatever the job's country.
+   - Keep the Canadian address only for questions that ask for a Canadian mailing address.
 8. **Mixed addresses.** G2 Ops got the Canadian street (895 Sombrero Way) and postal code (L5W1T1)
    together with a US city and state (Bartlett, IL). Fill the address as one unit from a single
    country's address record.
-9. **Employer rules about AI-written answers.** Hugging Face asked for answers written "yourself, in
-   your own words" and included a trap question about a phrase from the job description. The tool
-   wrote the essay, answered "YES" to the phrase question even though the essay didn't start with it,
-   and answered "YES" to "everything in this application is true and your own". Detect "in your own
-   words / write it yourself / do not use AI" and hand those jobs off. Never answer authorship
-   attestations automatically. The job description itself isn't in the page context sent to the
-   model, so instructions written there are invisible today.
-10. **The required-only policy leaks, and "how did you hear" gets made up.**
+9. **Follow instructions written in the job description.** The owner decided to ignore employer
+   requests to write without AI, so the tool keeps writing essays and answering authorship
+   attestations. One factual problem remains: Hugging Face's job description asked for the first
+   answer to start with a specific phrase. The tool didn't, then answered "YES" to "Did you start
+   with the exact phrase we asked for?". The job description isn't in the page context sent to the
+   model, so its instructions are invisible today. Fetch the description with the page, follow its
+   format instructions, and answer checks about them truthfully.
+10. **The required-only policy leaks, and "how did you hear" isn't consistent.**
     - Optional fields got filled: AI text in Point72's "Note to Hiring Manager" and Givzey's cover
       letter, and Discord's optional gender-identity and ethnicity questions.
-    - "How did you hear about this job?" got "LinkedIn" on Discord, Instacart and Databricks, and
-      "LinkedIn Post" on Shield AI. All four are made up.
+    - The owner's answer to "How did you hear about this job?" is **LinkedIn**. Today it comes from
+      the AI, and in the model test one model answered "Greenhouse job board". Make it a
+      deterministic rule: pick the option closest to "LinkedIn" ("LinkedIn", "LinkedIn Post",
+      "LinkedIn Sponsored Job/Ad"), or type "LinkedIn" into free-text fields.
 
-    Enforce required-only in the backend too, not only in the panel. Answer "how did you hear" from
-    the job's real source.
+    Enforce required-only in the backend too, not only in the panel.
 11. **Check values the ATS pre-filled.** Lever's résumé parser pre-filled LinkedIn as
     `http://linkedin/aarya` and "Other website" as `http://aarya127.com`. The profile has
     `linkedin.com/in/AaryaShah127` and `aarya127.github.io`, and the tool never corrected them.
@@ -360,20 +367,24 @@ Work items:
 **Exit criteria:** runs unattended for a week, and the human touches only paused hand-offs, each in
 under 2 minutes.
 
-## Decisions needed from the owner
+## Owner decisions
 
-These block parts of Phase 1 and Phase 4, and only the owner can make them:
+Decided on 2026-09-26:
+
+- **Current location:** Chicago, IL (Phase 1 item 7).
+- **Employer requests to write without AI:** ignore them and apply normally (Phase 1 item 9).
+- **"How did you hear about us?":** LinkedIn (Phase 1 item 10).
+- **Model provider:** stay on the free NVIDIA endpoint and use the best model it offers (see Model
+  choice).
+
+Still open. These block parts of Phase 1 and Phase 4:
 
 1. **Consents.** Which may the tool give without asking: privacy policy, terms of use, SMS or
    marketing opt-ins, arbitration agreements?
 2. **Optional demographic questions.** Answer them from the profile, decline, or skip them? Today
    they are sometimes answered and sometimes declined.
-3. **Current location.** Which is true right now: Waterloo, ON or Chicago, IL? The answer decides the
-   "are you currently located in the US?" questions.
-4. **Employers who ask for answers written without AI.** Skip those jobs, or hand the essays to you?
-5. **"How did you hear about us?"** What should the default answer be?
-6. **Model provider.** Stay on the free NVIDIA endpoint, which retired our model without warning and
-   returns intermittent 403/503 errors, or pay for a provider with deprecation notices?
+
+<!-- MODEL_CHOICE -->
 
 ## How we measure progress
 
