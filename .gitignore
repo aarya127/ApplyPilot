@@ -34,3 +34,6 @@ application_agent/data/
 application_agent/files/
 application_agent/*.private.json
 application_agent/preferences.private.json
+
+# Batch E2E run output (screenshots contain profile data)
+docs/e2e_runs/
