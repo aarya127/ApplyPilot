@@ -29,7 +29,9 @@ NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completi
 # The omni "-reasoning" sibling hangs indefinitely on chat completions as of 2026-08
 # (requests never return even at 120s); this non-reasoning variant answers in <1s and
 # honors both chat_template_kwargs.thinking=false and response_format json_object.
-DEFAULT_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+# nemotron-3-nano-30b-a3b reached end of life on 2026-09-01 (HTTP 410). ultra-550b scored best on
+# structured answers and audits in the 2026-09-26 model evaluation (docs/ROADMAP_FULL_AUTONOMY.md).
+DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 AI_RATE_LIMIT_PER_MINUTE = 40
 KEY_PROBE_TTL_SECONDS = 600
 _ai_request_times: deque[float] = deque()
@@ -271,6 +273,7 @@ def map_fields():
             "aiUsage": ai_usage_snapshot(),
         }), 200
 
+    mappings = regenerate_mapper_narratives(remaining_fields, mappings, profile, page)
     mappings = mappings + compact_retry_unanswered_option_fields(remaining_fields, mappings, profile, page)
     mappings = rewrite_third_person_narratives(remaining_fields, mappings, profile)
     mappings = drop_contradictory_relocation_refusals(mappings, profile)
@@ -2330,7 +2333,12 @@ def conditional_not_applicable_mapping(field: Any, page: dict[str, Any]) -> dict
     }
 
 
-def compact_nvidia_call(system: str, payload: dict[str, Any], max_tokens: int = 900) -> dict[str, Any]:
+def compact_nvidia_call(
+    system: str,
+    payload: dict[str, Any],
+    max_tokens: int = 900,
+    model: str | None = None,
+) -> dict[str, Any]:
     """Small focused completion — the model follows instructions reliably in
     short prompts where the full mapper prompt drowns them out."""
     record_ai_request()
@@ -2338,7 +2346,7 @@ def compact_nvidia_call(system: str, payload: dict[str, Any], max_tokens: int = 
         os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
         headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"},
         json={
-            "model": model_name(),
+            "model": model or model_name(),
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -2625,6 +2633,7 @@ def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], pag
                 "companyContext": company_context,
             },
             max_tokens=1200,
+            model=narrative_model_name(),
         )
     except Exception:
         app.logger.exception("Compact narrative retry failed")
@@ -2638,6 +2647,44 @@ def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], pag
         )
         return value.strip()
     return None
+
+
+def regenerate_mapper_narratives(
+    fields: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    profile: dict[str, Any],
+    page: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """When a separate narrative model is configured, rewrite every essay the bulk
+    mapper wrote through the grounded narrative path. A null answer drops the mapping
+    so the question surfaces to the human instead of keeping the mapper's prose.
+    Saved answers and policy answers are the user's own words and stay untouched; the
+    length gate keeps short factual textareas ("Negotiable") on the mapper's answer."""
+    if narrative_model_name() == model_name():
+        return mappings
+
+    field_by_index = {f.get("index"): f for f in fields if isinstance(f, dict)}
+    result = []
+    for mapping in mappings:
+        field = field_by_index.get(mapping.get("index")) if isinstance(mapping, dict) else None
+        value = mapping.get("value") if isinstance(mapping, dict) else None
+        source = str(mapping.get("source") or "").lower() if isinstance(mapping, dict) else ""
+        model_written = (
+            isinstance(field, dict)
+            and is_narrative_question_field(field)
+            and isinstance(value, str)
+            and len(value.strip()) >= 80
+            and source not in ("saved", "policy")
+        )
+        if not model_written:
+            result.append(mapping)
+            continue
+
+        narrative = compact_narrative_answer(field, profile, page)
+        if narrative:
+            narrative_source = "grounded-llm" if is_employer_specific_question(field) else "llm"
+            result.append({**mapping, "value": narrative, "source": narrative_source})
+    return result
 
 
 def rewrite_third_person_narratives(
@@ -2657,7 +2704,9 @@ def rewrite_third_person_narratives(
     for mapping in mappings:
         value = mapping.get("value") if isinstance(mapping, dict) else None
         field = field_by_index.get(mapping.get("index")) if isinstance(mapping, dict) else None
-        is_narrative = isinstance(field, dict) and (field.get("tag") == "textarea" or not normalized_options(field))
+        # Only real essay questions: treating every option-less input as narrative rewrote
+        # Name / Preferred Name fields holding "Aarya" into "I".
+        is_narrative = isinstance(field, dict) and is_narrative_question_field(field)
 
         if not (is_narrative and isinstance(value, str) and name_pattern.search(value)):
             result.append(mapping)
@@ -2671,6 +2720,7 @@ def rewrite_third_person_narratives(
                     "Do not add or remove facts. Return ONLY JSON: {\"value\": \"rewritten answer\"}."
                 ),
                 {"answer": value},
+                model=narrative_model_name(),
             )
             rewritten = data.get("value")
             if isinstance(rewritten, str) and rewritten.strip() and not name_pattern.search(rewritten):
@@ -2818,6 +2868,13 @@ def api_key() -> str:
 
 def model_name() -> str:
     return os.environ.get("NVIDIA_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+
+
+def narrative_model_name() -> str:
+    """Model for free-text essays. The best structured-answer model embellished essays
+    (invented hobbies, mentoring, misattributed metrics) in the 2026-09-26 evaluation,
+    so essays can be routed to a more literal model via NVIDIA_NARRATIVE_MODEL."""
+    return os.environ.get("NVIDIA_NARRATIVE_MODEL", "").strip() or model_name()
 
 
 load_private_env()

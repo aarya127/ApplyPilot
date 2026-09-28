@@ -5669,3 +5669,77 @@ def test_content_script_button_choice_group_already_answered_is_not_reclicked():
         assert page.locator("#authNo").get_attribute("aria-pressed") != "true"
 
         browser.close()
+
+
+def test_first_person_rewrite_leaves_name_fields_alone(monkeypatch):
+    # Regression: every option-less input counted as narrative, so a Name field holding
+    # "Aarya Shah" was rewritten to "I" (Cohere / Palantir, 2026-09-26 batch run).
+    monkeypatch.setattr(server, "compact_nvidia_call", lambda *args, **kwargs: {"value": "I built a RAG pipeline."})
+    monkeypatch.setattr(server, "write_llm_trace", lambda *args, **kwargs: None)
+    fields = [
+        {"index": 0, "label": "Name", "tag": "input", "type": "text"},
+        {"index": 1, "label": "Preferred Name (if applicable)", "tag": "input", "type": "text"},
+        {"index": 2, "label": "Describe a project you are proud of.", "tag": "textarea"},
+    ]
+    mappings = [
+        {"index": 0, "value": "Aarya Shah", "source": "profile"},
+        {"index": 1, "value": "Aarya", "source": "profile"},
+        {"index": 2, "value": "Aarya built a RAG pipeline.", "source": "resume"},
+    ]
+
+    result = server.rewrite_third_person_narratives(fields, mappings, {"firstName": "Aarya"})
+
+    assert [m["value"] for m in result] == ["Aarya Shah", "Aarya", "I built a RAG pipeline."]
+
+
+def test_mapper_essays_are_regenerated_with_the_narrative_model(monkeypatch):
+    monkeypatch.setenv("NVIDIA_MODEL", "structured-model")
+    monkeypatch.setenv("NVIDIA_NARRATIVE_MODEL", "narrative-model")
+    monkeypatch.setattr(server, "write_llm_trace", lambda *args, **kwargs: None)
+    used_models = []
+
+    def fake_compact(system, payload, max_tokens=900, model=None):
+        used_models.append(model)
+        return {"value": "I scaled multi-agent systems from 500 to 2,000+ concurrent users."}
+
+    monkeypatch.setattr(server, "compact_nvidia_call", fake_compact)
+    essay = "I am a competitive programmer who mentors first-year students and restores vintage bicycles on weekends."
+    fields = [
+        {"index": 0, "label": "Tell us about your experience building production systems.", "tag": "textarea"},
+        {"index": 1, "label": "What are your compensation requirements?", "tag": "textarea"},
+        {"index": 2, "label": "Describe a challenge you overcame at work.", "tag": "textarea"},
+    ]
+    mappings = [
+        {"index": 0, "value": essay, "source": "resume"},
+        {"index": 1, "value": "Negotiable", "source": "profile"},
+        {"index": 2, "value": essay, "source": "saved"},
+    ]
+
+    result = server.regenerate_mapper_narratives(fields, mappings, {"firstName": "Aarya"}, {"url": ""})
+
+    assert used_models == ["narrative-model"]
+    assert result[0]["value"].startswith("I scaled multi-agent systems")
+    assert result[0]["source"] == "llm"
+    assert result[1] == mappings[1]  # short factual textarea keeps the mapper answer
+    assert result[2] == mappings[2]  # the user's saved answer is never rewritten
+
+
+def test_mapper_essay_is_dropped_when_narrative_model_declines(monkeypatch):
+    monkeypatch.setenv("NVIDIA_MODEL", "structured-model")
+    monkeypatch.setenv("NVIDIA_NARRATIVE_MODEL", "narrative-model")
+    monkeypatch.setattr(server, "compact_nvidia_call", lambda *args, **kwargs: {"value": None})
+    fields = [{"index": 0, "label": "Tell us something about yourself that we wouldn't find on your resume.", "tag": "textarea"}]
+    mappings = [{"index": 0, "value": "I am a certified yoga instructor who teaches weekend community classes, which keeps me calm under pressure.", "source": "llm"}]
+
+    # Dropped, so the question surfaces to the human instead of keeping invented prose.
+    assert server.regenerate_mapper_narratives(fields, mappings, {}, {"url": ""}) == []
+
+
+def test_mapper_essays_untouched_without_separate_narrative_model(monkeypatch):
+    monkeypatch.setenv("NVIDIA_MODEL", "structured-model")
+    monkeypatch.delenv("NVIDIA_NARRATIVE_MODEL", raising=False)
+    monkeypatch.setattr(server, "compact_nvidia_call", lambda *args, **kwargs: pytest.fail("no narrative call expected"))
+    fields = [{"index": 0, "label": "Describe a project you are proud of.", "tag": "textarea"}]
+    mappings = [{"index": 0, "value": "I built a full-stack quant trading platform with 45 REST endpoints and backtests.", "source": "resume"}]
+
+    assert server.regenerate_mapper_narratives(fields, mappings, {}, {"url": ""}) == mappings

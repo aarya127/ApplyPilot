@@ -86,11 +86,11 @@ by the kind of failure and ordered by how much harm the failure would do once su
 **A. Keep the model running**
 
 1. **Handle model retirement.** NVIDIA retired `nvidia/nemotron-3-nano-30b-a3b` on 2026-09-01. Every
-   AI answer failed for about 3.5 weeks, and nothing raised an alert. `env.private` now points at
-   `nvidia/nemotron-3-super-120b-a12b`, which answers in about 2 s. Still to do:
-   - The code defaults are still wrong: `DEFAULT_MODEL` in `autofill_extension/backend/server.py`
-     names the retired model, and `application_agent/agent/answer_generator.py` defaults to the omni
-     model that used to hang.
+   AI answer failed for about 3.5 weeks, and nothing raised an alert. **Done 2026-09-27:**
+   `env.private` and `DEFAULT_MODEL` now use `nemotron-3-ultra-550b` for structured answers and
+   `glm-5.3` for essays (see Model choice). Still to do:
+   - `application_agent/agent/answer_generator.py` still defaults to the omni model that used to
+     hang.
    - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout.
    - Make `/health` fail loudly on a 410, and show that in the side panel.
    - The owner chose to stay on the free endpoint, which retires models without notice and returns
@@ -98,21 +98,25 @@ by the kind of failure and ordered by how much harm the failure would do once su
      optional. The model ranking in Model choice gives the order for the chain.
 2. **Put a time limit on Ask AI.** On Spotify (Lever) and Ramp (Ashby), Ask AI was still "Working"
    after 10 minutes. Give the per-field loop an overall deadline and hand off whatever is left.
+3. **Shrink the prompts.** Mapper prompts run from 24k to 548k characters. Palantir's is about 137k
+   tokens, and only 3 of the 10 working models returned answers for it. Send each field's retrieved
+   context instead of the whole profile and page for every field, and split large forms into
+   batches.
 
 **B. Never send an answer the profile doesn't support**
 
-3. **The audit pass invents answers.** On G2 Ops (JazzHR) it filled two references ("Globys" and
+4. **The audit pass invents answers.** On G2 Ops (JazzHR) it filled two references ("Globys" and
    "RBC", both "Former Manager", each with the candidate's own email and phone), while tagging its own
    evidence as `insufficientContext`. Rule: in `server.py`, drop every audit `fill` whose evidence is
    `insufficientContext` or missing.
-4. **Credentials and experience that don't exist.** The G2 Ops run answered "Yes" to holding a DoD IAT
+5. **Credentials and experience that don't exist.** The G2 Ops run answered "Yes" to holding a DoD IAT
    Level II certification and "3" years of DoD systems experience. The August Point72 run ticked
    "Certifications: Other". The profile lists no certifications. Answer questions about
    certifications, clearances, licenses and years of experience in a specific area only from
    profile facts. With no fact, answer "No" if the question allows it, otherwise hand off.
-5. **The candidate as their own referrer.** "Who referred you to this position?" got "Aarya Shah".
+6. **The candidate as their own referrer.** "Who referred you to this position?" got "Aarya Shah".
    Referral questions stay blank or "N/A" unless the profile names a referrer.
-6. **Demographics must match the profile exactly.** Four separate failures:
+7. **Demographics must match the profile exactly.** Four separate failures:
    - **Substring bug:** `best_available_option("Asian", options)` returns **"White / Caucasian"**,
      because "Caucasian" contains "asian". On Instacart this came from a fixed `policy` rule, not the
      AI. The scanner had also missed the real "Asian or Asian-American" option.
@@ -123,24 +127,27 @@ by the kind of failure and ordered by how much harm the failure would do once su
    Fix: match options on whole words, and map demographics deterministically from
    `profile.demographics` with no AI step. If the profile's value isn't among the options, hand off.
    Never fall back to a fuzzy match.
-7. **Where the candidate lives right now.** The owner confirmed it is Chicago. On the two Canada jobs,
+8. **Where the candidate lives right now.** The owner confirmed it is Chicago. On the two Canada jobs,
    the tool used the Canadian address instead: Instacart got "(CAN) Ontario" for "Which state or
    province do you currently live in?" and Mississauga as the city, and Cohere got Mississauga. The
    profile's own `location` field still says Waterloo, ON.
    - Add `currentLocation: "Chicago, IL"` and `currentCountry: "United States"`.
    - Use them for every "currently located / live / based" question, whatever the job's country.
    - Keep the Canadian address only for questions that ask for a Canadian mailing address.
-8. **Mixed addresses.** G2 Ops got the Canadian street (895 Sombrero Way) and postal code (L5W1T1)
+9. **Mixed addresses.** G2 Ops got the Canadian street (895 Sombrero Way) and postal code (L5W1T1)
    together with a US city and state (Bartlett, IL). Fill the address as one unit from a single
    country's address record.
-9. **Follow instructions written in the job description.** The owner decided to ignore employer
-   requests to write without AI, so the tool keeps writing essays and answering authorship
-   attestations. One factual problem remains: Hugging Face's job description asked for the first
-   answer to start with a specific phrase. The tool didn't, then answered "YES" to "Did you start
-   with the exact phrase we asked for?". The job description isn't in the page context sent to the
-   model, so its instructions are invisible today. Fetch the description with the page, follow its
-   format instructions, and answer checks about them truthfully.
-10. **The required-only policy leaks, and "how did you hear" isn't consistent.**
+10. **Questions no profile can answer.** "Tell us something about yourself that we wouldn't find on
+    your résumé" made every tested model invent a hobby or credential (a yoga instructor, restoring
+    vintage bicycles, hiking). Hand these off once and reuse the saved answer.
+11. **Follow instructions written in the job description.** The owner decided to ignore employer
+    requests to write without AI, so the tool keeps writing essays and answering authorship
+    attestations. One factual problem remains: Hugging Face's job description asked for the first
+    answer to start with a specific phrase. The tool didn't, then answered "YES" to "Did you start
+    with the exact phrase we asked for?". The job description isn't in the page context sent to the
+    model, so its instructions are invisible today. Fetch the description with the page, follow its
+    format instructions, and answer checks about them truthfully.
+12. **The required-only policy leaks, and "how did you hear" isn't consistent.**
     - Optional fields got filled: AI text in Point72's "Note to Hiring Manager" and Givzey's cover
       letter, and Discord's optional gender-identity and ethnicity questions.
     - The owner's answer to "How did you hear about this job?" is **LinkedIn**. Today it comes from
@@ -149,25 +156,25 @@ by the kind of failure and ordered by how much harm the failure would do once su
       "LinkedIn Sponsored Job/Ad"), or type "LinkedIn" into free-text fields.
 
     Enforce required-only in the backend too, not only in the panel.
-11. **Check values the ATS pre-filled.** Lever's résumé parser pre-filled LinkedIn as
+13. **Check values the ATS pre-filled.** Lever's résumé parser pre-filled LinkedIn as
     `http://linkedin/aarya` and "Other website" as `http://aarya127.com`. The profile has
     `linkedin.com/in/AaryaShah127` and `aarya127.github.io`, and the tool never corrected them.
     The audit has to compare every non-empty field with the profile, not only the empty ones.
 
 **C. Put each answer in the right field**
 
-12. **Name fields rewritten to "I".** Cohere's required "Name" and Palantir's "Preferred Name" ended
-    up as "I". The first-person rewrite in `server.py` (around line 2659) treats every text input
-    without options as an essay (`textarea or not normalized_options(field)`), so "Aarya" becomes "I".
-    Limit it to `is_narrative_question_field`, and never touch name or identity fields.
-13. **Container fields.** On Givzey (Breezy) a container labelled "Personal Details Full Name* Email
+14. **Name fields rewritten to "I".** Cohere's required "Name" and Palantir's "Preferred Name" ended
+    up as "I". The first-person rewrite in `server.py` treated every text input without options as
+    an essay, so "Aarya" became "I". **Fixed 2026-09-27:** the rewrite now uses
+    `is_narrative_question_field`, and a regression test covers Name and Preferred Name.
+15. **Container fields.** On Givzey (Breezy) a container labelled "Personal Details Full Name* Email
     Address* Phone Number…" was mapped to the phone number, and the fill typed `647-767-8243` into Full
     Name, Email, Company, Title and Summary. On every Greenhouse form, a phantom field labelled
     "First Name*Last Name*Email*Phone…" stays listed as unresolved, which would block a submit gate
     forever.
     - Reject any field whose label joins the labels of three or more other fields.
     - Make a fill touch exactly one control.
-14. **Values in the wrong field.** Three cases:
+16. **Values in the wrong field.** Three cases:
     - OpenAI (Ashby): the LinkedIn URL went into a required date picker.
     - Shield AI (Lever): "Please state your full legal name" got the LinkedIn URL.
     - Palantir (Lever): the backend-experience essay got the email address.
@@ -175,49 +182,53 @@ by the kind of failure and ordered by how much harm the failure would do once su
     This is the known index-drift problem. Check the value's type against the field before typing: a
     URL or email never goes into a name, date or essay field. Re-verify the field's identity right
     before filling.
-15. **CAPTCHA widgets get filled.** On SmartRecruiters (Experian, Bosch) the extension scanned the
+17. **CAPTCHA widgets get filled.** On SmartRecruiters (Experian, Bosch) the extension scanned the
     reCAPTCHA challenge frame and ticked its "Reason for contacting us" help form. Skip any
     `recaptcha|hcaptcha|turnstile|challenges.cloudflare` frame entirely and report it as a blocker.
-16. **Cookie centres and site widgets get filled.** On SuccessFactors job pages and Databricks, the
+18. **Cookie centres and site widgets get filled.** On SuccessFactors job pages and Databricks, the
     tool ticked OneTrust cookie switches, including "Consent to all Advertising Cookies". It also set a
     job-alert frequency and filled search boxes. Extend the junk-field filter to OneTrust
     `ot-group-id-*` switches, cookie toggles and job-alert widgets.
-17. **Dropdown options.** Three failures:
+19. **Dropdown options.** Three failures:
     - JazzHR stores options as numbers ("0", "60"), so the required citizenship question ended on
       "No answer". Select and verify dropdowns by the visible option text.
     - Palantir's university question got the "Click Here (If you encounter an issue…)" help entry.
       Exclude help and instruction entries from the options.
-    - Instacart's option list was missing the right answer (item 6).
-18. **Typeahead fields.** Lever's "Current location" typeahead ("No location found") was never
+    - **The selected answer is missing from the option list.** On filled react-select dropdowns
+      the scanner drops the chosen option: Reddit's audit got gender, orientation and ethnicity
+      lists without "Male", "Heterosexual" or "South Asian", and Instacart's race list lacked
+      "Asian or Asian-American". The audit then can't confirm a correct answer and may "correct"
+      it to a wrong one. Include the selected option in every option list.
+20. **Typeahead fields.** Lever's "Current location" typeahead ("No location found") was never
     filled on any of the 3 Lever jobs; it was required on 2. Type a short query (city only), wait for
     suggestions, then pick one. The August School typeahead bug belongs here too (see below).
-19. **Multi-select and consent fills don't stick.** On Reddit, the required "I agree" consent, the
+21. **Multi-select and consent fills don't stick.** On Reddit, the required "I agree" consent, the
     ethnicity multi-select, gender and sexual orientation all stayed "ready to fill" after two fill
     passes.
 
 **D. Résumé**
 
-20. **Résumé upload is missed on some layouts.** The résumé wasn't attached on Rippling (where
+22. **Résumé upload is missed on some layouts.** The résumé wasn't attached on Rippling (where
     "Résumé*" is required), on Jobvite ("File" inputs), or on SmartRecruiters. JazzHR reported both
     "Attached" and "File inputs require manual browser confirmation". Detect drop zones ("Drop or
     select", "Choose a file") and generic "File" inputs inside résumé sections.
 
 **E. Know what page you're on**
 
-21. **Wait for the form.** SmartRecruiters draws its form well after page load. ServiceNow scanned 0
+23. **Wait for the form.** SmartRecruiters draws its form well after page load. ServiceNow scanned 0
     fields at 5 s even though the form finished rendering later. Scan once the visible field count has
     stopped changing (`docs/e2e_batch.py` now does this).
-22. **Refuse to fill pages that aren't applications.** The tool filled the email box on iCIMS,
+24. **Refuse to fill pages that aren't applications.** The tool filled the email box on iCIMS,
     Oracle and SuccessFactors "enter your email to start" pages, plus job-alert widgets. Classify each
     page first (application form, sign-in wall, email-first start, CAPTCHA, job description) and fill
     only application forms.
 
 **F. A trustworthy verdict per page**
 
-23. **Clean up verification noise.** Workable mismatches compare "question text + answer" with the
+25. **Clean up verification noise.** Workable mismatches compare "question text + answer" with the
     answer ("Expected '…identity? YES' but the page shows 'YES'"). Verification has to be exact before
     a submit gate can rely on it.
-24. **Give each page a verdict.**
+26. **Give each page a verdict.**
     - *Submit-ready:* every required field is filled and verified, and no factual field relies on an
       unconfirmed AI guess.
     - *Needs human:* the list of questions to hand off.
@@ -371,9 +382,9 @@ under 2 minutes.
 
 Decided on 2026-09-26:
 
-- **Current location:** Chicago, IL (Phase 1 item 7).
-- **Employer requests to write without AI:** ignore them and apply normally (Phase 1 item 9).
-- **"How did you hear about us?":** LinkedIn (Phase 1 item 10).
+- **Current location:** Chicago, IL (Phase 1 item 8).
+- **Employer requests to write without AI:** ignore them and apply normally (Phase 1 item 11).
+- **"How did you hear about us?":** LinkedIn (Phase 1 item 12).
 - **Model provider:** stay on the free NVIDIA endpoint and use the best model it offers (see Model
   choice).
 
@@ -384,7 +395,88 @@ Still open. These block parts of Phase 1 and Phase 4:
 2. **Optional demographic questions.** Answer them from the profile, decline, or skip them? Today
    they are sometimes answered and sometimes declined.
 
-<!-- MODEL_CHOICE -->
+## Model choice (free NVIDIA endpoint)
+
+**Decision (2026-09-27):**
+
+- Structured answers and the audit pass: `nvidia/nemotron-3-ultra-550b-a55b` (`NVIDIA_MODEL`).
+- Free-text essays: `z-ai/glm-5.3` (`NVIDIA_NARRATIVE_MODEL`).
+
+No single model was best at both. The backend now sends essays to the narrative model. That covers
+essays the bulk mapper wrote, focused retries and the first-person rewrite. If the narrative model
+declines an essay, the question goes to the human instead of keeping the mapper's text.
+
+**How it was tested.** 82 models are listed, 34 of them chat models; 24 of those returned 404,
+timed out or errored for this key. The 10 that responded reliably were run on 14 real prompts from
+the 2026-09-26 run (10 mapper, 4 audit) with only the model ID changed. Each prompt ran twice.
+There were about 110 graded checks against the candidate's true facts, 48 of them critical
+(invented facts, wrong demographics, name corruption, values in the wrong field). Separately, 6
+essay questions went through the backend's real essay path, twice each, and every claim was
+checked against the résumé.
+
+| Model | Mapper accuracy | Mapper critical | Audit critical | Essays with an invented claim | Median / slowest call | 137k-token prompt |
+|---|---|---|---|---|---|---|
+| **nemotron-3-ultra-550b** | **97.6%** | **62/62** | 32/34 | 6 of 12 | **6.7 s / 29 s** | ✅ |
+| **glm-5.3** | 95.9% | 61/62 | 32/34 | **1 of 12** | 11.8 s / 80 s | ❌ |
+| gemma-4-31b | 94.7% | 62/62 | **34/34** | not tested | 29 s / 107 s (10 calls over the 45 s timeout) | ❌ |
+| kimi-k3 | 95.3% | 60/62 | 23/25 (3 calls failed) | not tested | 17 s / 85 s | ✅ |
+| gpt-oss-20b | 97.1% | 60/62 | 21/25 | 2 of 3 (early sample) | 31 s / 58 s | ❌ |
+| nemotron-3-super-120b (used 09-26) | 94.7% | 59/62 | **24/34** (invented references, kept the fake certification) | 3 of 12 | 5.6 s / 38 s | ❌ |
+| nemotron-3.5-lightning-30b | 83.9% | 55/60 | 28/34 | not tested | 36 s / 103 s | ❌ |
+| ising-calibration-1.5-31b | 80.6% | 38/56 (invented reference answers) | 21/25 | not tested | 21 s / 89 s | ❌ |
+| nemotron-3-nano-omni-30b | 60.3% | 42/54 | 22/29 | not tested | 11 s / 53 s | ❌ |
+| mistral-nemotron | HTTP 500 on almost every call | | | | | |
+
+Ultra's essay inventions included "I'm a certified yoga instructor who teaches weekend community
+classes", mentoring that never happened, RBC "pipelines on Azure" (RBC was Snowflake/Kafka), and
+Ramp company claims written from memory when only the job title could be fetched. glm-5.3's single
+invention was "mentored peers", when asked about mentoring.
+
+**Live check (2026-09-27, the same 9 forms re-run with the new setup):**
+
+- **Better:**
+  - G2 Ops used the correct US address instead of the mixed one.
+  - G2 Ops' reference names were handed off instead of invented ("Globys" and "RBC" before).
+  - Reddit's required "I agree" consent and OpenAI's "I confirm I have read the above" were
+    filled.
+  - Discord's essay came from Discord's own job page (`grounded=True`) instead of generic text.
+  - Cohere's name stayed "Aarya Shah" (from the rewrite fix).
+- **Unchanged, because they're code bugs:**
+  - the LinkedIn URL in OpenAI's date picker
+  - Givzey's phone number in every field
+  - Shield AI's legal name set to the LinkedIn URL
+  - Lever's pre-filled garbage LinkedIn URL
+  - Mississauga on the Canada jobs
+  - Discord's optional ethnicity flipping to "Southeast Asian", and Reddit's multi-select adding
+    "East Asian" (both caused by the selected answer missing from the option list)
+- **Still wrong, from the model in some contexts:** later per-field Ask AI calls on G2 Ops invented
+  reference details ("Professional Reference", "2 years", the candidate's own contact details) and
+  the self-referral. The audit *did* correct the IAT certification to "No", but the page kept
+  "Yes". Clearance eligibility became "Yes"; super had answered "No".
+- **Cost:** sending essays to glm-5.3 adds latency under load. On Palantir one essay took 40 s and
+  another timed out, and that essay was handed off. The 150 s preview limit was also exceeded,
+  mostly by a 2-minute scan in the extension before the backend was called.
+
+**Fallback order** (Phase 1 item 1):
+
+- Structured answers: ultra-550b → glm-5.3 → kimi-k3 → super-120b.
+- Essays: glm-5.3 → super-120b.
+
+Re-run the evaluation whenever the endpoint retires a model.
+
+**What the model can't fix.** Every model scored well on the mapper, and most final-page errors on
+09-26 came from code, not the model:
+
+- the "Caucasian" substring match
+- the name rewrite to "I" (fixed 2026-09-27)
+- container fields and index drift
+- option lists missing the selected answer
+
+Two failures showed up with every model, so they need deterministic rules:
+
+- Every top model kept an invented "3 years of DoD experience" during the audit (Phase 1 item 5).
+- Every model invented something for "tell us something not on your résumé". Hand those questions
+  off, or answer them from a saved answer.
 
 ## How we measure progress
 
