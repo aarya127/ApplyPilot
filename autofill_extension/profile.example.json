@@ -9,6 +9,10 @@
     "github": "https://github.com/sample",
     "portfolio": "https://sample.dev",
     "location": "Sample City, ST",
+    "currentLocation": "City, ST",
+    "currentCity": "City",
+    "currentState": "ST",
+    "currentCountry": "United States",
     "addresses": {
       "canada": {
         "line1": "123 Example Street",

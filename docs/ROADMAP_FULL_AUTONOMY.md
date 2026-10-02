@@ -94,7 +94,10 @@ by the kind of failure and ordered by how much harm the failure would do once su
    - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout.
    - Make `/health` fail loudly on a 410, and show that in the side panel.
    - The owner chose to stay on the free endpoint, which retires models without notice and returns
-     intermittent 403 and 503 errors. The fallback chain and alert are therefore required, not
+     intermittent 403 and 503 errors. On 2026-10-01 a live run lost 8 of 22 model calls to 503s and 2
+     to timeouts. Reddit's veteran question became a hand-off because its call failed. A later run
+     got 1 of 3 mapper calls and no audit through. These outages are now the largest single cause
+     of hand-offs, so the fallback chain is the next fix to make. The fallback chain and alert are therefore required, not
      optional. The model ranking in Model choice gives the order for the chain.
 2. **Put a time limit on Ask AI.** On Spotify (Lever) and Ramp (Ashby), Ask AI was still "Working"
    after 10 minutes. Give the per-field loop an overall deadline and hand off whatever is left.
@@ -109,13 +112,39 @@ by the kind of failure and ordered by how much harm the failure would do once su
    "RBC", both "Former Manager", each with the candidate's own email and phone), while tagging its own
    evidence as `insufficientContext`. Rule: in `server.py`, drop every audit `fill` whose evidence is
    `insufficientContext` or missing.
+   **Fixed 2026-10-01:**
+   - `/audit-fields` drops any model fill or correction with no evidence, along with the model's
+     matching entry in `corrections`.
+   - Professional-reference fields (reference names, relationship, how long known, and the
+     reference's phone or email) never reach the model, the audit or the extension's contact
+     rules. They always go to the human unless there is a saved answer.
+   - A generic "Phone Number" or "Email" counts as a reference field when it sits within three
+     fields of a reference field. Its nearby text is often just the next label or the job
+     description.
+
+   Live result on G2 Ops: all 10 reference fields were left for the human, and the candidate's own
+   email and phone at the top of the form were still filled.
 5. **Credentials and experience that don't exist.** The G2 Ops run answered "Yes" to holding a DoD IAT
    Level II certification and "3" years of DoD systems experience. The August Point72 run ticked
    "Certifications: Other". The profile lists no certifications. Answer questions about
    certifications, clearances, licenses and years of experience in a specific area only from
    profile facts. With no fact, answer "No" if the question allows it, otherwise hand off.
+   **Fixed 2026-10-01, in both the backend and the extension:**
+   - Certification and license questions get "No" when the profile lists none. Driving licences
+     and education credentials are excluded.
+   - The extension's attestation rule no longer treats the noun "certification" as "I certify this
+     is true"; that rule had answered the IAT question "Yes".
+   - Security-clearance eligibility is "No" for a US permanent resident, since clearances require
+     citizenship, and "do you hold a clearance" is "None".
+   - Defense-specific years-of-experience questions get "0" when the profile has no defense work.
+     The fixed years rule had answered "3" (total experience).
+
+   **Still open:** other domain-specific years questions still get total experience.
 6. **The candidate as their own referrer.** "Who referred you to this position?" got "Aarya Shah".
-   Referral questions stay blank or "N/A" unless the profile names a referrer.
+   Referral questions stay blank or "N/A" unless the profile names a referrer. **Fixed
+   2026-10-01:** the extension's name rule had matched "Enter their first and last name". Referrer
+   questions now get `answers.referrer` if it is set, otherwise "N/A" for free text and "No" for
+   yes/no questions, on both sides.
 7. **Demographics must match the profile exactly.** Four separate failures:
    - **Substring bug:** `best_available_option("Asian", options)` returns **"White / Caucasian"**,
      because "Caucasian" contains "asian". On Instacart this came from a fixed `policy` rule, not the
@@ -127,6 +156,18 @@ by the kind of failure and ordered by how much harm the failure would do once su
    Fix: match options on whole words, and map demographics deterministically from
    `profile.demographics` with no AI step. If the profile's value isn't among the options, hand off.
    Never fall back to a fuzzy match.
+   **Fixed 2026-10-01, in both the backend and the extension:**
+   - Partial matches must be whole words and the only match.
+   - Exact matches always win.
+   - Ethnicity is tried before race.
+   - A dropdown or option list never receives a raw profile value that isn't one of its options.
+   - Checkbox groups tick one best option per answer. "Asian" had ticked East *and* Southeast
+     Asian.
+
+   Live result on Reddit: gender Male, orientation Heterosexual, ethnicity South Asian. The day
+   before it was "I don't wish to answer" and East Asian.
+   **Still open:** "Remove South Asian"-style chip buttons are still scanned as fields and show up
+   as phantom verification mismatches.
 8. **Where the candidate lives right now.** The owner confirmed it is Chicago. On the two Canada jobs,
    the tool used the Canadian address instead: Instacart got "(CAN) Ontario" for "Which state or
    province do you currently live in?" and Mississauga as the city, and Cohere got Mississauga. The
@@ -134,6 +175,17 @@ by the kind of failure and ordered by how much harm the failure would do once su
    - Add `currentLocation: "Chicago, IL"` and `currentCountry: "United States"`.
    - Use them for every "currently located / live / based" question, whatever the job's country.
    - Keep the Canadian address only for questions that ask for a Canadian mailing address.
+
+   **Fixed 2026-10-01:**
+   - The profile now has `currentLocation` / `currentCity` / `currentState` / `currentCountry`, and
+     `location` is Chicago.
+   - The mapper prompt carries `currentLocation`, with a rule to use it whatever the job's country.
+   - In the extension, the address, location and Workday country fills use the current country's
+     address.
+
+   Live result: Cohere's location went from Mississauga to "Chicago, Illinois, United States". The
+   owner must re-import `profile.private.json` (Options → Import JSON) for the extension to see the
+   new keys.
 9. **Mixed addresses.** G2 Ops got the Canadian street (895 Sombrero Way) and postal code (L5W1T1)
    together with a US city and state (Bartlett, IL). Fill the address as one unit from a single
    country's address record.
@@ -182,6 +234,10 @@ by the kind of failure and ordered by how much harm the failure would do once su
     This is the known index-drift problem. Check the value's type against the field before typing: a
     URL or email never goes into a name, date or essay field. Re-verify the field's identity right
     before filling.
+    A fourth case came from a rule, not drift: G2 Ops' "What **program**ming languages are you
+    most familiar with?" got "Statistics" because the field-of-study and degree rules matched
+    "program" inside "programming". **Fixed 2026-10-01:** they now match "program" only as a
+    whole word.
 17. **CAPTCHA widgets get filled.** On SmartRecruiters (Experian, Bosch) the extension scanned the
     reCAPTCHA challenge frame and ticked its "Reason for contacting us" help form. Skip any
     `recaptcha|hcaptcha|turnstile|challenges.cloudflare` frame entirely and report it as a blocker.
@@ -199,6 +255,9 @@ by the kind of failure and ordered by how much harm the failure would do once su
       lists without "Male", "Heterosexual" or "South Asian", and Instacart's race list lacked
       "Asian or Asian-American". The audit then can't confirm a correct answer and may "correct"
       it to a wrong one. Include the selected option in every option list.
+      **Fixed 2026-10-01:**
+      - The extension reads react-select multi-select chips. Before, those fields read as blank.
+      - Discovered options always include the currently selected value(s).
 20. **Typeahead fields.** Lever's "Current location" typeahead ("No location found") was never
     filled on any of the 3 Lever jobs; it was required on 2. Type a short query (city only), wait for
     suggestions, then pick one. The August School typeahead bug belongs here too (see below).
@@ -493,6 +552,7 @@ job:
 .venv/bin/python autofill_extension/backend/server.py &            # backend on :8000
 .venv/bin/python docs/e2e_batch.py docs/e2e_runs/<date>/jobs.json \
     --out docs/e2e_runs/<date> [--boards greenhouse,lever] [--resume]
+.venv/bin/python docs/e2e_summarize.py docs/e2e_runs/<date> --detail   # per-job table + final values
 ```
 
 Run output goes to `docs/e2e_runs/`, which is gitignored because screenshots contain profile data.

@@ -5743,3 +5743,309 @@ def test_mapper_essays_untouched_without_separate_narrative_model(monkeypatch):
     mappings = [{"index": 0, "value": "I built a full-stack quant trading platform with 45 REST endpoints and backtests.", "source": "resume"}]
 
     assert server.regenerate_mapper_narratives(fields, mappings, {}, {"url": ""}) == mappings
+
+
+# --- 2026-10-01 reliability fixes: option matching, evidence-less audits, credential and
+# reference rules, current location (see docs/ROADMAP_FULL_AUTONOMY.md, Phase 1) ---
+
+def _opts(*labels):
+    return [{"label": label, "value": label} for label in labels]
+
+
+def test_asian_never_matches_caucasian_and_ambiguous_partials_are_refused():
+    instacart_without_asian = _opts(
+        "White / Caucasian (A person having origins in any of the original peoples of Europe)",
+        "Hispanic or Latinx",
+        "I don't wish to answer",
+    )
+    assert server.best_available_option("Asian", instacart_without_asian) is None
+    assert server.best_available_option("Asian", _opts("White / Caucasian (A person ...)", "Asian or Asian-American (A person having origins in Asia)")) == "Asian or Asian-American (A person having origins in Asia)"
+    assert server.best_available_option("Asian", _opts("East Asian", "South Asian", "Southeast Asian")) is None
+    assert server.best_available_option("South Asian", _opts("East Asian", "South Asian", "Southeast Asian")) == "South Asian"
+
+
+def test_demographics_prefer_the_specific_value_and_never_return_non_options():
+    profile = {"demographics": {"race": "Asian", "ethnicity": "South Asian", "gender": "Male", "genderIdentity": "Cisgender man"}}
+
+    def answer(label, *labels):
+        field = {"index": 0, "label": label, "options": _opts(*labels)}
+        return server.demographic_policy_answer(server.field_policy_haystack(field), field, profile)
+
+    assert answer("Race or Ethnicity (optional)", "East Asian", "South Asian", "Southeast Asian") == "South Asian"
+    assert answer("Race and Ethnicity*", "Asian", "White", "Two or More Races") == "Asian"
+    assert answer("What gender identity do you most closely identify with?", "Female", "Male", "Non-binary") == "Male"
+    assert answer("Are you a person of transgender experience?", "Yes", "No", "I don't wish to answer") is None
+
+
+def test_credential_clearance_referrer_and_defense_years_rules():
+    profile = {
+        "usPermanentResident": "Yes",
+        "canadianCitizen": "Yes",
+        "answers": {"yearsOfExperience": "3"},
+        "resumeFacts": {"certifications": []},
+        "workExperience": [{"company": "Cognixion", "title": "Machine Learning Software Engineer"}],
+    }
+
+    def policy(label, *labels):
+        mapping = server.authoritative_policy_mapping({"index": 0, "label": label, "options": _opts(*labels)}, profile)
+        return mapping and mapping["value"]
+
+    assert policy("Do you currently hold a DoD IAT Level II certification? Ex. Security+, SSCP, etc.*", "-- No answer --", "Yes", "No", "Currently Pursuing") == "No"
+    # A green-card holder is not a US citizen, and US clearances require citizenship.
+    assert policy("Are you eligible to hold a U.S. Security Clearance?*", "-- No answer --", "Yes", "No") == "No"
+    assert policy("Do you currently hold a U.S. Security Clearance?*", "-- No answer --", "Active Secret", "Interim", "None") == "None"
+    assert policy("Who referred you to this position? Enter their first and last name here.") == "N/A"
+    assert policy("Were you referred by a current employee?", "Yes", "No") == "No"
+    assert policy("How many years' of experience do you have designing, developing, or maintaining DoD cloud-based environments?") == "0"
+    # Ordinary years questions still use the profile's total.
+    assert policy("How many years of professional experience do you have?") == "3"
+    assert policy("Do you have a valid driver's license?", "Yes", "No") is None
+    assert policy("Are you licensed to drive?", "Yes", "No") is None
+    assert policy("Do you have a high school diploma or GED certificate?", "Yes", "No") is None
+
+
+def test_reference_fields_never_reach_the_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    sent_labels = []
+
+    def fake_mapper(fields, profile, page):
+        sent_labels.extend(field["label"] for field in fields)
+        return [{"index": field["index"], "value": "Former Manager", "confidence": 0.7, "source": "llm"} for field in fields]
+
+    monkeypatch.setattr(server, "call_nvidia_mapper", fake_mapper)
+    monkeypatch.setattr(server, "compact_retry_unanswered_option_fields", lambda *args, **kwargs: [])
+    fields = [
+        {"index": 0, "label": "2. Name of First Reference*", "tag": "input", "type": "text", "nearbyText": ""},
+        {"index": 1, "label": "Relationship*", "tag": "input", "type": "text", "nearbyText": "Relationship* 2. Name of First Reference* Phone Number*"},
+        {"index": 2, "label": "How Long Known*", "tag": "input", "type": "text", "nearbyText": "How Long Known* Phone Number* May we contact for reference?*"},
+        {"index": 3, "label": "Phone*", "tag": "input", "type": "tel", "nearbyText": "Phone* Address* City"},
+    ]
+
+    response = server.app.test_client().post("/map-fields", json={"fields": fields, "profile": {"firstName": "Aarya"}, "page": {}})
+
+    assert response.status_code == 200
+    assert sent_labels == ["Phone*"]  # the candidate's own phone still goes to the model
+    assert {m["index"] for m in response.get_json()["mappings"]} <= {3}
+
+
+def test_audit_drops_model_writes_without_evidence(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    monkeypatch.setattr(server, "call_nvidia_auditor", lambda *args, **kwargs: {
+        "decisions": [
+            {"index": 0, "action": "fill", "value": "Globys", "evidence": "insufficientContext", "source": "audit"},
+            {"index": 1, "action": "fill", "value": "Cognixion", "evidence": "resume", "source": "audit"},
+            {"index": 2, "action": "fill", "value": "Former Manager", "evidence": "resume", "source": "audit"},
+        ],
+        "corrections": [{"index": 0, "value": "Globys", "confidence": 0.8}],
+    })
+    fields = [
+        {"index": 0, "label": "Name of your manager at your last job", "tag": "input", "type": "text"},
+        {"index": 1, "label": "Name of Current or Most Recent Employer*", "tag": "input", "type": "text"},
+        {"index": 2, "label": "Relationship*", "tag": "input", "type": "text", "nearbyText": "Relationship* 2. Name of First Reference*"},
+    ]
+    mappings = [{"index": i, "value": ""} for i in range(3)]
+
+    body = server.app.test_client().post(
+        "/audit-fields", json={"fields": fields, "mappings": mappings, "profile": {}, "page": {}}
+    ).get_json()
+
+    fills = {(d["index"], d["value"]) for d in body["decisions"] if d["action"] in ("fill", "correct")}
+    assert fills == {(1, "Cognixion")}
+    assert all(c["index"] != 0 for c in body["corrections"])
+
+
+def test_mapper_prompt_states_where_the_candidate_lives():
+    profile = {
+        "location": "Chicago, IL",
+        "currentLocation": "Chicago, IL", "currentCity": "Chicago", "currentState": "IL", "currentCountry": "United States",
+        "addresses": {"canada": {"city": "Mississauga", "province": "ON", "country": "Canada"}, "usa": {"city": "Bartlett", "state": "IL", "country": "United States"}},
+    }
+    prompt = json.loads(server.build_mapper_prompt([{"index": 0, "label": "Which state or province do you currently live in?"}], profile, {"targetCountry": "canada"}))
+
+    assert prompt["profile"]["currentLocation"] == {"location": "Chicago, IL", "city": "Chicago", "stateOrProvince": "IL", "country": "United States"}
+    assert "answer from currentLocation" in prompt["instructions"]
+
+
+def _content_script_run(url, html, profile, settings, after_fill_js=()):
+    """Load content.js on a fixture page, preview, apply the preview's mappings, then
+    evaluate each expression in after_fill_js. Returns (preview, results)."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+        page = browser.new_page()
+        page.route(url.split("?")[0].rsplit("/", 1)[0] + "/**", lambda route: route.fulfill(body=html, content_type="text/html"))
+        page.goto(url)
+        page.evaluate(
+            f"""() => {{
+              const profile = {json.dumps(profile)};
+              const settings = {json.dumps(settings)};
+              window.chrome = {{
+                runtime: {{
+                  onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+                  sendMessage: async () => ({{ ok: true, payload: {{ mappings: [] }} }})
+                }},
+                storage: {{ local: {{ get: async () => ({{ candidateProfile: profile, settings }}) }} }}
+              }};
+            }}"""
+        )
+        page.add_script_tag(path=str(ROOT / "autofill_extension/src/content.js"))
+        preview = page.evaluate(
+            """() => new Promise((resolve) => window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, resolve))"""
+        )
+        assert preview["ok"] is True, preview
+        page.evaluate(
+            """(mappings) => new Promise((resolve) => window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings }, null, resolve))""",
+            preview["result"]["mappings"],
+        )
+        results = [page.evaluate(expression) for expression in after_fill_js]
+        browser.close()
+        return preview, results
+
+
+SENSITIVE_SETTINGS = {
+    "autoFillDynamicFields": False,
+    "autoFillSensitiveFields": True,
+    "autoMapAmbiguousFields": False,
+    "requireReviewBeforeSubmit": True,
+    "targetCountry": "usa",
+}
+
+
+def test_content_script_ticks_only_the_specific_ethnicity():
+    html = """
+      <form>
+        <fieldset>
+          <legend>Race or ethnicity (select all that apply) *</legend>
+          <label><input type="checkbox" name="eth" value="east" required> East Asian</label>
+          <label><input type="checkbox" name="eth" value="south"> South Asian</label>
+          <label><input type="checkbox" name="eth" value="southeast"> Southeast Asian</label>
+          <label><input type="checkbox" name="eth" value="white"> White</label>
+        </fieldset>
+      </form>
+    """
+    profile = {"firstName": "Sample", "demographics": {"race": "Asian", "ethnicity": "South Asian"}}
+
+    _, [checked] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/1", html, profile, SENSITIVE_SETTINGS,
+        ["() => Array.from(document.querySelectorAll('input[name=eth]:checked')).map((el) => el.value)"],
+    )
+
+    assert checked == ["south"]
+
+
+def test_content_script_uses_current_location_on_canada_jobs():
+    html = """
+      <form>
+        <label for="loc">Location (City) *</label><input id="loc" type="text" required>
+        <label for="line1">Address Line 1 *</label><input id="line1" type="text" required>
+        <label for="city">City *</label><input id="city" type="text" required>
+        <label for="country">Country *</label>
+        <select id="country" required><option value="">Select...</option><option>Canada</option><option>United States</option></select>
+      </form>
+    """
+    profile = {
+        "firstName": "Sample",
+        "location": "Chicago, IL",
+        "currentLocation": "Chicago, IL", "currentCity": "Chicago", "currentState": "IL", "currentCountry": "United States",
+        "addresses": {
+            "canada": {"line1": "895 Example Way", "city": "Mississauga", "province": "ON", "postalCode": "L5W1T1", "country": "Canada"},
+            "usa": {"line1": "224 Example Dr", "city": "Bartlett", "state": "IL", "zipCode": "60103", "country": "United States"},
+        },
+    }
+    settings = {**SENSITIVE_SETTINGS, "targetCountry": "canada"}
+
+    _, values = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/2", html, profile, settings,
+        [f"() => document.getElementById('{element_id}').value" for element_id in ("loc", "line1", "city", "country")],
+    )
+
+    location, line1, city, country = values
+    assert "Chicago" in location
+    assert line1 == "224 Example Dr"
+    assert city == "Bartlett"
+    assert country == "United States"
+
+
+def test_content_script_reads_react_select_chips_and_keeps_selected_option():
+    # React-select multi: the chosen "South Asian" is a chip and is hidden from the menu.
+    html = """
+      <form>
+        <label for="eth-input">Please select up to 2 ethnicities that you most closely identify with *</label>
+        <div class="select__control">
+          <div class="select__value-container">
+            <div class="select__multi-value"><div class="select__multi-value__label">South Asian</div></div>
+            <input id="eth-input" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-required="true">
+          </div>
+        </div>
+        <div id="menu" class="select__menu" role="listbox" hidden>
+          <div class="select__option" role="option">East Asian</div>
+          <div class="select__option" role="option">Southeast Asian</div>
+          <div class="select__option" role="option">White</div>
+        </div>
+      </form>
+      <script>
+        const input = document.getElementById('eth-input');
+        const menu = document.getElementById('menu');
+        const open = () => { menu.hidden = false; input.setAttribute('aria-expanded', 'true'); };
+        input.addEventListener('click', open);
+        input.addEventListener('mousedown', open);
+        input.addEventListener('keydown', (e) => { if (e.key === 'Escape') { menu.hidden = true; input.setAttribute('aria-expanded', 'false'); } else { open(); } });
+      </script>
+    """
+    profile = {"firstName": "Sample", "demographics": {"race": "Asian", "ethnicity": "South Asian"}}
+
+    preview, _ = _content_script_run("https://boards.greenhouse.io/acme/jobs/3", html, profile, SENSITIVE_SETTINGS)
+
+    fields = preview["result"].get("debugFields") or []
+    field = next((f for f in fields if "ethnicities" in (f.get("label") or "").lower()), None)
+    assert field is not None, fields
+    assert field["value"] == "South Asian"
+    assert "South Asian" in [option.get("label") for option in field.get("options") or []]
+
+
+def test_content_script_g2_style_form_never_invents_credentials_or_references():
+    # Shapes from the G2 Ops (JazzHR) form, 2026-09-26/10-01 live runs.
+    html = """
+      <form>
+        <label for="phone">Phone *</label><input id="phone" type="tel" required>
+        <label for="ref">Who referred you to this position? Enter their first and last name here.</label><input id="ref" type="text" required>
+        <label for="iat">Do you currently hold a DoD IAT Level II certification? Ex. Security+, SSCP, etc. *</label>
+        <select id="iat" required><option value="0">-- No answer --</option><option value="1">Yes</option><option value="2">No</option></select>
+        <label for="dod">How many years' of experience do you have designing, developing, or maintaining DoD cloud-based environments? *</label>
+        <input id="dod" type="text" required>
+        <label for="langs">What programming languages are you most familiar with? Ex. Java, Python, Ruby *</label>
+        <textarea id="langs" required></textarea>
+        <div class="field"><label for="r1">2. Name of First Reference *</label><input id="r1" type="text" required></div>
+        <div class="field"><label for="r1rel">Relationship *</label><input id="r1rel" type="text" required></div>
+        <div class="field"><label for="r1long">How Long Known *</label><input id="r1long" type="text" required></div>
+        <div class="field"><label for="detail">Describe in detail the projects you delivered together, including the technologies used, the size of the team, the delivery timelines and the measurable outcomes, so that our hiring team can verify your experience *</label><textarea id="detail"></textarea></div>
+        <div class="field"><label for="r1phone">Phone Number *</label><input id="r1phone" type="text" required></div>
+        <div class="field"><label for="r1email">Email Address</label><input id="r1email" type="text"></div>
+      </form>
+    """
+    profile = {
+        "firstName": "Sample", "lastName": "Candidate", "fullName": "Sample Candidate",
+        "phone": "555-010-0000", "email": "sample@example.com",
+        "fieldOfStudy": "Statistics", "degree": "Bachelor of Mathematics",
+        "answers": {"yearsOfExperience": "3"},
+        "workExperience": [{"company": "Acme", "title": "ML Engineer"}],
+    }
+
+    _, values = _content_script_run(
+        "https://acme.applytojob.com/apply/x1/Software-Engineer", html, profile, SENSITIVE_SETTINGS,
+        [f"() => document.getElementById('{element_id}').value" for element_id in ("phone", "ref", "iat", "dod", "langs", "r1", "r1rel", "r1phone", "r1long", "r1email")],
+    )
+
+    phone, referrer, iat, dod, langs, ref_name, ref_rel, ref_phone, ref_long, ref_email = values
+    assert phone == "555-010-0000"
+    assert referrer == "N/A"
+    assert iat != "1"  # never "Yes" without a held certification
+    assert dod == "0"
+    assert langs not in ("Statistics", "Bachelor of Mathematics")
+    assert (ref_name, ref_rel, ref_phone, ref_long, ref_email) == ("", "", "", "", "")

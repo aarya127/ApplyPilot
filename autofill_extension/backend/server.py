@@ -248,6 +248,12 @@ def map_fields():
         if mapping is not None
     ]
     resolved_indexes = {mapping["index"] for mapping in conditional_mappings}
+    # Reference details (names, relationship, how long known, their phone) exist only in
+    # the candidate's head; the model invents them ("Former Manager", the candidate's own
+    # phone), so they always surface to the human.
+    resolved_indexes |= {
+        field.get("index") for field in fields if isinstance(field, dict) and is_reference_field(field)
+    }
     remaining_fields = [
         field for field in fields
         if not (isinstance(field, dict) and field.get("index") in resolved_indexes)
@@ -329,7 +335,32 @@ def audit_fields():
             and not str(decision.get("source") or "").startswith(("deterministic", "profile", "policy"))
         )
 
-    decisions = [decision for decision in decisions if not is_unsafe_audit_write(decision)]
+    def is_unsupported_audit_write(decision: dict[str, Any]) -> bool:
+        """A model fill/correct must cite evidence. On G2 Ops the audit filled two invented
+        references while tagging its own evidence "insufficientContext"."""
+        if decision.get("action") not in ("correct", "fill"):
+            return False
+        if str(decision.get("source") or "").startswith(("deterministic", "profile", "policy")):
+            return False
+        field = audit_field_by_index.get(decision.get("index"))
+        if isinstance(field, dict) and is_reference_field(field):
+            return True
+        return str(decision.get("evidence") or "").strip().lower() in UNSUPPORTED_AUDIT_EVIDENCE
+
+    unsupported_indexes = {
+        decision.get("index") for decision in decisions if is_unsupported_audit_write(decision)
+    }
+    decisions = [
+        decision for decision in decisions
+        if not is_unsafe_audit_write(decision) and not is_unsupported_audit_write(decision)
+    ]
+    # The model's parallel "corrections" list carries no evidence of its own; drop the
+    # ones whose decision was rejected, keeping deterministic policy corrections.
+    corrections = [
+        correction for correction in corrections
+        if correction.get("index") not in unsupported_indexes
+        or str(correction.get("source") or "").startswith(("policy", "deterministic", "profile"))
+    ]
 
     return jsonify({
         "corrections": corrections,
@@ -626,6 +657,19 @@ def call_nvidia_auditor(
     return result
 
 
+def current_location(profile: dict[str, Any]) -> dict[str, str]:
+    """Where the candidate lives now. Every "where do you live / are you located" question
+    uses this whatever the job's country: on 2026-09-26 both Canada jobs answered with the
+    Canadian mailing address although the owner lives in Chicago."""
+    country = str(profile.get("currentCountry") or "").strip()
+    return {
+        "location": str(profile.get("currentLocation") or profile.get("location") or "").strip(),
+        "city": str(profile.get("currentCity") or "").strip(),
+        "stateOrProvince": str(profile.get("currentState") or profile.get("currentProvince") or "").strip(),
+        "country": country,
+    }
+
+
 def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], page: dict[str, Any]) -> str:
     addresses = profile.get("addresses", {})
     display_name = profile_display_name(profile)
@@ -644,6 +688,7 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
             "canada": safe_location(addresses.get("canada", {}), ["city", "province", "postalCode", "country"]),
             "usa": safe_location(addresses.get("usa", {}), ["city", "state", "zipCode", "country"]),
         },
+        "currentLocation": current_location(profile),
         "workEligibility": {
             "workAuthorization": profile.get("workAuthorization"),
             "needsSponsorship": profile.get("needsSponsorship"),
@@ -703,6 +748,9 @@ def build_mapper_prompt(fields: list[dict[str, Any]], profile: dict[str, Any], p
                 "For Degree, Discipline, Field of Study, Major, and Qualification dropdowns, never answer with a free-text degree or major; use only a supplied option label, or skip if options are missing. "
                 "For disability, demographic, veteran, work authorization, sponsorship, relocation, consent, and yes/no fields, compare the meaning of every supplied option and return the single closest option label exactly. "
                 "Prefer explicit profile facts and resume facts over inference. "
+                "The candidate currently lives in currentLocation. For every question about where the candidate lives, "
+                "is located, resides or is based (city, state/province, country, time zone), answer from currentLocation "
+                "whatever country the job is in, and use the address in addresses whose country matches currentLocation.country. "
                 "Use savedAnswers only when they clearly match the same current question; ignore generic or low-information saved answers for policy questions. "
                 f"Act as {display_name}; answer eligibility/default-policy questions according to defaultPolicies. "
                 "Use resumeTranscript (when present) or candidateContext work history to decide whether the candidate has worked at a named company; if the named company is absent and savedAnswers do not say otherwise, answer No. "
@@ -1699,26 +1747,41 @@ def demographic_policy_answer(haystack: str, field: dict[str, Any], profile: dic
     demographics = profile.get("demographics") or {}
     options = normalized_options(field)
 
+    answers = profile.get("answers", {}) if isinstance(profile.get("answers"), dict) else {}
+
     if any(term in haystack for term in ["hispanic", "latino", "latina", "latinx"]):
-        answer = demographics.get("hispanicLatino")
-        return option_or_value(answer, options)
+        return first_matching_answer([demographics.get("hispanicLatino")], options)
 
     if any(term in haystack for term in ["race", "racial", "ethnic", "ethnicity"]):
-        answer = demographics.get("race") or demographics.get("ethnicity")
-        return option_or_value(answer, options)
+        # Most specific first: "South Asian" must win on ethnicity lists before the
+        # broad "Asian" gets a chance to match anything else.
+        return first_matching_answer([demographics.get("ethnicity"), demographics.get("race")], options)
 
     if "sexual orientation" in haystack or "orientation" in haystack:
-        answer = demographics.get("sexualOrientation") or profile.get("answers", {}).get("sexualOrientation")
-        return option_or_value(answer, options)
+        return first_matching_answer([demographics.get("sexualOrientation"), answers.get("sexualOrientation")], options)
 
     if "gender identity" in haystack or "gender" in haystack:
-        answer = demographics.get("genderIdentity") or demographics.get("gender")
-        return option_or_value(answer, options)
+        return first_matching_answer([demographics.get("genderIdentity"), demographics.get("gender")], options)
 
     if "disability" in haystack:
-        answer = profile.get("answers", {}).get("disabilityStatus") or profile.get("disabilityStatus")
-        return option_or_value(answer, options)
+        return first_matching_answer([answers.get("disabilityStatus"), profile.get("disabilityStatus")], options)
 
+    return None
+
+
+def first_matching_answer(candidates: list[Any], options: list[dict[str, str]]) -> str | None:
+    """First profile value that matches a visible option. Unlike option_or_value, an
+    optioned field never receives a raw profile value that isn't one of its options
+    ("Cisgender man" on a Male/Female list), so the question hands off instead."""
+    values = [str(value) for value in candidates if value not in (None, "", [], {})]
+    if not values:
+        return None
+    if not options:
+        return values[0]
+    for value in values:
+        match = best_available_option(value, options)
+        if match:
+            return match
     return None
 
 
@@ -2037,12 +2100,13 @@ def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
                 return hit.get("label") or hit.get("value")
         return None
 
+    aliases = option_aliases(desired)
+    partial_hits: list[str] = []
     for option in options:
         label = option.get("label", "")
         option_value = option.get("value", "")
         normalized_label = normalize_for_option(label)
         normalized_value = normalize_for_option(option_value)
-        aliases = option_aliases(desired)
 
         if desired in {normalized_label, normalized_value}:
             return label or option_value
@@ -2055,10 +2119,19 @@ def match_option_value(value: Any, options: list[dict[str, str]]) -> str | None:
                 return label or option_value
             continue
 
-        if any(alias and alias in normalized_label for alias in aliases if len(alias) > 3):
-            return label or option_value
+        if any(len(alias) > 3 and contains_phrase(normalized_label, alias) for alias in aliases):
+            hit = label or option_value
+            if hit not in partial_hits:
+                partial_hits.append(hit)
 
-    return None
+    # A partial match must be a whole word ("asian" never matches "caucasian") and
+    # unambiguous ("asian" must not pick "East Asian" out of East/South/Southeast Asian).
+    return partial_hits[0] if len(partial_hits) == 1 else None
+
+
+def contains_phrase(text: str, phrase: str) -> bool:
+    """Whole-word containment for normalize_for_option() strings (space-separated tokens)."""
+    return bool(phrase) and f" {phrase} " in f" {text} "
 
 
 def yes_no_constrained_value(value: str, options: list[dict[str, str]]) -> str | None:
@@ -2372,9 +2445,12 @@ def compact_candidate_facts(profile: dict[str, Any]) -> dict[str, Any]:
         "veteranStatus": profile.get("veteranStatus"),
         "relocation": profile.get("relocation") or answers.get("relocation"),
         "preferredUsaLocation": profile.get("usaPreferredLocation") or profile.get("usaLocation"),
+        "currentLocation": current_location(profile),
         "demographics": profile.get("demographics", {}),
     }
 
+
+UNSUPPORTED_AUDIT_EVIDENCE = {"", "insufficientcontext", "insufficient context", "none", "unknown", "assumption"}
 
 RELOCATION_REFUSAL_PATTERN = re.compile(
     r"(would not|will not|cannot|can't|not able|unable|not willing|unwilling)\b.{0,50}\b(work from|relocat|commut|move)",
@@ -2756,6 +2832,27 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         answer = best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
     elif has_sponsorship_terms(haystack) and not is_work_eligibility_question(haystack):
         answer = best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
+    elif is_clearance_eligibility_question(haystack):
+        citizen = us_citizen_status(profile)
+        if citizen:
+            answer = yes_no_answer(citizen, options)
+    elif is_clearance_holding_question(haystack):
+        held = profile.get("securityClearance") or profile.get("answers", {}).get("securityClearance")
+        if not held:
+            answer = (best_available_option("None", options) if options else None) or yes_no_answer("No", options)
+    elif is_certification_holding_question(haystack):
+        if not profile_certifications(profile):
+            answer = yes_no_answer("No", options)
+    elif is_referrer_question(haystack):
+        stated = profile.get("answers", {}).get("referrer") or profile.get("answers", {}).get("referredBy")
+        if stated:
+            answer = best_available_option(str(stated), options) if options else str(stated)
+        else:
+            answer = yes_no_answer("No", options) if options else "N/A"
+    elif is_years_of_experience_question(haystack) and unsupported_experience_domain(haystack, profile):
+        # "How many years designing DoD cloud environments?" is not the candidate's total
+        # years; the profile shows no such experience, so the truthful answer is zero.
+        answer = best_available_option("0", options) if options else "0"
     elif is_work_eligibility_question(haystack):
         authorization = stated_work_authorization(profile)
         if authorization:
@@ -2787,6 +2884,97 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         return None
 
     return {"index": field["index"], "value": answer, "confidence": 0.95, "source": "policy"}
+
+
+def yes_no_answer(value: str, options: list[dict[str, str]]) -> str | None:
+    """A Yes/No answer constrained to the visible options; free text gets the bare word."""
+    return best_available_option(value, options) if options else value
+
+
+def is_clearance_eligibility_question(haystack: str) -> bool:
+    return bool(re.search(r"(eligible|able|qualif\w*)\b.{0,40}\b(obtain|hold|get|receive|maintain)\b.{0,40}\bclearance", haystack))
+
+
+def is_clearance_holding_question(haystack: str) -> bool:
+    return bool(
+        re.search(r"\b(do|does) you (currently )?(hold|have|possess)\b.{0,50}\bclearance", haystack)
+        or re.search(r"\b(current|active) (u s )?(security )?clearance\b", haystack)
+    )
+
+
+def is_certification_holding_question(haystack: str) -> bool:
+    # Driving licences and education credentials ("GED certificate") are not professional
+    # certifications; the profile can't rule them out.
+    if re.search(r"driv|diploma|\bged\b|degree|high school|transcript", haystack):
+        return False
+    return bool(
+        re.search(r"\b(do|does) you (currently )?(hold|have|possess)\b.{0,80}\b(certification|certificate|certified|license|licence)\b", haystack)
+        or re.search(r"\bare you (currently )?(certified|licensed)\b", haystack)
+    )
+
+
+def profile_certifications(profile: dict[str, Any]) -> list[Any]:
+    resume_facts = profile.get("resumeFacts") if isinstance(profile.get("resumeFacts"), dict) else {}
+    held = list(profile.get("certifications") or []) + list(resume_facts.get("certifications") or [])
+    return [item for item in held if item not in (None, "", {})]
+
+
+def us_citizen_status(profile: dict[str, Any]) -> str | None:
+    answers = profile.get("answers", {}) if isinstance(profile.get("answers"), dict) else {}
+    stated = profile.get("usCitizen") or answers.get("usCitizen")
+    if stated not in (None, ""):
+        semantic = semantic_yes_no_value(normalize_for_option(stated))
+        return semantic.capitalize() if semantic else None
+    # A US permanent resident is by definition not a US citizen; US security clearances
+    # require citizenship.
+    if semantic_yes_no_value(normalize_for_option(profile.get("usPermanentResident"))) == "yes":
+        return "No"
+    return None
+
+
+def is_referrer_question(haystack: str) -> bool:
+    return bool(re.search(
+        r"who referred you|referred by|referr(al|er)( s)? (name|first and last)|name of (your |the )?(referrer|person who referred)"
+        r"|(were|was|have) you (been )?referred|employee referral",
+        haystack,
+    ))
+
+
+DEFENSE_DOMAIN_PATTERN = re.compile(r"\b(dod|department of defense|defense|defence|military|classified)\b")
+
+
+def unsupported_experience_domain(haystack: str, profile: dict[str, Any]) -> bool:
+    if not DEFENSE_DOMAIN_PATTERN.search(haystack):
+        return False
+    resume_facts = profile.get("resumeFacts") if isinstance(profile.get("resumeFacts"), dict) else {}
+    background = json.dumps([profile.get("workExperience"), resume_facts.get("experience")]).lower()
+    return not DEFENSE_DOMAIN_PATTERN.search(background)
+
+
+REFERENCE_PERSON_PATTERN = re.compile(
+    r"\bname of (the |your )?(\w+ )?reference\b|\breference'?s? (name|phone|e-?mail|relationship|title|company)\b"
+    r"|\b(first|second|third|1st|2nd|3rd|professional|personal) reference\b|\bmay we contact\b.{0,30}\breferences?\b"
+    r"|\bcontact (your |the |this )?references?\b",
+    re.I,
+)
+# Labels that only ever ask about a person the candidate knows.
+REFERENCE_ONLY_LABEL = re.compile(
+    r"^\W*(\d+\.\s*)?(relationship|how long known|how long have you known( them)?|years known)\W*$", re.I
+)
+# Generic labels that are reference details only inside a reference block.
+REFERENCE_DETAIL_LABEL = re.compile(r"^\W*(\d+\.\s*)?(phone( number)?|e-?mail( address)?|title|company)\W*$", re.I)
+
+
+def is_reference_field(field: dict[str, Any]) -> bool:
+    """A professional-reference field: its own label names a reference, or it is a bare
+    detail label (Relationship / How Long Known / Phone) inside a reference block."""
+    if field.get("isReference"):  # set by the extension, which sees neighbouring fields
+        return True
+    label = str(field.get("label") or "").strip()
+    if REFERENCE_PERSON_PATTERN.search(label) or REFERENCE_ONLY_LABEL.match(label):
+        return True
+    nearby = str(field.get("nearbyText") or "")[:240]
+    return bool(REFERENCE_DETAIL_LABEL.match(label) and REFERENCE_PERSON_PATTERN.search(nearby))
 
 
 def message_json_content(response: Any) -> str:

@@ -692,6 +692,11 @@ function isAiAskableField(field) {
     return false;
   }
 
+  // Professional-reference details are the user's to give; AI only invented them.
+  if (field.isReference) {
+    return false;
+  }
+
   // Dropdown-like fields whose options could not be read are normally skipped, but a
   // required one must still reach AI: the content script only applies safe yes/no style
   // policy answers to unoptioned dropdowns, and it fills them through option clicks.

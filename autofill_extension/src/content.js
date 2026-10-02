@@ -27,6 +27,47 @@
     "[role='radio']"
   ].join(",");
 
+  const DEFENSE_DOMAIN_PATTERN = /\b(dod|department of defense|defense|defence|military|classified)\b/;
+  const REFERENCE_PERSON_PATTERN = /\bname of (the |your )?(\w+ )?reference\b|\breference'?s? (name|phone|e-?mail|relationship|title|company)\b|\b(first|second|third|1st|2nd|3rd|professional|personal) reference\b|\bmay we contact\b.{0,30}\breferences?\b|\bcontact (your |the |this )?references?\b/i;
+  // Labels that only ever ask about a person the candidate knows.
+  const REFERENCE_ONLY_LABEL = /^\W*(\d+\.\s*)?(relationship|how long known|how long have you known( them)?|years known)\W*$/i;
+  // Generic labels that are reference details only inside a reference block.
+  const REFERENCE_DETAIL_LABEL = /^\W*(\d+\.\s*)?(phone( number)?|e-?mail( address)?|title|company)\W*$/i;
+
+  function isReferenceField(field) {
+    if (field?.isReference) {
+      return true;
+    }
+    const label = String(field?.label || "").trim();
+    if (REFERENCE_PERSON_PATTERN.test(label) || REFERENCE_ONLY_LABEL.test(label)) {
+      return true;
+    }
+    return REFERENCE_DETAIL_LABEL.test(label)
+      && REFERENCE_PERSON_PATTERN.test(String(field.nearbyText || "").slice(0, 240));
+  }
+
+  // Generic "Phone Number" / "Email" labels belong to a reference when they sit among
+  // reference fields: their nearby text is often just the next label or the job
+  // description, but the candidate's own contact fields are never inside that block.
+  function markReferenceFields(fields) {
+    const ordered = [...fields].sort((a, b) => a.index - b.index);
+    const anchors = ordered
+      .map((field, position) => (isReferenceField(field) ? position : -1))
+      .filter((position) => position >= 0);
+
+    ordered.forEach((field, position) => {
+      const nearAnchor = anchors.some((anchor) => Math.abs(anchor - position) <= 3);
+      if (isReferenceField(field) || (nearAnchor && REFERENCE_DETAIL_LABEL.test(String(field.label || "").trim()))) {
+        field.isReference = true;
+      }
+    });
+    return fields;
+  }
+
+  function isReferrerQuestion(haystack) {
+    return /who referred you|referred by|referr(al|er)( s)? (name|first and last)|name of (your |the )?(referrer|person who referred)|(were|was|have) you (been )?referred/.test(haystack);
+  }
+
   const DROPDOWN_OPTION_SELECTOR = [
     "[role='option']",
     "[data-option]",
@@ -277,6 +318,7 @@
       options: field.options || [],
       haystack: fieldHaystack(field),
       isPolicy: isAiOnlyField(field),
+      isReference: Boolean(field.isReference),
       shouldAsk: shouldAskForField(field),
       target: isTargetField(field)
     };
@@ -321,7 +363,7 @@
     // parser can populate fields and the plan sees the post-parse state.
     const resumeFirst = await runNativeResumeParseFirst();
     await prepareRepeatableSections(profile);
-    const fields = scanFields();
+    const fields = markReferenceFields(scanFields());
     await enrichDynamicDropdownOptions(fields);
     state.lastPreviewFields = fields.map(({ elementRef, choiceRefs, ...field }) => field);
     const fieldByIndex = new Map(fields.map((field) => [field.index, field]));
@@ -428,11 +470,15 @@
       "settings"
     ]);
     const profile = candidateProfile || {};
-    const fields = scanFields();
+    const fields = markReferenceFields(scanFields());
     hydrateFieldsFromPreview(fields);
+    const referenceIndexes = new Set(fields.filter(isReferenceField).map((field) => field.index));
     mappings = reindexMappingsByIdentity(mappings, fields)
       .map((mapping) => normalizeMappingForField(mapping, fields))
-      .filter((mapping) => hasValue(mapping.value));
+      .filter((mapping) => hasValue(mapping.value))
+      // Reference details are human-only: whatever proposed a value (rule, AI, audit),
+      // only the user's saved answer may fill them.
+      .filter((mapping) => !referenceIndexes.has(mapping.index) || mapping.source === "saved");
     let filled = 0;
     const failures = [];
     const attached = [];
@@ -1893,9 +1939,23 @@
       // 100 keeps long-but-finite lists (language fluency has ~80 entries) usable for
       // review dropdowns and the model, while still excluding country/dial-code lists.
       if (options.length && options.length <= 100) {
-        field.options = options;
+        field.options = withSelectedOptions(options, getCurrentValue(element));
       }
     }
+  }
+
+  // React-select hides already-chosen options from its open menu, so the discovered list
+  // lacked the selected answer ("Male", "South Asian") and the audit "corrected" it away.
+  function withSelectedOptions(options, currentValue) {
+    const selected = String(currentValue || "").split(/\s*;\s*/).map(compactText).filter(Boolean)
+      .filter((label) => !isPlaceholderOptionText(label));
+    const known = new Set(options.map((option) => normalize(option.label || option.value || "")));
+    const missing = selected.filter((label) => !known.has(normalize(label)));
+    return missing.length ? [...missing.map((label) => ({ label, value: label })), ...options] : options;
+  }
+
+  function isPlaceholderOptionText(text) {
+    return /^(select( one| an option)?\s*(\.{1,3}|…)?|please select|choose( one)?|-+\s*no answer\s*-+|no answer)$/i.test(String(text || "").trim());
   }
 
   function isDynamicDropdownField(field) {
@@ -2240,7 +2300,7 @@
     if (/(\blast\b.*\bname\b|\bfamily\b.*\bname\b|lname|surname)/.test(primary)) {
       return FIELD_KIND.LAST_NAME;
     }
-    if (/(\bfull\b.*\bname\b|\blegal name\b|^name$|first and last name)/.test(primary)) {
+    if (/(\bfull\b.*\bname\b|\blegal name\b|^name$|first and last name)/.test(primary) && !isReferrerQuestion(primary)) {
       return FIELD_KIND.FULL_NAME;
     }
     if (isEmailProfileField(primary)) {
@@ -2268,7 +2328,7 @@
     if (/(degree|qualification)/.test(primary)) {
       return FIELD_KIND.DEGREE;
     }
-    if (/(field of study|discipline|major|program)/.test(primary)) {
+    if (/(field of study|discipline|major|\bprogram\b)/.test(primary)) {
       return FIELD_KIND.FIELD_OF_STUDY;
     }
 
@@ -2609,6 +2669,12 @@
       return hasValue(profile.secondLastName) ? buildMapping(field, profile.secondLastName, "rule", 0.88) : null;
     }
 
+    // "Who referred you? Enter their first and last name" asks for someone else's name.
+    if (isReferrerQuestion(primaryHaystack)) {
+      const stated = profile.answers?.referrer || profile.answers?.referredBy;
+      return buildMapping(field, stated || (field.options?.length ? "No" : "N/A"), "rule", 0.9);
+    }
+
     const directRules = [
       [/(\bfull\b.*\bname\b|\blegal name\b|\bname as it appears\b|^name$|first and last name)/, profile.fullName],
       [/(\bfirst\b.*\bname\b|\bgiven\b.*\bname\b|fname)/, profile.firstName],
@@ -2616,7 +2682,7 @@
       [/(linkedin|linked in)/, profile.linkedin],
       [/(github|git hub)/, profile.github],
       [/(school|university|college|institution)/, profile.school],
-      [/(degree|program|major)/, profile.degree],
+      [/(degree|\bprogram\b|major)/, profile.degree],
       [/(graduation|grad date|expected completion)/, profile.graduationDate],
       [/(salary|compensation|pay expectation)/, profile.salary || profile.answers?.salary],
       [/(relocat)/, profile.relocation || profile.answers?.relocation],
@@ -2662,7 +2728,9 @@
       return buildMapping(field, profile.answers?.acceptTerms || "Yes", "rule", 0.9);
     }
 
-    if (/(certify|certifying|certification|true and correct|true.*complete|information.*provided.*true|facts.*true)/.test(haystack)) {
+    // Attestation wording only: "Do you hold a DoD IAT Level II certification?" is a
+    // credential question and was answered "Yes" by this rule.
+    if (/(\bcertify\b|\bcertifying\b|true and correct|true.*complete|information.*provided.*true|facts.*true)/.test(haystack)) {
       return buildMapping(field, profile.answers?.certifyApplicationTruth || "Yes", "rule", 0.9);
     }
 
@@ -3170,6 +3238,11 @@
     }
 
     if (/years? of (relevant |related |professional |work |total )*experience|(total|number of|how many).{0,30}years?.{0,20}experience|experience.{0,20}in years/.test(haystack)) {
+      // "How many years designing DoD cloud environments?" is not total experience; with
+      // no defense work in the profile the truthful answer is zero.
+      if (DEFENSE_DOMAIN_PATTERN.test(haystack) && !DEFENSE_DOMAIN_PATTERN.test(normalize(JSON.stringify([profile.workExperience || [], profile.resumeFacts?.experience || []])))) {
+        return buildMapping(field, "0", "rule", 0.85);
+      }
       const years = profile.answers?.relevantYearsOfExperience || profile.answers?.yearsOfExperience || profile.yearsOfExperience;
       if (hasValue(years)) {
         return buildMapping(field, String(years), "rule", 0.85);
@@ -3482,6 +3555,15 @@
   }
 
   function selectApplicationLocation(profile, settings, address) {
+    if (hasValue(profile.currentLocation) || hasValue(profile.currentCity)) {
+      const full = profile.currentLocation || "";
+      return {
+        city: profile.currentCity || cityFromLocation(full) || address.city || "",
+        region: profile.currentState || regionFromLocation(full) || address.state || address.province || "",
+        full
+      };
+    }
+
     const answers = profile.answers || {};
     const target = settings?.targetCountry || targetCountryFromAddress(address);
     const cityKey = target === "usa" ? "usaCity" : target === "canada" ? "canadaCity" : "";
@@ -3730,7 +3812,26 @@
     return stateNames[normalized] || value;
   }
 
+  // The country the candidate lives in now (profile.currentCountry). When set, it decides
+  // every address/location answer whatever the job's country: the owner lives in Chicago,
+  // and Canada jobs were answered with the Canadian address.
+  function currentAddressKey(profile) {
+    const country = normalize(profile.currentCountry || "");
+    if (!country) {
+      return "";
+    }
+    if (isUnitedStatesDesired(country)) {
+      return "usa";
+    }
+    return country === "canada" ? "canada" : "";
+  }
+
   function selectAddress(profile, settings, haystack) {
+    const current = currentAddressKey(profile);
+    if (current && profile.addresses?.[current]) {
+      return profile.addresses[current];
+    }
+
     if (settings?.targetCountry === "usa") {
       return profile.addresses?.usa || profile.addresses?.canada || null;
     }
@@ -3766,13 +3867,14 @@
       return hasValue(answer) ? buildMapping(field, answer, "sensitive-rule", 0.82) : null;
     }
 
+    // Most specific value first ("South Asian" before "Asian"). On an optioned field only
+    // a value matching a visible option is used; otherwise the question is left unmapped.
     const rules = [
-      [/(hispanic|latino|latina|latinx)/, demographics.hispanicLatino],
-      [/(race|racial)/, demographics.race],
-      [/(ethnic|ethnicity)/, demographics.ethnicity || demographics.race],
-      [/(sexual orientation|orientation)/, demographics.sexualOrientation || profile.answers?.sexualOrientation],
-      [/(gender identity|cisgender)/, bestOptionValue(field, demographics.genderIdentity || demographics.gender) || demographics.gender || demographics.genderIdentity],
-      [/\bgender\b/, demographics.gender || demographics.genderIdentity]
+      [/(hispanic|latino|latina|latinx)/, firstMatchingSensitiveValue(field, [demographics.hispanicLatino])],
+      [/(race|racial|ethnic|ethnicity)/, firstMatchingSensitiveValue(field, [demographics.ethnicity, demographics.race])],
+      [/(sexual orientation|orientation)/, firstMatchingSensitiveValue(field, [demographics.sexualOrientation, profile.answers?.sexualOrientation])],
+      [/(gender identity|cisgender)/, firstMatchingSensitiveValue(field, [demographics.genderIdentity, demographics.gender])],
+      [/\bgender\b/, firstMatchingSensitiveValue(field, [demographics.gender, demographics.genderIdentity])]
     ];
 
     for (const [pattern, value] of rules) {
@@ -5021,6 +5123,22 @@
     ].join("/");
   }
 
+  function firstMatchingSensitiveValue(field, candidates) {
+    const values = candidates.filter(hasValue);
+    if (!field.options?.length) {
+      return values[0] || "";
+    }
+
+    for (const value of values) {
+      const match = bestOptionValue(field, value);
+      if (match) {
+        return match;
+      }
+    }
+
+    return "";
+  }
+
   function bestOptionValue(field, value) {
     if (!hasValue(value) || !field.options?.length) {
       return "";
@@ -5031,7 +5149,7 @@
       return constrainedValue;
     }
 
-    const match = field.options.find((option) => optionMatches(option.label, option.value, value));
+    const match = findBestOption(field.options, value, (option) => option.label, (option) => option.value);
     return match ? (match.label || match.value) : "";
   }
 
@@ -5402,6 +5520,12 @@
 
   function mergeMappings(localMappings, backendMappings, fields = []) {
     const byIndex = new Map();
+    // Professional-reference details exist only in the candidate's head; contact rules put
+    // the candidate's own email/phone into "Reference Phone Number". Only saved answers fill them.
+    const referenceIndexes = new Set(fields.filter(isReferenceField).map((field) => field.index));
+    const allowed = (mapping) => !referenceIndexes.has(mapping.index) || mapping.source === "saved";
+    localMappings = localMappings.filter(allowed);
+    backendMappings = backendMappings.filter(allowed);
 
     for (const mapping of localMappings) {
       const existing = byIndex.get(mapping.index);
@@ -5897,14 +6021,15 @@
       ? desiredValue
       : String(constrainedValue || desiredValue).split(/\s*[;,]\s*/).filter(Boolean);
     const choices = field.choiceRefs.map((ref) => ref.deref()).filter(Boolean);
+    // One best choice per desired value, so "Asian" never ticks East, South and
+    // Southeast Asian together on a checkbox group.
+    const chosen = new Set(
+      values.map((item) => findBestOption(choices, item, choiceLabel, choiceValue)).filter(Boolean)
+    );
     let clicked = 0;
 
     for (const choice of choices) {
-      const label = choiceLabel(choice);
-      const value = choiceValue(choice);
-      const shouldChoose = values.some((item) => optionMatches(label, value, item));
-
-      if (!shouldChoose) {
+      if (!chosen.has(choice)) {
         continue;
       }
 
@@ -6106,11 +6231,12 @@
 
   async function waitForMatchingDropdownOption(trigger, desiredValue, attempts = 10) {
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const option = visibleOptionElements(trigger).find((item) => optionMatches(
-        item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
-        item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || "",
-        desiredValue
-      ));
+      const option = findBestOption(
+        visibleOptionElements(trigger),
+        desiredValue,
+        (item) => item.getAttribute("data-automation-label") || item.textContent || item.getAttribute("aria-label") || "",
+        (item) => item.getAttribute("data-automation-label") || item.getAttribute("data-value") || item.getAttribute("value") || ""
+      );
 
       if (option) {
         return option;
@@ -6236,7 +6362,7 @@
 
   function fillSelect(select, desiredValue) {
     const options = Array.from(select.options);
-    const option = options.find((item) => optionMatches(item.textContent || "", item.value, desiredValue));
+    const option = findBestOption(options, desiredValue, (item) => item.textContent || "", (item) => item.value);
 
     if (!option) {
       return false;
@@ -6281,7 +6407,9 @@
   async function fillWorkdayTargetCountry(profile, settings) {
     const targetCountry = settings?.targetCountry || "";
     const address = selectAddress(profile, settings, "country");
-    const desired = targetCountry === "usa"
+    const desired = currentAddressKey(profile)
+      ? (address?.country || "")
+      : targetCountry === "usa"
       ? (address?.country || "United States")
       : targetCountry === "canada"
         ? (address?.country || "Canada")
@@ -6569,33 +6697,67 @@
   }
 
   function optionMatches(label, value, desiredValue) {
+    return optionMatchTier(label, value, desiredValue) > 0;
+  }
+
+  // 1 = exact or alias, 2 = location / United States equivalence, 3 = whole-word
+  // containment, 0 = no match.
+  function optionMatchTier(label, value, desiredValue) {
     const desired = normalize(String(desiredValue));
     const normalizedLabel = normalize(label || "");
     const normalizedValue = normalize(value || "");
     const aliases = answerAliases(desired);
 
     if (!desired) {
-      return false;
+      return 0;
     }
 
     if (normalizedValue === desired || normalizedLabel === desired) {
-      return true;
+      return 1;
     }
 
     if (aliases.some((alias) => normalizedValue === alias || normalizedLabel === alias)) {
-      return true;
+      return 1;
     }
 
     if (locationOptionMatches(normalizedLabel, desired) || locationOptionMatches(normalizedValue, desired)) {
-      return true;
+      return 2;
     }
 
     if (isUnitedStatesDesired(desired)) {
-      return isUnitedStatesOption(normalizedLabel) || isUnitedStatesOption(normalizedValue);
+      return isUnitedStatesOption(normalizedLabel) || isUnitedStatesOption(normalizedValue) ? 2 : 0;
     }
 
-    return aliases.some((alias) => alias.length > 3 && containsNormalizedPhrase(normalizedLabel, alias))
+    const contains = aliases.some((alias) => alias.length > 3 && containsNormalizedPhrase(normalizedLabel, alias))
       || (desired.length > 2 && containsNormalizedPhrase(normalizedLabel, desired));
+    return contains ? 3 : 0;
+  }
+
+  // Exact matches beat partial ones, and a containment match must be unique: "Asian"
+  // must not pick whichever of East/South/Southeast Asian is listed first. Location
+  // suggestions keep first-match order because the ATS ranks them.
+  function findBestOption(items, desiredValue, labelOf, valueOf) {
+    let locationHit = null;
+    const containmentHits = [];
+
+    for (const item of items) {
+      const tier = optionMatchTier(labelOf(item), valueOf(item), desiredValue);
+      if (tier === 1) {
+        return item;
+      }
+      if (tier === 2 && !locationHit) {
+        locationHit = item;
+      }
+      if (tier === 3) {
+        containmentHits.push(item);
+      }
+    }
+
+    if (locationHit) {
+      return locationHit;
+    }
+
+    return containmentHits.length === 1 ? containmentHits[0] : null;
   }
 
   function locationOptionMatches(optionText, desiredText) {
@@ -7100,6 +7262,15 @@
         const text = compactText(selected?.textContent || "");
         if (text) {
           return text;
+        }
+
+        // Multi-selects render each chosen option as a chip; without this the field read
+        // as blank and the backend "corrected" an already-correct answer.
+        const chips = Array.from(container.querySelectorAll("[class*='multi-value__label' i], [class*='multivaluelabel' i]"))
+          .map((chip) => compactText(chip.textContent || ""))
+          .filter(Boolean);
+        if (chips.length) {
+          return chips.join("; ");
         }
       }
     }
