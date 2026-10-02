@@ -6049,3 +6049,102 @@ def test_content_script_g2_style_form_never_invents_credentials_or_references():
     assert dod == "0"
     assert langs not in ("Statistics", "Bachelor of Mathematics")
     assert (ref_name, ref_rel, ref_phone, ref_long, ref_email) == ("", "", "", "", "")
+
+
+# --- model fallback chain (2026-10-02) ---
+
+class _FakeCompletion:
+    def __init__(self, status_code, content='{"value": "ok"}'):
+        self.status_code = status_code
+        self.ok = 200 <= status_code < 300
+        self._content = content
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content}}]}
+
+    def raise_for_status(self):
+        if not self.ok:
+            raise server.requests.HTTPError(f"HTTP {self.status_code}")
+
+
+def _fake_post(outcomes, calls):
+    """outcomes: model id -> _FakeCompletion or an exception instance to raise."""
+    def post(url, headers=None, json=None, timeout=None):
+        calls.append(json["model"])
+        outcome = outcomes[json["model"]]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+    return post
+
+
+@pytest.fixture
+def chain_env(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "LLM_TRACE_PATH", tmp_path / "trace.jsonl")
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    monkeypatch.setenv("NVIDIA_MODEL", "primary")
+    monkeypatch.setenv("NVIDIA_FALLBACK_MODELS", "second,third")
+    monkeypatch.setenv("NVIDIA_NARRATIVE_MODEL", "essay")
+    monkeypatch.setenv("NVIDIA_NARRATIVE_FALLBACK_MODELS", "essay-backup")
+    return tmp_path
+
+
+def test_model_call_falls_back_on_overload_and_traces_it(monkeypatch, chain_env):
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post(
+        {"primary": _FakeCompletion(503), "second": _FakeCompletion(200)}, calls))
+
+    data = server.compact_nvidia_call("system", {"question": "q"})
+
+    assert calls == ["primary", "second"]
+    assert data == {"value": "ok"}
+    trace = (chain_env / "trace.jsonl").read_text()
+    assert '"model.fallback"' in trace and "primary: HTTP 503" in trace
+
+
+def test_model_call_skips_timeouts_retired_models_and_empty_replies(monkeypatch, chain_env):
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post({
+        "primary": server.requests.ReadTimeout("slow"),
+        "second": _FakeCompletion(410),
+        "third": _FakeCompletion(200, content=""),
+    }, calls))
+
+    with pytest.raises(server.ModelUnavailableError) as excinfo:
+        server.compact_nvidia_call("system", {"question": "q"})
+
+    assert calls == ["primary", "second", "third"]
+    assert "ReadTimeout" in str(excinfo.value) and "HTTP 410" in str(excinfo.value) and "empty response" in str(excinfo.value)
+
+
+def test_model_call_stops_on_a_rejected_key(monkeypatch, chain_env):
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post({"primary": _FakeCompletion(401)}, calls))
+
+    with pytest.raises(RuntimeError):
+        server.compact_nvidia_call("system", {"question": "q"})
+
+    assert calls == ["primary"]
+
+
+def test_essays_fall_back_only_within_the_essay_chain(monkeypatch, chain_env):
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post(
+        {"essay": _FakeCompletion(503), "essay-backup": _FakeCompletion(200)}, calls))
+
+    server.compact_nvidia_call("system", {"question": "q"}, model=server.narrative_model_name())
+
+    assert calls == ["essay", "essay-backup"]  # never the structured models
+
+
+def test_empty_fallback_setting_disables_fallbacks(monkeypatch, chain_env):
+    monkeypatch.setenv("NVIDIA_FALLBACK_MODELS", "")
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post({"primary": _FakeCompletion(503)}, calls))
+
+    with pytest.raises(server.ModelUnavailableError):
+        server.compact_nvidia_call("system", {"question": "q"})
+
+    assert calls == ["primary"]
+    assert server.model_chain("a", "UNSET_ENV_FOR_TEST", ["b", "a", "c"]) == ["a", "b", "c"]

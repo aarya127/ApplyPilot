@@ -91,7 +91,17 @@ by the kind of failure and ordered by how much harm the failure would do once su
    `glm-5.3` for essays (see Model choice). Still to do:
    - `application_agent/agent/answer_generator.py` still defaults to the omni model that used to
      hang.
-   - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout.
+   - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout. **Done
+     2026-10-02:**
+     - Every model call goes through `post_chat_completion`.
+     - It moves down the chain on timeouts, connection errors, HTTP 403/404/408/409/410/429/5xx
+       and empty replies, within a 100 s limit.
+     - A 401 (bad key) stops at once.
+     - Form answers and audits: ultra → glm-5.3 → kimi-k3 → super-120b. Essays: glm-5.3 →
+       super-120b, never ultra.
+     - Override with `NVIDIA_FALLBACK_MODELS` / `NVIDIA_NARRATIVE_FALLBACK_MODELS` (empty
+       disables). Each switch is logged as `model.fallback`, and `/health` lists the chains.
+     - Verified live: a retired model (410) fell through to glm-5.3.
    - Make `/health` fail loudly on a 410, and show that in the side panel.
    - The owner chose to stay on the free endpoint, which retires models without notice and returns
      intermittent 403 and 503 errors. On 2026-10-01 a live run lost 8 of 22 model calls to 503s and 2
