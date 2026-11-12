@@ -93,15 +93,25 @@ by the kind of failure and ordered by how much harm the failure would do once su
      hang.
    - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout. **Done
      2026-10-02:**
-     - Every model call goes through `post_chat_completion`.
-     - It moves down the chain on timeouts, connection errors, HTTP 403/404/408/409/410/429/5xx
-       and empty replies, within a 100 s limit.
-     - A 401 (bad key) stops at once.
+     - Every autofill-backend completion (mapper, audit, essays, retries) goes through
+       `post_chat_completion`. The `/health` key probe tries the chain in order and skips
+       retired models (404/410).
+     - It moves down the chain on timeouts, connection errors, any non-2xx status and empty or
+       invalid replies. Each chain stops after 100 s, counting the time to read the response body.
+       All the model calls for one `/map-fields` request share a 180 s budget.
+     - A 401 (bad key) stops at once. If every model that answered returned 403 (at least two of
+       them), the key is reported as rejected. Retired models and timeouts don't count either way.
+     - A 429 waits for `Retry-After` (2 s by default, at most 10 s) before trying the next model,
+       because the rate limit is per key.
      - Form answers and audits: ultra → glm-5.3 → kimi-k3 → super-120b. Essays: glm-5.3 →
-       super-120b, never ultra.
+       super-120b, never ultra. glm-5.3 is now the code default for essays.
+       `NVIDIA_NARRATIVE_MODEL=` (empty) writes essays with the structured model and its chain.
      - Override with `NVIDIA_FALLBACK_MODELS` / `NVIDIA_NARRATIVE_FALLBACK_MODELS` (empty
-       disables). Each switch is logged as `model.fallback`, and `/health` lists the chains.
+       disables). Each switch is logged as `model.fallback`, `mapper.response` and
+       `auditor.response` record the model that answered, and `/health` lists the chains.
      - Verified live: a retired model (410) fell through to glm-5.3.
+     - Not covered yet: `application_agent/agent/answer_generator.py` still calls one model
+       directly, with no fallback.
    - Make `/health` fail loudly on a 410, and show that in the side panel.
    - The owner chose to stay on the free endpoint, which retires models without notice and returns
      intermittent 403 and 503 errors. On 2026-10-01 a live run lost 8 of 22 model calls to 503s and 2

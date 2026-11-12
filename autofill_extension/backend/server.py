@@ -12,6 +12,9 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -32,6 +35,7 @@ NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completi
 # nemotron-3-nano-30b-a3b reached end of life on 2026-09-01 (HTTP 410). ultra-550b scored best on
 # structured answers and audits in the 2026-09-26 model evaluation (docs/ROADMAP_FULL_AUTONOMY.md).
 DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+DEFAULT_NARRATIVE_MODEL = "z-ai/glm-5.3"
 AI_RATE_LIMIT_PER_MINUTE = 40
 KEY_PROBE_TTL_SECONDS = 600
 _ai_request_times: deque[float] = deque()
@@ -151,12 +155,38 @@ def note_api_key_rejected(status_code: int) -> None:
 # which invented hobbies and credentials in essay tests.
 DEFAULT_FALLBACK_MODELS = ["z-ai/glm-5.3", "moonshotai/kimi-k3", "nvidia/nemotron-3-super-120b-a12b"]
 DEFAULT_NARRATIVE_FALLBACK_MODELS = ["nvidia/nemotron-3-super-120b-a12b"]
-FALLBACK_STATUS_CODES = {403, 404, 408, 409, 410, 429, 500, 502, 503, 504}
+# Statuses that say a model is retired or missing; they tell us nothing about the key.
+RETIRED_MODEL_STATUS_CODES = {404, 410}
 MODEL_CHAIN_DEADLINE_SECONDS = 100
+# A 429 is a per-key limit, so the next model would be throttled too. Wait a moment first.
+RATE_LIMIT_BACKOFF_SECONDS = 2
+RATE_LIMIT_MAX_BACKOFF_SECONDS = 10
+# Limit on all model calls made for one /map-fields request (mapper, essay rewrites,
+# option retries). Each call also keeps its own chain deadline.
+MAP_FIELDS_BUDGET_SECONDS = 180
+
+_request_deadline: ContextVar[float | None] = ContextVar("model_request_deadline", default=None)
 
 
 class ModelUnavailableError(RuntimeError):
     """Every model in the fallback chain failed."""
+
+
+@dataclass
+class ChatCompletion:
+    content: str
+    model: str
+    status_code: int
+
+
+@contextmanager
+def model_call_budget(seconds: float):
+    """Limit the combined time of the model calls made inside this block."""
+    token = _request_deadline.set(time.monotonic() + seconds)
+    try:
+        yield
+    finally:
+        _request_deadline.reset(token)
 
 
 def model_chain(primary: str, env_key: str, defaults: list[str]) -> list[str]:
@@ -176,15 +206,44 @@ def structured_model_chain() -> list[str]:
 
 
 def narrative_model_chain() -> list[str]:
+    # With essays deliberately routed to the structured model, use its chain too.
+    if narrative_model_name() == model_name():
+        return structured_model_chain()
     return model_chain(narrative_model_name(), "NVIDIA_NARRATIVE_FALLBACK_MODELS", DEFAULT_NARRATIVE_FALLBACK_MODELS)
 
 
-def has_message_content(response: Any) -> bool:
+def completion_message_content(data: Any) -> str:
+    """Return the JSON-bearing text from a chat completion body.
+
+    Reasoning models sometimes leave `content` empty and place everything in
+    `reasoning_content`; and when reasoning isn't fully disabled the JSON is the
+    trailing block of that text. Prefer `content`, fall back to reasoning text.
+    """
     try:
-        message = response.json()["choices"][0]["message"]
-    except (ValueError, KeyError, IndexError, TypeError):
-        return False
-    return bool((message.get("content") or "").strip() or (message.get("reasoning_content") or "").strip())
+        message = data["choices"][0]["message"]
+        content = (message.get("content") or "").strip()
+        return content or (message.get("reasoning_content") or "").strip()
+    except (KeyError, IndexError, TypeError, AttributeError):
+        return ""
+
+
+def read_body_before(response: Any, deadline: float) -> bytes:
+    """Read a streamed response body, giving up at the deadline. requests' timeout only
+    limits each read, so a server trickling bytes could otherwise run on for minutes."""
+    chunks: list[bytes] = []
+    for chunk in response.iter_content(chunk_size=8192):
+        chunks.append(chunk)
+        if time.monotonic() > deadline:
+            raise requests.Timeout("response body still arriving at the deadline")
+    return b"".join(chunks)
+
+
+def retry_after_seconds(response: Any) -> float:
+    try:
+        value = float(response.headers.get("Retry-After", RATE_LIMIT_BACKOFF_SECONDS))
+    except (TypeError, ValueError, AttributeError):
+        value = RATE_LIMIT_BACKOFF_SECONDS
+    return min(max(value, 0), RATE_LIMIT_MAX_BACKOFF_SECONDS)
 
 
 def post_chat_completion(
@@ -194,16 +253,21 @@ def post_chat_completion(
     trace_id: str,
     timeout: float = 45,
     deadline_seconds: float = MODEL_CHAIN_DEADLINE_SECONDS,
-) -> Any:
-    """POST a chat completion, moving down the model chain on transient failures
-    (timeouts, connection errors, retired/overloaded models, empty replies). A 401
-    means the key itself is bad, so it stops immediately."""
+) -> ChatCompletion:
+    """POST a chat completion, moving down the model chain on any failure (timeouts,
+    connection errors, error statuses, empty replies). A 401 means the key itself is
+    bad, so it stops immediately. Stays within the chain deadline and, when one is set,
+    the request's model_call_budget."""
     failures: list[str] = []
-    started = time.monotonic()
+    statuses: list[int] = []
+    deadline = time.monotonic() + deadline_seconds
+    request_deadline = _request_deadline.get()
+    if request_deadline is not None:
+        deadline = min(deadline, request_deadline)
 
     for attempt, model in enumerate(models):
-        remaining = deadline_seconds - (time.monotonic() - started)
-        if attempt and remaining < 5:
+        remaining = deadline - time.monotonic()
+        if remaining < 5:
             failures.append("deadline reached")
             break
 
@@ -213,19 +277,35 @@ def post_chat_completion(
                 os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
                 headers={"Authorization": f"Bearer {api_key()}", "Content-Type": "application/json"},
                 json={**body, "model": model},
-                timeout=min(timeout, max(remaining, 5)),
+                timeout=min(timeout, remaining),
+                stream=True,
             )
         except requests.RequestException as exc:
             failures.append(f"{model}: {exc.__class__.__name__}")
             continue
 
-        if response.status_code == 401:
-            raise_for_nvidia_status(response, trace_event, trace_id)
-        if response.status_code in FALLBACK_STATUS_CODES:
-            failures.append(f"{model}: HTTP {response.status_code}")
-            continue
-        response.raise_for_status()
-        if not has_message_content(response):
+        try:
+            if response.status_code == 401:
+                raise_for_nvidia_status(response, trace_event, trace_id)
+            if not 200 <= response.status_code < 300:
+                statuses.append(response.status_code)
+                failures.append(f"{model}: HTTP {response.status_code}")
+                if response.status_code == 429 and attempt + 1 < len(models):
+                    time.sleep(min(retry_after_seconds(response), max(deadline - time.monotonic() - 5, 0)))
+                continue
+            try:
+                data = json.loads(read_body_before(response, min(deadline, time.monotonic() + timeout)))
+            except requests.RequestException as exc:
+                failures.append(f"{model}: {exc.__class__.__name__}")
+                continue
+            except ValueError:
+                failures.append(f"{model}: invalid JSON")
+                continue
+        finally:
+            response.close()
+
+        content = completion_message_content(data)
+        if not content:
             failures.append(f"{model}: empty response")
             continue
 
@@ -233,10 +313,16 @@ def post_chat_completion(
             write_llm_trace("model.fallback", {
                 "traceId": trace_id, "call": trace_event, "usedModel": model, "failures": failures,
             })
-        return response
+        return ChatCompletion(content=content, model=model, status_code=response.status_code)
 
-    # 403 is usually transient on this endpoint, but on every model it is the key.
-    key_rejected = bool(failures) and all(failure.endswith("HTTP 403") for failure in failures)
+    # A lone 403 is usually transient on this endpoint, but 403 from every model that
+    # answered (retired models and timeouts say nothing about the key) means the key.
+    informative = [status for status in statuses if status not in RETIRED_MODEL_STATUS_CODES]
+    key_rejected = (
+        bool(informative)
+        and all(status == 403 for status in informative)
+        and len(informative) >= min(2, len(models))
+    )
     message = nvidia_key_rejected_message(403) if key_rejected else "All models failed: " + "; ".join(failures)
     write_llm_trace(trace_event, {"traceId": trace_id, "error": message, "failures": failures})
     if key_rejected:
@@ -278,29 +364,39 @@ def probe_api_key_validity() -> dict[str, Any]:
 
     key_valid: bool | None = None
     key_error = ""
-    try:
-        response = requests.post(
-            os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
-            headers={
-                "Authorization": f"Bearer {api_key()}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model_name(),
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": 1,
-            },
-            timeout=15,
-        )
+    retired: list[str] = []
+    # A retired model (404/410) says nothing about the key, so try the next one in the chain.
+    for model in structured_model_chain():
+        try:
+            response = requests.post(
+                os.environ.get("NVIDIA_CHAT_COMPLETIONS_URL", NVIDIA_CHAT_COMPLETIONS_URL),
+                headers={
+                    "Authorization": f"Bearer {api_key()}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                },
+                timeout=15,
+            )
+        except requests.RequestException as exc:
+            key_error = f"Could not reach the NVIDIA API to validate the key: {exc.__class__.__name__}"
+            break
+        if response.status_code in RETIRED_MODEL_STATUS_CODES:
+            retired.append(f"{model} (HTTP {response.status_code})")
+            key_error = "Every configured model is retired or missing: " + ", ".join(retired)
+            continue
         if response.status_code in (401, 403):
             key_valid = False
             key_error = nvidia_key_rejected_message(response.status_code)
         elif response.ok:
             key_valid = True
+            key_error = f"Retired models skipped: {', '.join(retired)}" if retired else ""
         else:
             key_error = f"NVIDIA API returned status {response.status_code} during the key check"
-    except requests.RequestException as exc:
-        key_error = f"Could not reach the NVIDIA API to validate the key: {exc.__class__.__name__}"
+        break
 
     with _key_probe_lock:
         _key_probe_cache.update({"checkedAt": time.time(), "keyValid": key_valid, "keyError": key_error})
@@ -372,19 +468,20 @@ def map_fields():
     if not remaining_fields:
         return jsonify({"mappings": conditional_mappings, "aiUsage": ai_usage_snapshot()})
 
-    try:
-        mappings = call_nvidia_mapper(remaining_fields, profile, page)
-    except Exception as exc:
-        app.logger.exception("Mapper request failed")
-        return jsonify({
-            "mappings": conditional_mappings + policy_mappings(remaining_fields, profile),
-            "warning": f"Mapper request failed: {exc}",
-            "aiUsage": ai_usage_snapshot(),
-        }), 200
+    with model_call_budget(MAP_FIELDS_BUDGET_SECONDS):
+        try:
+            mappings = call_nvidia_mapper(remaining_fields, profile, page)
+        except Exception as exc:
+            app.logger.exception("Mapper request failed")
+            return jsonify({
+                "mappings": conditional_mappings + policy_mappings(remaining_fields, profile),
+                "warning": f"Mapper request failed: {exc}",
+                "aiUsage": ai_usage_snapshot(),
+            }), 200
 
-    mappings = regenerate_mapper_narratives(remaining_fields, mappings, profile, page)
-    mappings = mappings + compact_retry_unanswered_option_fields(remaining_fields, mappings, profile, page)
-    mappings = rewrite_third_person_narratives(remaining_fields, mappings, profile)
+        mappings = regenerate_mapper_narratives(remaining_fields, mappings, profile, page)
+        mappings = mappings + compact_retry_unanswered_option_fields(remaining_fields, mappings, profile, page)
+        mappings = rewrite_third_person_narratives(remaining_fields, mappings, profile)
     mappings = drop_contradictory_relocation_refusals(mappings, profile)
     mappings = drop_employer_specific_narratives(mappings, remaining_fields)
 
@@ -588,7 +685,6 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
     display_name = profile_display_name(profile)
     trace_id = new_trace_id()
     request_json = {
-        "model": model_name(),
         "messages": [
             {
                 "role": "system",
@@ -626,8 +722,8 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
         },
     )
 
-    response = post_chat_completion(request_json, structured_model_chain(), "mapper.error", trace_id)
-    content = message_json_content(response)
+    completion = post_chat_completion(request_json, structured_model_chain(), "mapper.error", trace_id)
+    content = completion.content
     data = parse_json_object(content)
     mappings = data.get("mappings", [])
 
@@ -642,7 +738,8 @@ def call_nvidia_mapper(fields: list[dict[str, Any]], profile: dict[str, Any], pa
         "mapper.response",
         {
             "traceId": trace_id,
-            "statusCode": response.status_code,
+            "model": completion.model,
+            "statusCode": completion.status_code,
             "rawContent": content,
             "parsed": data,
             "enforcedMappings": enforced_mappings,
@@ -663,7 +760,6 @@ def call_nvidia_auditor(
     display_name = profile_display_name(profile)
     trace_id = new_trace_id()
     request_json = {
-        "model": model_name(),
         "messages": [
             {
                 "role": "system",
@@ -707,8 +803,8 @@ def call_nvidia_auditor(
         },
     )
 
-    response = post_chat_completion(request_json, structured_model_chain(), "auditor.error", trace_id)
-    content = message_json_content(response)
+    completion = post_chat_completion(request_json, structured_model_chain(), "auditor.error", trace_id)
+    content = completion.content
     data = parse_json_object(content)
     corrections = data.get("corrections", [])
     decisions = data.get("decisions", [])
@@ -731,7 +827,8 @@ def call_nvidia_auditor(
         "auditor.response",
         {
             "traceId": trace_id,
-            "statusCode": response.status_code,
+            "model": completion.model,
+            "statusCode": completion.status_code,
             "rawContent": content,
             "parsed": data,
             "result": result,
@@ -2493,15 +2590,13 @@ def compact_nvidia_call(
     system: str,
     payload: dict[str, Any],
     max_tokens: int = 900,
-    model: str | None = None,
+    narrative: bool = False,
 ) -> dict[str, Any]:
     """Small focused completion — the model follows instructions reliably in
-    short prompts where the full mapper prompt drowns them out."""
-    # Calls made for essays pass model=narrative_model_name() and keep to the essay chain.
-    models = narrative_model_chain() if model and model == narrative_model_name() else (
-        model_chain(model, "NVIDIA_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS) if model else structured_model_chain()
-    )
-    response = post_chat_completion(
+    short prompts where the full mapper prompt drowns them out. Essay calls pass
+    narrative=True and stay on the essay model chain."""
+    models = narrative_model_chain() if narrative else structured_model_chain()
+    completion = post_chat_completion(
         {
             "messages": [
                 {"role": "system", "content": system},
@@ -2516,7 +2611,7 @@ def compact_nvidia_call(
         "compact.error",
         new_trace_id(),
     )
-    return parse_json_object(message_json_content(response))
+    return parse_json_object(completion.content)
 
 
 def compact_candidate_facts(profile: dict[str, Any]) -> dict[str, Any]:
@@ -2793,7 +2888,7 @@ def compact_narrative_answer(field: dict[str, Any], profile: dict[str, Any], pag
                 "companyContext": company_context,
             },
             max_tokens=1200,
-            model=narrative_model_name(),
+            narrative=True,
         )
     except Exception:
         app.logger.exception("Compact narrative retry failed")
@@ -2880,7 +2975,7 @@ def rewrite_third_person_narratives(
                     "Do not add or remove facts. Return ONLY JSON: {\"value\": \"rewritten answer\"}."
                 ),
                 {"answer": value},
-                model=narrative_model_name(),
+                narrative=True,
             )
             rewritten = data.get("value")
             if isinstance(rewritten, str) and rewritten.strip() and not name_pattern.search(rewritten):
@@ -3061,20 +3156,6 @@ def is_reference_field(field: dict[str, Any]) -> bool:
     return bool(REFERENCE_DETAIL_LABEL.match(label) and REFERENCE_PERSON_PATTERN.search(nearby))
 
 
-def message_json_content(response: Any) -> str:
-    """Return the JSON-bearing text from a chat completion.
-
-    Reasoning models sometimes leave `content` empty and place everything in
-    `reasoning_content`; and when reasoning isn't fully disabled the JSON is the
-    trailing block of that text. Prefer `content`, fall back to reasoning text.
-    """
-    message = response.json()["choices"][0]["message"]
-    content = (message.get("content") or "").strip()
-    if content:
-        return content
-    return (message.get("reasoning_content") or "").strip()
-
-
 def parse_json_object(content: str) -> dict[str, Any]:
     if isinstance(content, dict):
         return content
@@ -3145,8 +3226,12 @@ def model_name() -> str:
 def narrative_model_name() -> str:
     """Model for free-text essays. The best structured-answer model embellished essays
     (invented hobbies, mentoring, misattributed metrics) in the 2026-09-26 evaluation,
-    so essays can be routed to a more literal model via NVIDIA_NARRATIVE_MODEL."""
-    return os.environ.get("NVIDIA_NARRATIVE_MODEL", "").strip() or model_name()
+    so essays go to a more literal model by default. NVIDIA_NARRATIVE_MODEL overrides
+    it; set it empty to write essays with the structured model."""
+    configured = os.environ.get("NVIDIA_NARRATIVE_MODEL")
+    if configured is None:
+        return DEFAULT_NARRATIVE_MODEL
+    return configured.strip() or model_name()
 
 
 load_private_env()

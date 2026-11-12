@@ -3407,9 +3407,16 @@ def _fake_nvidia_response(status_code, payload=None):
             self.status_code = status_code
             self.ok = status_code < 400
             self.text = json.dumps(payload or {})
+            self.headers = {}
 
         def json(self):
             return payload or {}
+
+        def iter_content(self, chunk_size=8192):
+            yield self.text.encode()
+
+        def close(self):
+            pass
 
         def raise_for_status(self):
             if status_code >= 400:
@@ -5698,8 +5705,8 @@ def test_mapper_essays_are_regenerated_with_the_narrative_model(monkeypatch):
     monkeypatch.setattr(server, "write_llm_trace", lambda *args, **kwargs: None)
     used_models = []
 
-    def fake_compact(system, payload, max_tokens=900, model=None):
-        used_models.append(model)
+    def fake_compact(system, payload, max_tokens=900, narrative=False):
+        used_models.append(server.narrative_model_name() if narrative else server.model_name())
         return {"value": "I scaled multi-agent systems from 500 to 2,000+ concurrent users."}
 
     monkeypatch.setattr(server, "compact_nvidia_call", fake_compact)
@@ -5737,7 +5744,7 @@ def test_mapper_essay_is_dropped_when_narrative_model_declines(monkeypatch):
 
 def test_mapper_essays_untouched_without_separate_narrative_model(monkeypatch):
     monkeypatch.setenv("NVIDIA_MODEL", "structured-model")
-    monkeypatch.delenv("NVIDIA_NARRATIVE_MODEL", raising=False)
+    monkeypatch.setenv("NVIDIA_NARRATIVE_MODEL", "")  # empty opts essays into the structured model
     monkeypatch.setattr(server, "compact_nvidia_call", lambda *args, **kwargs: pytest.fail("no narrative call expected"))
     fields = [{"index": 0, "label": "Describe a project you are proud of.", "tag": "textarea"}]
     mappings = [{"index": 0, "value": "I built a full-stack quant trading platform with 45 REST endpoints and backtests.", "source": "resume"}]
@@ -6054,13 +6061,20 @@ def test_content_script_g2_style_form_never_invents_credentials_or_references():
 # --- model fallback chain (2026-10-02) ---
 
 class _FakeCompletion:
-    def __init__(self, status_code, content='{"value": "ok"}'):
+    def __init__(self, status_code, content='{"value": "ok"}', headers=None):
         self.status_code = status_code
         self.ok = 200 <= status_code < 300
+        self.headers = headers or {}
         self._content = content
 
     def json(self):
         return {"choices": [{"message": {"content": self._content}}]}
+
+    def iter_content(self, chunk_size=8192):
+        yield json.dumps(self.json()).encode()
+
+    def close(self):
+        pass
 
     def raise_for_status(self):
         if not self.ok:
@@ -6069,7 +6083,7 @@ class _FakeCompletion:
 
 def _fake_post(outcomes, calls):
     """outcomes: model id -> _FakeCompletion or an exception instance to raise."""
-    def post(url, headers=None, json=None, timeout=None):
+    def post(url, headers=None, json=None, timeout=None, stream=False):
         calls.append(json["model"])
         outcome = outcomes[json["model"]]
         if isinstance(outcome, Exception):
@@ -6133,7 +6147,7 @@ def test_essays_fall_back_only_within_the_essay_chain(monkeypatch, chain_env):
     monkeypatch.setattr(server.requests, "post", _fake_post(
         {"essay": _FakeCompletion(503), "essay-backup": _FakeCompletion(200)}, calls))
 
-    server.compact_nvidia_call("system", {"question": "q"}, model=server.narrative_model_name())
+    server.compact_nvidia_call("system", {"question": "q"}, narrative=True)
 
     assert calls == ["essay", "essay-backup"]  # never the structured models
 
@@ -6148,3 +6162,121 @@ def test_empty_fallback_setting_disables_fallbacks(monkeypatch, chain_env):
 
     assert calls == ["primary"]
     assert server.model_chain("a", "UNSET_ENV_FOR_TEST", ["b", "a", "c"]) == ["a", "b", "c"]
+
+
+def test_model_call_falls_back_past_unexpected_client_errors(monkeypatch, chain_env):
+    # A fallback model rejecting a request parameter (400/422) or a Cloudflare 524 must not
+    # abandon the chain and lose the earlier failures.
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post({
+        "primary": _FakeCompletion(524),
+        "second": _FakeCompletion(422),
+        "third": _FakeCompletion(200),
+    }, calls))
+
+    assert server.compact_nvidia_call("system", {"question": "q"}) == {"value": "ok"}
+    assert calls == ["primary", "second", "third"]
+    trace = (chain_env / "trace.jsonl").read_text()
+    assert "primary: HTTP 524" in trace and "second: HTTP 422" in trace
+
+
+def test_model_call_backs_off_after_a_rate_limit(monkeypatch, chain_env):
+    calls, sleeps = [], []
+    monkeypatch.setattr(server.time, "sleep", sleeps.append)
+    monkeypatch.setattr(server.requests, "post", _fake_post({
+        "primary": _FakeCompletion(429, headers={"Retry-After": "60"}),
+        "second": _FakeCompletion(200),
+    }, calls))
+
+    server.compact_nvidia_call("system", {"question": "q"})
+
+    assert calls == ["primary", "second"]
+    assert sleeps == [server.RATE_LIMIT_MAX_BACKOFF_SECONDS]  # Retry-After is capped
+
+
+def test_revoked_key_is_reported_even_when_a_model_is_retired(monkeypatch, chain_env):
+    monkeypatch.setenv("NVIDIA_FALLBACK_MODELS", "second,third,fourth")
+    calls = []
+    note = []
+    monkeypatch.setattr(server, "note_api_key_rejected", note.append)
+    monkeypatch.setattr(server.requests, "post", _fake_post({
+        "primary": _FakeCompletion(403),
+        "second": _FakeCompletion(403),
+        "third": _FakeCompletion(410),
+        "fourth": server.requests.ReadTimeout("slow"),
+    }, calls))
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server.compact_nvidia_call("system", {"question": "q"})
+
+    assert not isinstance(excinfo.value, server.ModelUnavailableError)
+    assert "NVIDIA_API_KEY" in str(excinfo.value)
+    assert note == [403]
+
+
+def test_single_transient_403_is_not_reported_as_a_bad_key(monkeypatch, chain_env):
+    note = []
+    monkeypatch.setattr(server, "note_api_key_rejected", note.append)
+    monkeypatch.setattr(server.requests, "post", _fake_post({
+        "primary": _FakeCompletion(403),
+        "second": server.requests.ConnectTimeout("down"),
+        "third": _FakeCompletion(503),
+    }, []))
+
+    with pytest.raises(server.ModelUnavailableError):
+        server.compact_nvidia_call("system", {"question": "q"})
+    assert note == []
+
+
+def test_request_budget_stops_further_model_calls(monkeypatch, chain_env):
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post({"primary": _FakeCompletion(200)}, calls))
+
+    with server.model_call_budget(0):
+        with pytest.raises(server.ModelUnavailableError) as excinfo:
+            server.compact_nvidia_call("system", {"question": "q"})
+
+    assert calls == []
+    assert "deadline reached" in str(excinfo.value)
+
+
+def test_slow_trickling_body_counts_as_a_timeout(monkeypatch, chain_env):
+    class Trickle(_FakeCompletion):
+        def iter_content(self, chunk_size=8192):
+            yield b'{"choices": '
+            monkeypatch.setattr(server.time, "monotonic", lambda: 10_000_000.0)
+            yield b"[]}"
+
+    calls = []
+    monkeypatch.setattr(server.requests, "post", _fake_post({"primary": Trickle(200)}, calls))
+
+    with pytest.raises(server.ModelUnavailableError) as excinfo:
+        server.compact_nvidia_call("system", {"question": "q"})
+    assert "primary: Timeout" in str(excinfo.value)
+
+
+def test_essays_default_to_the_literal_model_chain(monkeypatch):
+    monkeypatch.setenv("NVIDIA_MODEL", "nvidia/nemotron-3-ultra-550b-a55b")
+    monkeypatch.delenv("NVIDIA_NARRATIVE_MODEL", raising=False)
+    monkeypatch.delenv("NVIDIA_NARRATIVE_FALLBACK_MODELS", raising=False)
+
+    assert server.narrative_model_chain() == ["z-ai/glm-5.3", "nvidia/nemotron-3-super-120b-a12b"]
+
+    monkeypatch.setenv("NVIDIA_NARRATIVE_MODEL", "")
+    assert server.narrative_model_chain() == server.structured_model_chain()
+
+
+def test_key_probe_skips_retired_models(monkeypatch, tmp_path):
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setenv("NVIDIA_MODEL", "retired")
+    monkeypatch.setenv("NVIDIA_FALLBACK_MODELS", "live")
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    statuses = {"retired": 410, "live": 200}
+    monkeypatch.setattr(server.requests, "post", lambda *a, json=None, **k: _fake_nvidia_response(statuses[json["model"]]))
+    _reset_key_probe_cache()
+
+    status = server.probe_api_key_validity()
+
+    assert status["keyValid"] is True
+    assert "retired (HTTP 410)" in status["keyError"]
+    _reset_key_probe_cache()
