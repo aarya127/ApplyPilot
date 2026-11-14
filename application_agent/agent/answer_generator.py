@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,15 @@ import requests
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ANSWERS = ROOT / "application_agent/standard_answers.private.json"
 PRIVATE_ENV_PATH = ROOT / "autofill_extension/backend/env.private"
+NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+# Same models and env overrides as autofill_extension/backend/server.py. The free endpoint
+# retires models without notice and returns 403/503s under load, so each call walks a chain.
+DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
+DEFAULT_NARRATIVE_MODEL = "z-ai/glm-5.3"
+DEFAULT_FALLBACK_MODELS = ["z-ai/glm-5.3", "moonshotai/kimi-k3", "nvidia/nemotron-3-super-120b-a12b"]
+DEFAULT_NARRATIVE_FALLBACK_MODELS = ["nvidia/nemotron-3-super-120b-a12b"]
+CHAIN_DEADLINE_SECONDS = 90
 
 
 def load_private_env() -> None:
@@ -34,6 +44,61 @@ def load_standard_answers(path: Path = DEFAULT_ANSWERS) -> dict[str, str]:
         return {}
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def model_chain(primary: str, env_key: str, defaults: list[str]) -> list[str]:
+    configured = os.environ.get(env_key)
+    fallbacks = [item.strip() for item in configured.split(",")] if configured is not None else defaults
+    chain: list[str] = []
+    for model in [primary, *fallbacks]:
+        if model and model not in chain:
+            chain.append(model)
+    return chain
+
+
+def structured_model_chain() -> list[str]:
+    primary = os.getenv("NVIDIA_MODEL", "").strip() or DEFAULT_MODEL
+    return model_chain(primary, "NVIDIA_FALLBACK_MODELS", DEFAULT_FALLBACK_MODELS)
+
+
+def narrative_model_chain() -> list[str]:
+    structured = os.getenv("NVIDIA_MODEL", "").strip() or DEFAULT_MODEL
+    configured = os.environ.get("NVIDIA_NARRATIVE_MODEL")
+    primary = DEFAULT_NARRATIVE_MODEL if configured is None else (configured.strip() or structured)
+    if primary == structured:
+        return structured_model_chain()
+    return model_chain(primary, "NVIDIA_NARRATIVE_FALLBACK_MODELS", DEFAULT_NARRATIVE_FALLBACK_MODELS)
+
+
+def chat_completion(api_key: str, body: dict[str, Any], models: list[str], timeout: float = 30) -> str:
+    """Return the first non-empty reply from the model chain, or "" if every model
+    fails. A 401 means the key is bad, so the rest of the chain is skipped."""
+    deadline = time.monotonic() + CHAIN_DEADLINE_SECONDS
+    for model in models:
+        remaining = deadline - time.monotonic()
+        if remaining < 5:
+            break
+        try:
+            response = requests.post(
+                NVIDIA_CHAT_COMPLETIONS_URL,
+                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                # Reasoning models otherwise spend the token budget on chain-of-thought.
+                json={**body, "model": model, "chat_template_kwargs": {"thinking": False}},
+                timeout=min(timeout, remaining),
+            )
+        except requests.RequestException:
+            continue
+        if response.status_code == 401:
+            return ""
+        if not 200 <= response.status_code < 300:
+            continue
+        try:
+            content = strip_reasoning(response.json()["choices"][0]["message"].get("content"))
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            continue
+        if content:
+            return content
+    return ""
 
 
 def answer_question(question: str, profile: dict[str, Any], standard_answers: dict[str, str] | None = None) -> tuple[str, str]:
@@ -86,7 +151,6 @@ def generate_option_answer_with_llm(question: str, options: list[str], profile: 
     if not api_key:
         return ""
 
-    model = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
     prompt = {
         "instructions": (
             "Choose exactly one option label for this job application field. "
@@ -99,27 +163,19 @@ def generate_option_answer_with_llm(question: str, options: list[str], profile: 
         "profile": safe_profile_for_prompt(profile),
     }
 
-    try:
-        response = requests.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You choose exact dropdown options for truthful job applications."},
-                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=True)},
-                ],
-                "temperature": 0,
-                "max_tokens": 512,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        return ""
-
-    return parse_option_answer(strip_reasoning(content))
+    content = chat_completion(
+        api_key,
+        {
+            "messages": [
+                {"role": "system", "content": "You choose exact dropdown options for truthful job applications."},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=True)},
+            ],
+            "temperature": 0,
+            "max_tokens": 512,
+        },
+        structured_model_chain(),
+    )
+    return parse_option_answer(content)
 
 
 def generate_answer_with_llm(question: str, profile: dict[str, Any]) -> str:
@@ -128,7 +184,6 @@ def generate_answer_with_llm(question: str, profile: dict[str, Any]) -> str:
     if not api_key:
         return ""
 
-    model = os.getenv("NVIDIA_MODEL", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning")
     prompt = (
         "Draft a truthful 2-3 sentence job application answer. "
         "Do not invent experience. Use only the provided profile facts.\n\n"
@@ -136,27 +191,18 @@ def generate_answer_with_llm(question: str, profile: dict[str, Any]) -> str:
         f"Profile: {json.dumps(safe_profile_for_prompt(profile), ensure_ascii=True)}"
     )
 
-    try:
-        response = requests.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "You help draft concise, truthful job application answers."},
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": 0.2,
-                "max_tokens": 768,
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
-        return ""
-
-    return strip_reasoning(content)
+    return chat_completion(
+        api_key,
+        {
+            "messages": [
+                {"role": "system", "content": "You help draft concise, truthful job application answers."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 768,
+        },
+        narrative_model_chain(),
+    )
 
 
 def strip_reasoning(content: Any) -> str:

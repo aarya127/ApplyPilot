@@ -503,3 +503,61 @@ def test_answer_generator_keeps_existing_environment_key(tmp_path, monkeypatch):
 
     answer_generator.load_private_env()
     assert os.environ["NVIDIA_API_KEY"] == "env-key"
+
+
+class _AgentFakeResponse:
+    def __init__(self, status_code, content="ok"):
+        self.status_code = status_code
+        self._content = content
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content}}]}
+
+
+def _agent_chain_env(monkeypatch, outcomes, calls):
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.delenv("NVIDIA_MODEL", raising=False)
+    monkeypatch.delenv("NVIDIA_FALLBACK_MODELS", raising=False)
+    monkeypatch.delenv("NVIDIA_NARRATIVE_MODEL", raising=False)
+    monkeypatch.delenv("NVIDIA_NARRATIVE_FALLBACK_MODELS", raising=False)
+
+    def post(url, headers=None, json=None, timeout=None):
+        calls.append(json["model"])
+        assert json["chat_template_kwargs"] == {"thinking": False}
+        outcome = outcomes.get(json["model"], _AgentFakeResponse(503))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(answer_generator.requests, "post", post)
+
+
+def test_agent_option_answers_fall_back_down_the_model_chain(monkeypatch):
+    calls = []
+    _agent_chain_env(monkeypatch, {
+        "nvidia/nemotron-3-ultra-550b-a55b": answer_generator.requests.ReadTimeout("slow"),
+        "z-ai/glm-5.3": _AgentFakeResponse(410),
+        "moonshotai/kimi-k3": _AgentFakeResponse(200, '{"answer": "Yes"}'),
+    }, calls)
+
+    answer = answer_generator.generate_option_answer_with_llm("Authorized to work?", ["Yes", "No"], {})
+
+    assert answer == "Yes"
+    # Starts on the current default, not the retired omni model that hung.
+    assert calls == ["nvidia/nemotron-3-ultra-550b-a55b", "z-ai/glm-5.3", "moonshotai/kimi-k3"]
+
+
+def test_agent_essays_use_the_literal_model_chain(monkeypatch):
+    calls = []
+    _agent_chain_env(monkeypatch, {"nvidia/nemotron-3-super-120b-a12b": _AgentFakeResponse(200, "I built X.")}, calls)
+
+    assert answer_generator.generate_answer_with_llm("Why us?", {}) == "I built X."
+    assert calls == ["z-ai/glm-5.3", "nvidia/nemotron-3-super-120b-a12b"]  # never ultra
+
+
+def test_agent_stops_on_a_rejected_key(monkeypatch):
+    calls = []
+    _agent_chain_env(monkeypatch, {"nvidia/nemotron-3-ultra-550b-a55b": _AgentFakeResponse(401)}, calls)
+
+    assert answer_generator.generate_option_answer_with_llm("Q?", ["Yes", "No"], {}) == ""
+    assert calls == ["nvidia/nemotron-3-ultra-550b-a55b"]

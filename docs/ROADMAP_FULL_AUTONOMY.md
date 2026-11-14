@@ -90,7 +90,7 @@ by the kind of failure and ordered by how much harm the failure would do once su
    `env.private` and `DEFAULT_MODEL` now use `nemotron-3-ultra-550b` for structured answers and
    `glm-5.3` for essays (see Model choice). Still to do:
    - `application_agent/agent/answer_generator.py` still defaults to the omni model that used to
-     hang.
+     hang. **Done 2026-11-14:** it now defaults to ultra-550b and uses the same fallback chains.
    - Add a fallback chain: primary, then secondary, on a 404/410, a 5xx or a timeout. **Done
      2026-10-02:**
      - Every autofill-backend completion (mapper, audit, essays, retries) goes through
@@ -110,8 +110,9 @@ by the kind of failure and ordered by how much harm the failure would do once su
        disables). Each switch is logged as `model.fallback`, `mapper.response` and
        `auditor.response` record the model that answered, and `/health` lists the chains.
      - Verified live: a retired model (410) fell through to glm-5.3.
-     - Not covered yet: `application_agent/agent/answer_generator.py` still calls one model
-       directly, with no fallback.
+     - The application agent (`answer_generator.py`) walks the same chains and env overrides
+       (2026-11-14). It doesn't import `server.py`, so it has its own small helper, with a 90 s
+       limit and no budget per request.
    - Make `/health` fail loudly on a 410, and show that in the side panel.
    - The owner chose to stay on the free endpoint, which retires models without notice and returns
      intermittent 403 and 503 errors. On 2026-10-01 a live run lost 8 of 22 model calls to 503s and 2
