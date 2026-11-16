@@ -435,6 +435,9 @@ def map_fields():
     profile = payload.get("profile", {})
     page = payload.get("page", {})
 
+    # Optional fields get no answers (required-only policy), not even from rules.
+    fields = [field for field in fields if is_backend_target_field(field)]
+
     # Conditional "if you selected ... in the prior question" fields whose
     # answer is mechanically derivable from page context bypass the LLM —
     # models keep answering them from candidate facts instead of form logic.
@@ -495,8 +498,13 @@ def audit_fields():
         return ("", 204)
 
     payload = request.get_json(force=True) or {}
-    fields = payload.get("fields", [])
-    mappings = payload.get("mappings", [])
+    # Optional fields are neither audited nor filled (required-only policy).
+    fields = [field for field in payload.get("fields", []) if is_backend_target_field(field)]
+    target_indexes = {field.get("index") for field in fields}
+    mappings = [
+        mapping for mapping in payload.get("mappings", [])
+        if isinstance(mapping, dict) and mapping.get("index") in target_indexes
+    ]
     profile = payload.get("profile", {})
     page = payload.get("page", {})
 
@@ -1832,9 +1840,8 @@ def policy_answer_for_field(
     if any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
         return best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
 
-    if re.search(r"how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application|application source|where did you hear", haystack):
-        answer = profile.get("answers", {}).get("applicationSource") or "LinkedIn"
-        return best_available_option(answer, options) or answer
+    if HEAR_ABOUT_PATTERN.search(haystack):
+        return hear_about_answer(profile, options)
 
     if any(term in haystack for term in ["terms and conditions", "terms of use", "terms of service", "conditions of use", "user agreement", "legal terms", "accept terms", "agree terms", "consent terms"]):
         return best_available_option(policies["acceptTerms"], options) or policies["acceptTerms"]
@@ -3009,6 +3016,52 @@ def rewrite_third_person_narratives(
     return result
 
 
+HEAR_ABOUT_PATTERN = re.compile(
+    r"how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application"
+    r"|application source|where did you hear"
+)
+
+
+def linkedin_source_option(options: list[dict[str, str]]) -> str | None:
+    """The option closest to the owner's answer "LinkedIn": plain "LinkedIn" first, then
+    "LinkedIn (Job) Post(ing)", then the shortest other LinkedIn option."""
+    labels = [str(option.get("label") or option.get("value") or "") for option in options]
+    linked = [label for label in labels if re.search(r"linked\s?in", label, re.I)]
+    if not linked:
+        return None
+    exact = [label for label in linked if re.sub(r"\s+", "", label).lower() == "linkedin"]
+    posts = [label for label in linked if re.fullmatch(r"\s*linked\s?in\s+(job\s+)?post(ing)?s?\s*", label, re.I)]
+    chosen = (exact or posts or sorted(linked, key=len))[0]
+    return match_option_value(chosen, options) or chosen
+
+
+def hear_about_answer(profile: dict[str, Any], options: list[dict[str, str]]) -> str | None:
+    stated = str(profile.get("answers", {}).get("applicationSource") or "").strip()
+    if stated and not re.fullmatch(r"linked\s?in", stated, re.I):
+        return best_available_option(stated, options) if options else stated
+    return linkedin_source_option(options) if options else "LinkedIn"
+
+
+BACKEND_BASELINE_FIELD_PATTERN = re.compile(
+    r"\b(first|last|given|family|full|legal|preferred|chosen)[ _-]?name\b|^\W*name\W*$|\be-?mail\b"
+    r"|\b(phone|mobile|telephone)\b|\bcountry code\b"
+)
+
+
+def is_backend_target_field(field: Any) -> bool:
+    """Required-only policy, enforced here as well as in the side panel: only required
+    fields (plus contact basics and files) get answers. Fields sent without any required
+    flag (older callers, the application agent) are kept."""
+    if not isinstance(field, dict):
+        return False
+    if "required" not in field or field.get("required") is True:
+        return True
+    if str(field.get("type") or "").lower() == "file":
+        return True
+    primary = " ".join(str(field.get(key) or "") for key in ("label", "name", "id", "autocomplete")).lower()
+    return bool(BACKEND_BASELINE_FIELD_PATTERN.search(primary))
+
+
 def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[str, Any] | None:
     """Deterministic policy answer for categories where the profile is the
     sole authority and LLM 'judgment' only introduces errors: messaging/
@@ -3028,6 +3081,9 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         answer = best_available_option(policies["recruitingMessages"], options) or policies["recruitingMessages"]
     elif any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
         answer = best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
+    elif HEAR_ABOUT_PATTERN.search(haystack):
+        # Owner decision 2026-09-26: "How did you hear about us?" is LinkedIn.
+        answer = hear_about_answer(profile, options)
     elif has_sponsorship_terms(haystack) and not is_work_eligibility_question(haystack):
         answer = best_available_option(policies["needsSponsorship"], options) or policies["needsSponsorship"]
     elif is_clearance_eligibility_question(haystack):

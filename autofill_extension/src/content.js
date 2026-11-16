@@ -2897,7 +2897,12 @@
     }
 
     if (/(how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application|application source|where did you hear)/.test(haystack)) {
-      return buildMapping(field, profile.answers?.applicationSource || "LinkedIn", "rule", 0.86);
+      // Owner decision 2026-09-26: the answer is LinkedIn (same rule as server.py hear_about_answer).
+      const stated = String(profile.answers?.applicationSource || "").trim();
+      if (stated && !/^linked\s?in$/i.test(stated)) {
+        return buildMapping(field, stated, "rule", 0.86);
+      }
+      return buildMapping(field, field.options?.length ? linkedInSourceOption(field.options) : "LinkedIn", "rule", 0.86);
     }
 
     if (/(terms and conditions|terms of use|terms of service|conditions of use|user agreement|legal terms|accept.*terms|agree.*terms|consent.*terms)/.test(haystack)) {
@@ -5318,6 +5323,19 @@
     }
 
     return "";
+  }
+
+  // The option closest to "LinkedIn": plain "LinkedIn", then "LinkedIn (Job) Post(ing)",
+  // then the shortest other LinkedIn option. "" when the list has no LinkedIn option.
+  function linkedInSourceOption(options) {
+    const labels = options.map((option) => String(option.label || option.value || "")).filter(Boolean);
+    const linked = labels.filter((label) => /linked\s?in/i.test(label));
+    if (!linked.length) {
+      return "";
+    }
+    const exact = linked.filter((label) => label.replace(/\s+/g, "").toLowerCase() === "linkedin");
+    const posts = linked.filter((label) => /^\s*linked\s?in\s+(job\s+)?post(ing)?s?\s*$/i.test(label));
+    return (exact[0] || posts[0] || [...linked].sort((a, b) => a.length - b.length)[0]).trim();
   }
 
   function bestOptionValue(field, value) {

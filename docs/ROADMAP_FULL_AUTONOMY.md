@@ -243,6 +243,18 @@ by the kind of failure and ordered by how much harm the failure would do once su
       "LinkedIn Sponsored Job/Ad"), or type "LinkedIn" into free-text fields.
 
     Enforce required-only in the backend too, not only in the panel.
+
+    **Done 2026-11-16:**
+    - `/map-fields` and `/audit-fields` drop optional fields before any rule or model sees them.
+      Contact basics (name, email, phone, phone country code) and file inputs are the only
+      exceptions. Fields sent without a `required` flag at all (the application agent) are still
+      answered.
+    - Optional demographic questions are skipped like any other optional field while owner
+      decision 2 is open.
+    - "How did you hear about us?" is now an authoritative rule in the backend, so the model can't
+      override it. On both sides it picks plain "LinkedIn" first, then "LinkedIn (Job)
+      Post(ing)", then the shortest other LinkedIn option ("LinkedIn Sponsored Job/Ad",
+      "Linked In"). Before, a list with two LinkedIn options and no plain "LinkedIn" got nothing.
 13. **Check values the ATS pre-filled.** Lever's résumé parser pre-filled LinkedIn as
     `http://linkedin/aarya` and "Other website" as `http://aarya127.com`. The profile has
     `linkedin.com/in/AaryaShah127` and `aarya127.github.io`, and the tool never corrected them.

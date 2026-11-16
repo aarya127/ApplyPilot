@@ -175,15 +175,16 @@ def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
                     "label": "How Did You Hear About Us?",
                     "options": [{"label": "LinkedIn"}, {"label": "Other"}],
                 },
+                {"index": 2, "label": "What is your GPA?"},
             ],
-            "profile": {"workAuthorization": "Yes"},
+            "profile": {"workAuthorization": "Yes", "gpa": "3.8"},
             "page": {},
         },
     )
 
     assert response.status_code == 200
-    # Eligibility is answered authoritatively before the mapper runs; the
-    # non-authoritative field falls back to policy when the mapper fails.
+    # Eligibility and "how did you hear" are answered authoritatively before the mapper
+    # runs; the non-authoritative GPA field falls back to policy when the mapper fails.
     assert response.json["mappings"] == [
         {
             "index": 0,
@@ -194,6 +195,12 @@ def test_backend_mapper_failure_returns_warning(monkeypatch, tmp_path):
         {
             "index": 1,
             "value": "LinkedIn",
+            "confidence": 0.95,
+            "source": "policy",
+        },
+        {
+            "index": 2,
+            "value": "3.8",
             "confidence": 0.78,
             "source": "policy",
         },
@@ -6672,3 +6679,117 @@ def test_content_script_domain_years_hands_off_without_fact():
     assert (k8s, de, total) == ("", "2", "3")
     unmapped = [field["label"] for field in preview["result"]["unmappedFields"]]
     assert any("Kubernetes" in label for label in unmapped), unmapped
+
+
+# --- Required-only enforced in the backend; LinkedIn source variants (Phase 1 #12) --------
+
+
+def test_map_fields_skips_optional_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    seen = []
+
+    def fake_mapper(fields, profile, page):
+        seen.extend(field["label"] for field in fields)
+        return [{"index": field["index"], "value": "AI text", "confidence": 0.9, "source": "llm"} for field in fields]
+
+    monkeypatch.setattr(server, "call_nvidia_mapper", fake_mapper)
+    monkeypatch.setattr(server, "regenerate_mapper_narratives", lambda fields, mappings, *a: mappings)
+    monkeypatch.setattr(server, "compact_retry_unanswered_option_fields", lambda *a: [])
+    monkeypatch.setattr(server, "rewrite_third_person_narratives", lambda fields, mappings, profile: mappings)
+    monkeypatch.setattr(server, "drop_employer_specific_narratives", lambda mappings, fields: mappings)
+    fields = [
+        {"index": 0, "label": "What excites you about this role? *", "tag": "textarea", "type": "textarea", "required": True},
+        {"index": 1, "label": "Note to Hiring Manager", "tag": "textarea", "type": "textarea", "required": False},
+        {"index": 2, "label": "Gender", "tag": "select", "type": "select", "required": False,
+         "options": [{"label": "Male", "value": "Male"}, {"label": "Female", "value": "Female"}]},
+        {"index": 3, "label": "Cover letter", "tag": "textarea", "type": "textarea"},
+        {"index": 4, "label": "Email", "tag": "input", "type": "email", "required": False},
+    ]
+    profile = {"firstName": "Sample", "email": "sample@example.com", "demographics": {"gender": "Male"}}
+
+    body = server.app.test_client().post("/map-fields", json={"fields": fields, "profile": profile, "page": {}}).get_json()
+
+    assert {mapping["index"] for mapping in body["mappings"]} == {0, 3, 4}
+    assert "Note to Hiring Manager" not in seen
+    assert "Gender" not in seen
+
+
+def test_audit_fields_skips_optional_fields(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    audited = []
+
+    def fake_auditor(fields, mappings, profile, page):
+        audited.extend(field["label"] for field in fields)
+        return {
+            "decisions": [{"index": f["index"], "action": "fill", "value": "AI text", "evidence": "resume", "source": "audit"} for f in fields],
+            "corrections": [],
+        }
+
+    monkeypatch.setattr(server, "call_nvidia_auditor", fake_auditor)
+    fields = [
+        {"index": 0, "label": "Note to Hiring Manager", "tag": "textarea", "type": "textarea", "required": False},
+        {"index": 1, "label": "Cover letter *", "tag": "textarea", "type": "textarea", "required": True},
+    ]
+    mappings = [{"index": 0, "value": ""}, {"index": 1, "value": ""}]
+
+    body = server.app.test_client().post(
+        "/audit-fields", json={"fields": fields, "mappings": mappings, "profile": {}, "page": {}}
+    ).get_json()
+
+    assert audited == ["Cover letter *"]
+    assert {d["index"] for d in body["decisions"] if d["action"] in ("fill", "correct")} == {1}
+    assert all(c["index"] != 0 for c in body["corrections"])
+
+
+_LINKEDIN_CASES = [
+    (["Indeed", "LinkedIn Post", "LinkedIn Sponsored Job/Ad"], "LinkedIn Post"),
+    (["Indeed", "LinkedIn", "LinkedIn Post"], "LinkedIn"),
+    (["Linked In", "Other"], "Linked In"),
+    (["LinkedIn Sponsored Job/Ad", "Glassdoor"], "LinkedIn Sponsored Job/Ad"),
+]
+
+
+@pytest.mark.parametrize("labels, expected", _LINKEDIN_CASES)
+def test_backend_hear_about_picks_closest_linkedin_option(labels, expected):
+    field = {
+        "index": 0, "label": "How did you hear about us?", "tag": "select", "type": "select",
+        "options": [{"label": label, "value": label} for label in labels],
+    }
+    assert server.authoritative_policy_mapping(field, {"answers": {}})["value"] == expected
+    assert server.authoritative_policy_mapping(
+        {"index": 0, "label": "How did you hear about this job?", "tag": "input", "type": "text"}, {"answers": {}}
+    )["value"] == "LinkedIn"
+
+
+def test_map_fields_hear_about_ignores_model_answer(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    monkeypatch.setattr(server, "call_nvidia_mapper", lambda fields, profile, page: [
+        {"index": f["index"], "value": "Greenhouse", "confidence": 0.9, "source": "llm"} for f in fields
+    ])
+    field = {
+        "index": 0, "label": "How did you hear about us? *", "tag": "select", "type": "select", "required": True,
+        "options": [{"label": label, "value": label} for label in ["Greenhouse", "LinkedIn Post", "LinkedIn Sponsored Job/Ad"]],
+    }
+
+    body = server.app.test_client().post("/map-fields", json={"fields": [field], "profile": {"answers": {}}, "page": {}}).get_json()
+
+    assert [mapping["value"] for mapping in body["mappings"]] == ["LinkedIn Post"]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+@pytest.mark.parametrize("labels, expected", _LINKEDIN_CASES)
+def test_content_script_hear_about_picks_closest_linkedin_option(labels, expected):
+    options = "".join(f"<option>{label}</option>" for label in labels)
+    html = f"""
+      <form>
+        <label>How did you hear about us? *<select name="source" required><option value=""></option>{options}</select></label>
+      </form>
+    """
+    _, [value] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/5", html, {"firstName": "Sample", "answers": {}}, SENSITIVE_SETTINGS,
+        ["() => document.querySelector('[name=source]').value"],
+    )
+    assert value == expected
