@@ -340,6 +340,18 @@ by the kind of failure and ordered by how much harm the failure would do once su
 25. **Clean up verification noise.** Workable mismatches compare "question text + answer" with the
     answer ("Expected '…identity? YES' but the page shows 'YES'"). Verification has to be exact before
     a submit gate can rely on it.
+    **Done 2026-11-16:**
+    - An option's label is now its own visible label ("YES"), not the question text an
+      `aria-labelledby` adds, so the expected value is the option itself.
+    - Verification reads the page the same way the expected value was chosen: a choice group's
+      selected option labels (radio, `role=radio`, checkbox groups, button groups), a select's
+      visible text or value, and a standalone checkbox's ticked state (`true`/`false`).
+    - The comparison is exact after normalising case, spacing and punctuation. It still allows
+      phone digits, MM/YYYY dates, yes/no aliases (including Y/N) and location spellings, and
+      it compares multi-values ("A; B") as sets. Containment no longer counts: "South Asian"
+      doesn't verify "Asian".
+    - Before this, a ticked "I agree" box read as its label and showed as a false mismatch, and
+      a checkbox group read only its first box.
 26. **Give each page a verdict.**
     - *Submit-ready:* every required field is filled and verified, and no factual field relies on an
       unconfirmed AI guess.

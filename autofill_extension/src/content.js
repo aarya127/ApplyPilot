@@ -694,9 +694,10 @@
         continue;
       }
 
-      const actual = getCurrentValue(element);
-      const status = mappingValueMatchesField(actual, mapping.value) ? "matched" : "mismatch";
-      results.push(verificationRecord(mapping, field, actual, status));
+      const expected = verificationExpectedValue(mapping.value, field, element);
+      const candidates = verificationActualValues(element, field);
+      const status = candidates.some((actual) => verificationValuesMatch(actual, expected)) ? "matched" : "mismatch";
+      results.push(verificationRecord({ ...mapping, value: expected }, field, candidates[0] ?? "", status));
     }
 
     return {
@@ -719,6 +720,82 @@
 
   function mappingValueMatchesField(actual, expected) {
     return valueMatches(actual, expected) || optionMatches(actual, "", expected);
+  }
+
+  // Verification compares the value on the page with the value that was meant to be
+  // there, exactly (after normalising case, spacing and punctuation). It allows the
+  // reformatting widgets do (phone digits, MM/YYYY dates, yes/no aliases, location
+  // spellings) but never containment: "South Asian" does not verify "Asian". A later
+  // submit gate relies on this.
+  function verificationValuesMatch(actual, expected) {
+    if (valueMatches(actual, expected)) {
+      return true;
+    }
+
+    const parts = (value) => String(value ?? "").split(/\s*;\s*/).map((part) => part.trim()).filter(Boolean);
+    const actualParts = parts(actual);
+    const expectedParts = parts(expected);
+    if (!actualParts.length || !expectedParts.length) {
+      return false;
+    }
+    if (actualParts.length > 1 || expectedParts.length > 1) {
+      return actualParts.length === expectedParts.length
+        && expectedParts.every((want) => actualParts.some((have) => singleVerificationMatch(have, want)));
+    }
+    return singleVerificationMatch(actualParts[0], expectedParts[0]);
+  }
+
+  function singleVerificationMatch(actual, expected) {
+    if (valueMatches(actual, expected)) {
+      return true;
+    }
+    const yesNo = (value) => ({ y: "yes", yes: "yes", n: "no", no: "no" })[normalize(value)];
+    if (yesNo(actual) && yesNo(actual) === yesNo(expected)) {
+      return true;
+    }
+    const tier = optionMatchTier(actual, "", expected);
+    return tier === 1 || tier === 2;
+  }
+
+  function isStandaloneCheckboxElement(element, field) {
+    const isCheckbox = (element.type === "checkbox" && "checked" in element)
+      || (element.getAttribute?.("role") || "").toLowerCase() === "checkbox";
+    return isCheckbox && field?.tag !== "choice-group" && !(field?.choiceRefs?.length > 1);
+  }
+
+  function verificationExpectedValue(value, field, element) {
+    if (element && isStandaloneCheckboxElement(element, field)) {
+      return /^(true|yes|y|1|agree|checked)$/i.test(String(value ?? "").trim()) ? "true" : "false";
+    }
+    return value;
+  }
+
+  // What the page shows, read the same way the expected value was chosen: a choice
+  // group's selected option labels (or values), a select's value or visible text, and
+  // a standalone checkbox's ticked state.
+  function verificationActualValues(element, field) {
+    if (isStandaloneCheckboxElement(element, field)) {
+      const checked = "checked" in element && element.type === "checkbox"
+        ? element.checked
+        : element.getAttribute("aria-checked") === "true";
+      return [checked ? "true" : "false"];
+    }
+
+    const members = (field?.choiceRefs || []).map((ref) => ref?.deref?.()).filter(Boolean);
+    if (field?.tag === "choice-group" && members.length) {
+      const selected = members.filter(isChoiceSelected);
+      return [
+        selected.map((member) => compactText(choiceLabel(member) || choiceValue(member))).join("; "),
+        selected.map((member) => compactText(choiceValue(member) || choiceLabel(member))).join("; ")
+      ];
+    }
+
+    if (element.tagName?.toLowerCase() === "select") {
+      const selected = element.selectedOptions?.[0];
+      return [compactText(selected?.textContent || ""), element.value || ""].filter((value, index) => index === 0 || value);
+    }
+
+    return [getCurrentValue(element)];
   }
 
   const RESUME_FILE_CONTEXT_PATTERN = /resume|\bcv\b|curriculum vitae/i;
@@ -1702,9 +1779,18 @@
     return element.dataset.applicationAutofillGroupId;
   }
 
+  // An option's own visible label: its <label for> or wrapping <label>, without the
+  // question text an aria-labelledby can add ("Do you identify…? YES" -> "YES").
+  function optionOwnLabel(element) {
+    const id = element.id;
+    const forLabel = id ? document.querySelector(`label[for="${cssEscape(id)}"]`) : null;
+    return labelTextWithoutControls(forLabel) || labelTextWithoutControls(element.closest?.("label")) || "";
+  }
+
   function choiceLabel(element) {
     return compactText(
-      getLabelText(element)
+      optionOwnLabel(element)
+      || getLabelText(element)
       || element.getAttribute("aria-label")
       || element.innerText
       || element.textContent

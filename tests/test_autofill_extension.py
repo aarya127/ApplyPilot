@@ -6793,3 +6793,125 @@ def test_content_script_hear_about_picks_closest_linkedin_option(labels, expecte
         ["() => document.querySelector('[name=source]').value"],
     )
     assert value == expected
+
+
+# --- Exact verification: value against value (roadmap Phase 1 #25) ---------------------------
+
+
+def _fill_label_js(label_pattern, value):
+    """Preview, then fill the field whose label matches label_pattern with value; returns
+    the APPLY_AUTOFILL_MAPPINGS response."""
+    return f"""() => new Promise((resolve) => {{
+      window.__autofillListener({{ type: 'PREVIEW_AUTOFILL' }}, null, (preview) => {{
+        const field = preview.result.debugFields.find((item) => new RegExp({json.dumps(label_pattern)}, 'i').test(item.label || ''));
+        if (!field) {{ resolve({{ missing: preview.result.debugFields.map((item) => item.label) }}); return; }}
+        const mapping = {{ index: field.index, value: {json.dumps(value)}, confidence: 1, source: 'test' }};
+        window.__autofillListener({{ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: [mapping] }}, null, resolve);
+      }});
+    }})"""
+
+
+def _verification_records(fill):
+    verification = fill["result"]["verification"]
+    return verification["matched"], verification["mismatched"]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_verification_compares_option_value_not_question_text():
+    # Workable: each radio is aria-labelledby the question AND its own option text.
+    html = """
+      <form>
+        <fieldset>
+          <legend id="q1">Do you identify as transgender? *</legend>
+          <label><input type="radio" name="t" value="YES" aria-labelledby="q1 y1" required><span id="y1">YES</span></label>
+          <label><input type="radio" name="t" value="NO" aria-labelledby="q1 n1"><span id="n1">NO</span></label>
+        </fieldset>
+      </form>
+    """
+    preview, [fill, checked] = _content_script_run(
+        "https://apply.workable.com/acme/j/1/apply", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS,
+        [_fill_label_js("transgender", "NO"), "() => document.querySelector('input[name=t]:checked')?.value || ''"],
+    )
+
+    field = next(f for f in preview["result"]["debugFields"] if "transgender" in (f.get("label") or "").lower())
+    assert [option["label"] for option in field["options"]] == ["YES", "NO"]
+    assert checked == "NO"
+    matched, mismatched = _verification_records(fill)
+    assert mismatched == []
+    assert matched == 1
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_verification_reads_checkbox_group_and_role_radio():
+    html = """
+      <form>
+        <fieldset><legend>Which best describes your ethnicity? (select all that apply) *</legend>
+          <label><input type="checkbox" name="eth" value="1" required> East Asian</label>
+          <label><input type="checkbox" name="eth" value="2"> South Asian</label>
+          <label><input type="checkbox" name="eth" value="3"> White</label>
+        </fieldset>
+        <div role="radiogroup" aria-labelledby="sizeq">
+          <span id="sizeq">Preferred team size *</span>
+          <div role="radio" aria-checked="false" tabindex="0">Small</div>
+          <div role="radio" aria-checked="false" tabindex="0">Large</div>
+        </div>
+      </form>
+      <script>
+        document.querySelectorAll('[role=radio]').forEach((radio) => radio.addEventListener('click', () => {
+          document.querySelectorAll('[role=radio]').forEach((other) => other.setAttribute('aria-checked', String(other === radio)));
+        }));
+      </script>
+    """
+    _, [eth_fill, size_fill] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/7", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS,
+        [_fill_label_js("ethnicity", "South Asian"), _fill_label_js("team size", "Large")],
+    )
+
+    for fill in (eth_fill, size_fill):
+        matched, mismatched = _verification_records(fill)
+        assert (matched, mismatched) == (1, []), fill["result"]["verification"]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_verification_reports_unticked_agreement_as_mismatch():
+    html = """
+      <form>
+        <label><input type="checkbox" name="agree" required> I agree to the privacy notice *</label>
+        <!-- A custom checkbox whose click never takes effect: the fill "succeeds" but nothing sticks. -->
+        <div role="checkbox" aria-checked="false" aria-required="true" tabindex="0" aria-label="I acknowledge the data policy *"></div>
+      </form>
+    """
+    _, [agree_fill, stuck_fill] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/8", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS,
+        [_fill_label_js("privacy notice", "true"), _fill_label_js("data policy", "true")],
+    )
+
+    assert _verification_records(agree_fill) == (1, [])
+    matched, mismatched = _verification_records(stuck_fill)
+    assert matched == 0
+    assert [(record["expected"], record["actual"]) for record in mismatched] == [("true", "false")]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+@pytest.mark.parametrize(
+    "typed, shown, matched",
+    [
+        ("Asian", "South Asian", False),  # containment is not a match
+        ("South Asian", "south  asian", True),  # case and spacing are
+        ("South Asian; White", "White; South Asian", True),  # multi-values compare as sets
+        ("Yes", "Y", True),  # yes/no aliases
+    ],
+)
+def test_verification_is_exact_not_containment(typed, shown, matched):
+    # The page rewrites whatever was typed, the way some widgets reformat values.
+    html = f"""
+      <form><label>Team name *<input name="team" required></label></form>
+      <script>
+        document.querySelector('[name=team]').addEventListener('change', (event) => {{ event.target.value = {json.dumps(shown)}; }});
+      </script>
+    """
+    _, [fill] = _content_script_run(
+        "https://example.com/apply", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS,
+        [_fill_label_js("team name", typed)],
+    )
+    assert _verification_records(fill)[0] == (1 if matched else 0)
