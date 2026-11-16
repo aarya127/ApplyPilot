@@ -165,7 +165,13 @@ by the kind of failure and ordered by how much harm the failure would do once su
    - Defense-specific years-of-experience questions get "0" when the profile has no defense work.
      The fixed years rule had answered "3" (total experience).
 
-   **Still open:** other domain-specific years questions still get total experience.
+   **Done 2026-11-16:** the old note here said other domain-specific years questions still got
+   total experience. Now, in both the backend and the extension, "years of experience in/with X"
+   and "years of X experience" are answered only from the jobs in the profile whose title,
+   company or résumé bullets mention X, counted from those jobs' dates. With no such job, the
+   question goes to the human: `/map-fields` doesn't send it to the model, and the audit skips it
+   and drops any model fill. "Total", "professional", "relevant" and "in a similar role" still get
+   the stated total. The audit no longer puts total years back over a domain answer.
 6. **The candidate as their own referrer.** "Who referred you to this position?" got "Aarya Shah".
    Referral questions stay blank or "N/A" unless the profile names a referrer. **Fixed
    2026-10-01:** the extension's name rule had matched "Enter their first and last name". Referrer

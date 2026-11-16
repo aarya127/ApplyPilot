@@ -15,7 +15,7 @@ from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -451,7 +451,8 @@ def map_fields():
     # the candidate's head; the model invents them ("Former Manager", the candidate's own
     # phone), so they always surface to the human.
     resolved_indexes |= {
-        field.get("index") for field in fields if isinstance(field, dict) and is_reference_field(field)
+        field.get("index") for field in fields
+        if isinstance(field, dict) and (is_reference_field(field) or is_unsupported_domain_years_field(field, profile))
     }
     remaining_fields = [
         field for field in fields
@@ -543,7 +544,7 @@ def audit_fields():
         if str(decision.get("source") or "").startswith(("deterministic", "profile", "policy")):
             return False
         field = audit_field_by_index.get(decision.get("index"))
-        if isinstance(field, dict) and is_reference_field(field):
+        if isinstance(field, dict) and (is_reference_field(field) or is_unsupported_domain_years_field(field, profile)):
             return True
         return str(decision.get("evidence") or "").strip().lower() in UNSUPPORTED_AUDIT_EVIDENCE
 
@@ -1425,6 +1426,20 @@ def deterministic_audit_report(
 
         current_value = mapping.get("value")
 
+        if is_unsupported_domain_years_field(field, profile):
+            decisions.append(
+                {
+                    "index": index,
+                    "action": "skip",
+                    "value": current_value,
+                    "confidence": 0.5,
+                    "source": "deterministic-audit",
+                    "reason": "No job in the profile mentions this area, so the years go to the human.",
+                    "evidence": "insufficientContext",
+                }
+            )
+            continue
+
         if not policy:
             decisions.append(
                 {
@@ -1735,6 +1750,10 @@ def policy_answer_for_field(
         if not answer:
             return None
         return best_available_option(answer, options) or answer
+
+    if is_years_of_experience_question(haystack) and experience_domain(years_question_text(field)):
+        # Domain years are answered by authoritative_policy_mapping or handed off.
+        return None
 
     if is_years_of_experience_question(haystack):
         answers = profile.get("answers", {})
@@ -3032,6 +3051,12 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         # "How many years designing DoD cloud environments?" is not the candidate's total
         # years; the profile shows no such experience, so the truthful answer is zero.
         answer = best_available_option("0", options) if options else "0"
+    elif is_years_of_experience_question(haystack) and experience_domain(years_question_text(field)):
+        # Years in one domain come only from the jobs that mention it; with none, the
+        # answer stays empty and the field is handed off (is_unsupported_domain_years_field).
+        years = domain_years_from_profile(experience_domain(years_question_text(field)), profile)
+        if years is not None:
+            answer = best_available_option(str(years), options) if options else str(years)
     elif is_work_eligibility_question(haystack):
         authorization = stated_work_authorization(profile)
         if authorization:
@@ -3128,6 +3153,141 @@ def unsupported_experience_domain(haystack: str, profile: dict[str, Any]) -> boo
     resume_facts = profile.get("resumeFacts") if isinstance(profile.get("resumeFacts"), dict) else {}
     background = json.dumps([profile.get("workExperience"), resume_facts.get("experience")]).lower()
     return not DEFENSE_DOMAIN_PATTERN.search(background)
+
+
+# "Years of experience in/with X" asks about one domain, not the candidate's total. The
+# answer may only come from jobs in the profile that mention X; with no such job the
+# question goes to the human instead of getting total years.
+YEARS_DOMAIN_AFTER_PATTERN = re.compile(
+    r"\bexperience\b(?:\s+(?:do|did|have|has|would)\s+you\s+(?:have|had|got))?"
+    r"(?:\s+(?:in|with|using|on|doing|as an?|working (?:with|in|on))\b|(?=\s+\w+ing\b))"
+    r"\s*(?P<domain>[^?.;:()*]+)"
+)
+YEARS_DOMAIN_BEFORE_PATTERN = re.compile(r"\byears?['\u2019]?\s+of\s+(?P<domain>[a-z0-9+#./ -]+?)\s+experience\b")
+YEARS_DOMAIN_FILLER_WORDS = {
+    "a", "an", "the", "and", "or", "of", "in", "with", "using", "on", "as", "for", "to", "at", "by", "any",
+    "your", "you", "do", "did", "have", "has", "had", "this", "that", "these", "those", "such", "following",
+    "similar", "same", "role", "roles", "position", "positions", "job", "jobs", "field", "fields", "area", "areas",
+    "capacity", "industry", "professional", "professionally", "work", "working", "relevant", "related", "total",
+    "overall", "full", "time", "fulltime", "post", "graduate", "paid", "prior", "previous", "hands", "experience",
+    "years", "year", "environment", "environments", "based", "level", "type", "kind", "like", "e", "g", "eg",
+    "etc", "including", "building", "designing", "developing", "maintaining", "managing", "leading", "doing",
+    "writing", "creating", "implementing", "deploying", "supporting", "testing", "running", "operating",
+}
+
+
+def years_question_text(field: dict[str, Any]) -> str:
+    label = str(field.get("label") or "")
+    if is_low_information_label(label):
+        label = str(field.get("questionText") or label)
+    return label.lower()
+
+
+def experience_domain(question: str) -> str | None:
+    """The X in "years of experience in/with X" or "years of X experience", or None when
+    the question asks about total, relevant or professional experience."""
+    for pattern in (YEARS_DOMAIN_AFTER_PATTERN, YEARS_DOMAIN_BEFORE_PATTERN):
+        match = pattern.search(question.lower())
+        if match and domain_keywords(match.group("domain")):
+            return " ".join(domain_keywords(match.group("domain")))
+    return None
+
+
+def stem_word(word: str) -> str:
+    previous = None
+    while previous != word:
+        previous = word
+        for suffix in ("ing", "ers", "er", "es", "s"):
+            if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+                word = word[: -len(suffix)]
+                break
+    return word
+
+
+def domain_keywords(text: str) -> list[str]:
+    words = re.findall(r"[a-z0-9+#]+", text.lower())
+    return [word for word in words if word not in YEARS_DOMAIN_FILLER_WORDS]
+
+
+def profile_jobs_with_text(profile: dict[str, Any]) -> list[tuple[dict[str, Any], set[str]]]:
+    """Each workExperience entry with the stemmed words of its title, company and the
+    resume bullet lines listed under it (resumeFacts.experience is a flat list in which a
+    line naming the company starts that job's bullets)."""
+    resume_facts = profile.get("resumeFacts") if isinstance(profile.get("resumeFacts"), dict) else {}
+    jobs = [job for job in (profile.get("workExperience") or resume_facts.get("workExperience") or []) if isinstance(job, dict)]
+    texts = [f"{job.get('title') or ''} {job.get('company') or ''}" for job in jobs]
+
+    def names_company(line: str, job: dict[str, Any]) -> bool:
+        company = str(job.get("company") or "").lower().strip()
+        if not company:
+            return False
+        first = company.split()[0]
+        return company in line or (len(first) >= 3 and re.search(rf"\b{re.escape(first)}\b", line) is not None)
+
+    current = None
+    for line in resume_facts.get("experience") or []:
+        lowered = str(line).lower()
+        owner = next((index for index, job in enumerate(jobs) if names_company(lowered, job)), None)
+        if owner is not None:
+            current = owner
+        if current is not None:
+            texts[current] += f" {lowered}"
+
+    return [
+        (job, {stem_word(word) for word in re.findall(r"[a-z0-9+#]+", text.lower())})
+        for job, text in zip(jobs, texts)
+    ]
+
+
+def domain_years_from_profile(domain: str, profile: dict[str, Any], today: date | None = None) -> int | None:
+    """Years spent in jobs that mention every keyword of the domain, from their dates.
+    None when no job mentions it or a matching job has no start date."""
+    keywords = {stem_word(word) for word in domain_keywords(domain)}
+    if not keywords:
+        return None
+    today = today or date.today()
+    spans = []
+    for job, words in profile_jobs_with_text(profile):
+        if not keywords <= words:
+            continue
+        try:
+            start = int(job.get("startYear")) * 12 + int(job.get("startMonth") or 1) - 1
+        except (TypeError, ValueError):
+            return None
+        try:
+            end = int(job.get("endYear")) * 12 + int(job.get("endMonth") or 12) - 1
+        except (TypeError, ValueError):
+            end = today.year * 12 + today.month - 1
+        if end < start:
+            return None
+        spans.append((start, end))
+    if not spans:
+        return None
+    months = 0
+    current_start, current_end = None, None
+    for start, end in sorted(spans):
+        if current_end is None or start > current_end:
+            if current_end is not None:
+                months += current_end - current_start
+            current_start, current_end = start, end
+        else:
+            current_end = max(current_end, end)
+    months += current_end - current_start
+    return max(1, int(months / 12 + 0.5))
+
+
+def is_unsupported_domain_years_field(field: dict[str, Any], profile: dict[str, Any]) -> bool:
+    """A domain years question the profile can't answer: it goes to the human, never
+    to the model (which answers with total years or invents a number)."""
+    if not isinstance(field, dict):
+        return False
+    question = years_question_text(field)
+    if not is_years_of_experience_question(field_policy_haystack(field)):
+        return False
+    domain = experience_domain(question)
+    if not domain or unsupported_experience_domain(field_policy_haystack(field), profile):
+        return False
+    return domain_years_from_profile(domain, profile) is None
 
 
 REFERENCE_PERSON_PATTERN = re.compile(

@@ -28,6 +28,118 @@
   ].join(",");
 
   const DEFENSE_DOMAIN_PATTERN = /\b(dod|department of defense|defense|defence|military|classified)\b/;
+  // "Years of experience in/with X" asks about one domain. Its answer comes only from jobs
+  // in the profile that mention X (same rules as server.py experience_domain /
+  // domain_years_from_profile); with none, the question is handed off.
+  const YEARS_DOMAIN_AFTER_PATTERN = /\bexperience\b(?:\s+(?:do|did|have|has|would)\s+you\s+(?:have|had|got))?(?:\s+(?:in|with|using|on|doing|as an?|working (?:with|in|on))\b|(?=\s+\w+ing\b))\s*([^?.;:()*]+)/;
+  const YEARS_DOMAIN_BEFORE_PATTERN = /\byears?['\u2019]?\s+of\s+([a-z0-9+#./ -]+?)\s+experience\b/;
+  const YEARS_DOMAIN_FILLER_WORDS = new Set([
+    "a", "an", "the", "and", "or", "of", "in", "with", "using", "on", "as", "for", "to", "at", "by", "any",
+    "your", "you", "do", "did", "have", "has", "had", "this", "that", "these", "those", "such", "following",
+    "similar", "same", "role", "roles", "position", "positions", "job", "jobs", "field", "fields", "area", "areas",
+    "capacity", "industry", "professional", "professionally", "work", "working", "relevant", "related", "total",
+    "overall", "full", "time", "fulltime", "post", "graduate", "paid", "prior", "previous", "hands", "experience",
+    "years", "year", "environment", "environments", "based", "level", "type", "kind", "like", "e", "g", "eg",
+    "etc", "including", "building", "designing", "developing", "maintaining", "managing", "leading", "doing",
+    "writing", "creating", "implementing", "deploying", "supporting", "testing", "running", "operating"
+  ]);
+
+  function domainKeywords(text) {
+    return (String(text || "").toLowerCase().match(/[a-z0-9+#]+/g) || []).filter((word) => !YEARS_DOMAIN_FILLER_WORDS.has(word));
+  }
+
+  function experienceDomain(question) {
+    const lowered = String(question || "").toLowerCase();
+    for (const pattern of [YEARS_DOMAIN_AFTER_PATTERN, YEARS_DOMAIN_BEFORE_PATTERN]) {
+      const match = lowered.match(pattern);
+      if (match && domainKeywords(match[1]).length) {
+        return domainKeywords(match[1]).join(" ");
+      }
+    }
+    return null;
+  }
+
+  function stemWord(word) {
+    let previous = null;
+    while (previous !== word) {
+      previous = word;
+      for (const suffix of ["ing", "ers", "er", "es", "s"]) {
+        if (word.endsWith(suffix) && word.length - suffix.length >= 3) {
+          word = word.slice(0, -suffix.length);
+          break;
+        }
+      }
+    }
+    return word;
+  }
+
+  function profileJobsWithText(profile) {
+    const facts = profile?.resumeFacts || {};
+    const jobs = (profile?.workExperience || facts.workExperience || []).filter((job) => job && typeof job === "object");
+    const texts = jobs.map((job) => `${job.title || ""} ${job.company || ""}`);
+    const namesCompany = (line, job) => {
+      const company = String(job.company || "").toLowerCase().trim();
+      if (!company) {
+        return false;
+      }
+      const first = company.split(/\s+/)[0];
+      return line.includes(company) || (first.length >= 3 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(line));
+    };
+    let current = null;
+    for (const line of facts.experience || []) {
+      const lowered = String(line).toLowerCase();
+      const owner = jobs.findIndex((job) => namesCompany(lowered, job));
+      if (owner >= 0) {
+        current = owner;
+      }
+      if (current !== null) {
+        texts[current] += ` ${lowered}`;
+      }
+    }
+    return jobs.map((job, index) => [job, new Set((texts[index].toLowerCase().match(/[a-z0-9+#]+/g) || []).map(stemWord))]);
+  }
+
+  function domainYearsFromProfile(domain, profile, today = new Date()) {
+    const keywords = domainKeywords(domain).map(stemWord);
+    if (!keywords.length) {
+      return null;
+    }
+    const spans = [];
+    for (const [job, words] of profileJobsWithText(profile)) {
+      if (!keywords.every((keyword) => words.has(keyword))) {
+        continue;
+      }
+      const startYear = parseInt(job.startYear, 10);
+      if (!Number.isFinite(startYear)) {
+        return null;
+      }
+      const start = startYear * 12 + (parseInt(job.startMonth, 10) || 1) - 1;
+      const endYear = parseInt(job.endYear, 10);
+      const end = Number.isFinite(endYear)
+        ? endYear * 12 + (parseInt(job.endMonth, 10) || 12) - 1
+        : today.getFullYear() * 12 + today.getMonth();
+      if (end < start) {
+        return null;
+      }
+      spans.push([start, end]);
+    }
+    if (!spans.length) {
+      return null;
+    }
+    spans.sort((a, b) => a[0] - b[0]);
+    let months = 0;
+    let [currentStart, currentEnd] = spans[0];
+    for (const [start, end] of spans.slice(1)) {
+      if (start > currentEnd) {
+        months += currentEnd - currentStart;
+        [currentStart, currentEnd] = [start, end];
+      } else {
+        currentEnd = Math.max(currentEnd, end);
+      }
+    }
+    months += currentEnd - currentStart;
+    return Math.max(1, Math.floor(months / 12 + 0.5));
+  }
   const REFERENCE_PERSON_PATTERN = /\bname of (the |your )?(\w+ )?reference\b|\breference'?s? (name|phone|e-?mail|relationship|title|company)\b|\b(first|second|third|1st|2nd|3rd|professional|personal) reference\b|\bmay we contact\b.{0,30}\breferences?\b|\bcontact (your |the |this )?references?\b/i;
   // Labels that only ever ask about a person the candidate knows.
   const REFERENCE_ONLY_LABEL = /^\W*(\d+\.\s*)?(relationship|how long known|how long have you known( them)?|years known)\W*$/i;
@@ -3306,6 +3418,11 @@
       // no defense work in the profile the truthful answer is zero.
       if (DEFENSE_DOMAIN_PATTERN.test(haystack) && !DEFENSE_DOMAIN_PATTERN.test(normalize(JSON.stringify([profile.workExperience || [], profile.resumeFacts?.experience || []])))) {
         return buildMapping(field, "0", "rule", 0.85);
+      }
+      const domain = experienceDomain(field.label || field.questionText || "");
+      if (domain) {
+        const domainYears = domainYearsFromProfile(domain, profile);
+        return domainYears === null ? null : buildMapping(field, String(domainYears), "rule", 0.85);
       }
       const years = profile.answers?.relevantYearsOfExperience || profile.answers?.yearsOfExperience || profile.yearsOfExperience;
       if (hasValue(years)) {

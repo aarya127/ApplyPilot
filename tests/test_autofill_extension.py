@@ -6555,3 +6555,120 @@ def test_content_script_ignores_react_select_chip_remove_buttons(chips, extra):
     assert remaining_chips == chips
     mismatched = fill["result"]["verification"]["mismatched"]
     assert not any("remove" in (record.get("label") or "").lower() for record in mismatched), mismatched
+
+
+# --- Domain-specific years of experience (roadmap Phase 1 #5, still-open note) -------------
+
+_YEARS_PROFILE = {
+    "firstName": "Sample",
+    "answers": {"yearsOfExperience": "3", "relevantYearsOfExperience": "3"},
+    "workExperience": [
+        {"title": "Data Engineer", "company": "RBC", "startYear": "2021", "startMonth": "1", "endYear": "2023", "endMonth": "1"},
+    ],
+    "resumeFacts": {"experience": ["Data Engineer, RBC", "Built streaming pipelines on Snowflake"]},
+    "demographics": {},
+}
+
+
+def _years_field(label, index=0, **extra):
+    return {"index": index, "label": label, "tag": "input", "type": "text", **extra}
+
+
+@pytest.mark.parametrize(
+    "label, expected",
+    [
+        ("Years of experience in data engineering?", "2"),
+        ("How many years of Snowflake experience do you have?", "2"),
+        ("How many years of experience do you have with Kafka?", None),
+        ("How many years of experience do you have building, testing or maintaining Kubernetes clusters?", None),
+    ],
+)
+def test_domain_years_answer_from_matching_experience_only(label, expected):
+    mapping = server.authoritative_policy_mapping(_years_field(label), _YEARS_PROFILE)
+
+    assert (mapping or {}).get("value") == expected
+    assert server.is_unsupported_domain_years_field(_years_field(label), _YEARS_PROFILE) is (expected is None)
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "How many years of professional experience do you have?",
+        "How many years of experience do you have in a similar role?",
+        "Total years of experience",
+    ],
+)
+def test_total_years_question_still_uses_stated_years(label):
+    assert server.experience_domain(label.lower()) is None
+    assert server.authoritative_policy_mapping(_years_field(label), _YEARS_PROFILE)["value"] == "3"
+    assert server.is_unsupported_domain_years_field(_years_field(label), _YEARS_PROFILE) is False
+
+
+def test_map_fields_hands_off_unsupported_domain_years(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    seen = []
+
+    def fake_mapper(fields, profile, page):
+        seen.extend(field["label"] for field in fields)
+        return [{"index": field["index"], "value": "3", "confidence": 0.9, "source": "llm"} for field in fields]
+
+    monkeypatch.setattr(server, "call_nvidia_mapper", fake_mapper)
+    fields = [
+        _years_field("How many years of experience do you have with Kafka? *", 0, required=True),
+        _years_field("Why do you want this job? *", 1, required=True, tag="textarea", type="textarea"),
+    ]
+
+    body = server.app.test_client().post(
+        "/map-fields", json={"fields": fields, "profile": _YEARS_PROFILE, "page": {}}
+    ).get_json()
+
+    assert all(mapping["index"] != 0 for mapping in body["mappings"]), body["mappings"]
+    assert not any("Kafka" in label for label in seen)
+
+
+def test_audit_does_not_restore_total_years_on_domain_question(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    monkeypatch.setattr(server, "call_nvidia_auditor", lambda *args, **kwargs: {
+        "decisions": [{"index": 0, "action": "fill", "value": "3", "evidence": "resume", "source": "audit"}],
+        "corrections": [{"index": 0, "value": "3", "confidence": 0.8}],
+    })
+    fields = [_years_field("How many years of experience do you have with Kafka? *", 0, required=True)]
+
+    report = server.deterministic_audit_report(fields, [{"index": 0, "value": ""}], _YEARS_PROFILE)
+    assert [d["action"] for d in report["decisions"]] == ["skip"]
+    assert report["corrections"] == []
+
+    body = server.app.test_client().post(
+        "/audit-fields",
+        json={"fields": fields, "mappings": [{"index": 0, "value": ""}], "profile": _YEARS_PROFILE, "page": {}},
+    ).get_json()
+    assert not any(d["action"] in ("fill", "correct") for d in body["decisions"]), body["decisions"]
+    assert body["corrections"] == []
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_domain_years_hands_off_without_fact():
+    html = """
+      <form>
+        <label>Years of experience with Kubernetes *<input name="k8s" required></label>
+        <label>Years of experience in data engineering *<input name="de" required></label>
+        <label>Total years of experience *<input name="total" required></label>
+      </form>
+    """
+    preview, [k8s, de, total] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/9",
+        html,
+        _YEARS_PROFILE,
+        SENSITIVE_SETTINGS,
+        [
+            "() => document.querySelector('[name=k8s]').value",
+            "() => document.querySelector('[name=de]').value",
+            "() => document.querySelector('[name=total]').value",
+        ],
+    )
+
+    assert (k8s, de, total) == ("", "2", "3")
+    unmapped = [field["label"] for field in preview["result"]["unmappedFields"]]
+    assert any("Kubernetes" in label for label in unmapped), unmapped
