@@ -298,7 +298,11 @@ function arrayBufferToBase64(buffer) {
   return btoa(binary);
 }
 
-async function fetchWithLocalhostFallback(endpoint, options) {
+// The backend caps one /map-fields request at 180 s (MAP_FIELDS_BUDGET_SECONDS), so a
+// request that has not answered after 200 s is not coming back.
+const BACKEND_FETCH_TIMEOUT_MS = 200000;
+
+async function fetchWithLocalhostFallback(endpoint, options, timeoutMs = BACKEND_FETCH_TIMEOUT_MS) {
   const candidates = [endpoint];
 
   if (/^http:\/\/127\.0\.0\.1(?::\d+)?\//.test(endpoint)) {
@@ -308,10 +312,19 @@ async function fetchWithLocalhostFallback(endpoint, options) {
   let lastError = null;
 
   for (const candidate of candidates) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+
     try {
-      return await fetch(candidate, options);
+      return await fetch(candidate, { ...options, signal: controller.signal });
     } catch (error) {
+      if (error?.name === "AbortError") {
+        // The backend is reachable but slow; trying localhost would only double the wait.
+        throw new Error(`The local ApplyPilot backend did not answer within ${Math.round(timeoutMs / 1000)} s.`);
+      }
       lastError = error;
+    } finally {
+      clearTimeout(timer);
     }
   }
 

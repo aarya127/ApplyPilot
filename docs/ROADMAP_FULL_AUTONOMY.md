@@ -122,6 +122,11 @@ by the kind of failure and ordered by how much harm the failure would do once su
      optional. The model ranking in Model choice gives the order for the chain.
 2. **Put a time limit on Ask AI.** On Spotify (Lever) and Ramp (Ashby), Ask AI was still "Working"
    after 10 minutes. Give the per-field loop an overall deadline and hand off whatever is left.
+   **Done 2026-11-16:** Ask AI stops starting new per-field requests 5 minutes after it begins
+   (`settings.askAiTimeLimitSeconds` overrides). It lists the fields left over as hand-offs and
+   still fills the answers it already has. Every backend fetch from the extension times out after
+   200 s, just over the backend's 180 s `/map-fields` budget. A timeout doesn't retry on
+   `localhost`, which would double the wait.
 3. **Shrink the prompts.** Mapper prompts run from 24k to 548k characters. Palantir's is about 137k
    tokens, and only 3 of the 10 working models returned answers for it. Send each field's retrieved
    context instead of the whole profile and page for every field, and split large forms into

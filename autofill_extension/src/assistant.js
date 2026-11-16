@@ -304,7 +304,17 @@ async function askAiForMissingAnswers() {
   }
 }
 
+// Ask AI never runs longer than this overall (settings.askAiTimeLimitSeconds overrides).
+// Once it passes, no new per-field request starts; the fields left over go to the human.
+const ASK_AI_DEFAULT_TIME_LIMIT_SECONDS = 300;
+
+function askAiTimeLimitMs(settings) {
+  const seconds = Number(settings?.askAiTimeLimitSeconds);
+  return (Number.isFinite(seconds) && seconds > 0 ? seconds : ASK_AI_DEFAULT_TIME_LIMIT_SECONDS) * 1000;
+}
+
 async function askAiForMissingAnswersImpl() {
+  const startedAt = Date.now();
   const freshPreview = await sendToActiveTab({ type: "PREVIEW_AUTOFILL" });
 
   if (!freshPreview?.ok) {
@@ -316,6 +326,7 @@ async function askAiForMissingAnswersImpl() {
   renderReview(lastPreview);
 
   const { candidateProfile, settings } = await chrome.storage.local.get(["candidateProfile", "settings"]);
+  const deadline = startedAt + askAiTimeLimitMs(settings);
   const profile = candidateProfile || {};
   const pageContext = {
     ...(lastPreview?.page || {}),
@@ -356,8 +367,16 @@ async function askAiForMissingAnswersImpl() {
     setBusy(`Asking AI for ${missingFields.length} unanswered required/askable field(s), one at a time...`);
   }
 
+  const timedOutFields = [];
+
   for (let index = 0; index < missingFields.length; index += 1) {
     const field = missingFields[index];
+
+    if (Date.now() >= deadline) {
+      timedOutFields.push(...missingFields.slice(index));
+      break;
+    }
+
     const fieldForModel = toBackendField(field, 0);
     setAiWorking(true, `Asking AI ${index + 1}/${missingFields.length}: ${truncateDebug(field.label || "field")}`);
     // Answers filled earlier in this loop can unlock or change later conditional
@@ -390,6 +409,14 @@ async function askAiForMissingAnswersImpl() {
       }
       aiMappings.push(toPreviewMapping(fieldForModel, mapping));
     }
+  }
+
+  if (timedOutFields.length) {
+    const labels = timedOutFields.map((field) => `"${field.label || `Field ${Number(field.index) + 1}`}"`);
+    addMessage(
+      "agent",
+      `I ran out of time asking AI (${timedOutFields.length} field(s) left). Please answer these yourself: ${labels.join(", ")}.`
+    );
   }
 
   if (!aiMappings.length) {

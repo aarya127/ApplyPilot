@@ -6280,3 +6280,147 @@ def test_key_probe_skips_retired_models(monkeypatch, tmp_path):
     assert status["keyValid"] is True
     assert "retired (HTTP 410)" in status["keyError"]
     _reset_key_probe_cache()
+
+
+# --- Ask AI overall deadline (roadmap Phase 1 #2) ---------------------------------------
+
+
+def _assistant_panel_page(p, form_html, profile, settings, map_fields_js, audit_js="return { ok: true, payload: { corrections: [], decisions: [], issues: [] } };"):
+    """Loads content.js + assistant.js into one page with a mocked chrome API.
+
+    map_fields_js / audit_js are async JS function bodies that receive `message` and
+    return the background reply."""
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.set_content(ASSISTANT_PANEL_HTML + form_html)
+    page.evaluate(
+        f"""() => {{
+          const profile = {json.dumps(profile)};
+          const settings = {json.dumps(settings)};
+          window.__autofillListener = null;
+          window.__mapFieldsPayloads = [];
+          const mapFields = async (message) => {{ {map_fields_js} }};
+          const audit = async (message) => {{ {audit_js} }};
+          const respond = async (message) => {{
+            if (message?.type === 'AUDIT_FIELDS_WITH_BACKEND') return audit(message);
+            if (message?.type === 'MAP_FIELDS_WITH_BACKEND') {{
+              window.__mapFieldsPayloads.push(message.payload);
+              return mapFields(message);
+            }}
+            if (message?.type === 'GET_AI_USAGE') {{
+              return {{ ok: true, payload: {{ aiUsage: {{ requestsLastMinute: 0, limitPerMinute: 40, remainingThisMinute: 40 }} }} }};
+            }}
+            if (message?.type === 'FETCH_RESUME_FILE') return {{ ok: false, error: 'No resume in this test.' }};
+            return {{ ok: true, payload: {{}} }};
+          }};
+          window.chrome = {{
+            runtime: {{
+              onMessage: {{ addListener: (fn) => {{ window.__autofillListener = fn; }} }},
+              sendMessage: async (message) => respond(message),
+              openOptionsPage: () => {{}}
+            }},
+            storage: {{ local: {{ get: async () => ({{ candidateProfile: profile, settings }}), set: async () => {{}} }} }},
+            tabs: {{
+              query: async () => [{{ id: 1, url: 'https://example.com/apply', title: 'Apply' }}],
+              sendMessage: (tabId, message, options) => new Promise((resolve) => {{
+                window.__autofillListener(message, null, resolve);
+              }})
+            }},
+            scripting: {{ executeScript: async () => [] }},
+            webNavigation: {{ getAllFrames: async () => [{{ frameId: 0, url: '' }}] }}
+          }};
+        }}"""
+    )
+    page.add_script_tag(path=str(ROOT / "autofill_extension/src/content.js"))
+    page.add_script_tag(path=str(ROOT / "autofill_extension/src/assistant.js"))
+    return browser, page
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_assistant_ask_ai_stops_at_deadline_and_hands_off_rest():
+    from playwright.sync_api import sync_playwright
+
+    form = """
+    <form>
+      <label>Describe project alpha *<textarea name="alpha" required></textarea></label>
+      <label>Describe project bravo *<textarea name="bravo" required></textarea></label>
+      <label>Describe project charlie *<textarea name="charlie" required></textarea></label>
+    </form>
+    """
+    profile = {"firstName": "Test", "lastName": "Candidate", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False, "askAiTimeLimitSeconds": 1.5}
+    # Each per-field request takes 1 s, so only two can start inside the 1.5 s deadline.
+    map_fields_js = """
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const n = window.__mapFieldsPayloads.length;
+      return { ok: true, payload: { mappings: [{ index: 0, value: `A${n}`, confidence: 0.9, source: 'llm' }] } };
+    """
+
+    with sync_playwright() as p:
+        try:
+            browser, page = _assistant_panel_page(p, form, profile, settings, map_fields_js)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page.evaluate("() => document.getElementById('askAiButton').click()")
+        page.wait_for_function(
+            "() => document.getElementById('aiStatusText').textContent === 'AI idle' && window.__mapFieldsPayloads.length > 0",
+            timeout=15000,
+        )
+
+        assert len(page.evaluate("() => window.__mapFieldsPayloads")) == 2
+        assert page.locator("[name='alpha']").input_value() == "A1"
+        assert page.locator("[name='bravo']").input_value() == "A2"
+        assert page.locator("[name='charlie']").input_value() == ""
+        chat_text = page.evaluate("() => document.getElementById('chatLog').textContent")
+        assert "ran out of time" in chat_text
+        assert "Describe project charlie" in chat_text
+
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_background_fetch_times_out_without_localhost_retry():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True)
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page = browser.new_page()
+        page.set_content("<html><body></body></html>")
+        page.evaluate(
+            """() => {
+              const listener = { addListener: () => {} };
+              window.chrome = {
+                runtime: { onInstalled: listener, onStartup: listener, onMessage: listener },
+                action: { onClicked: listener },
+                storage: { local: { get: async () => ({}), set: async () => {} } }
+              };
+              window.__fetchCalls = [];
+              // A backend that never answers: the request only ends when it is aborted.
+              window.fetch = (url, options) => new Promise((resolve, reject) => {
+                window.__fetchCalls.push(url);
+                options?.signal?.addEventListener('abort', () => {
+                  reject(new DOMException('The operation was aborted.', 'AbortError'));
+                });
+              });
+            }"""
+        )
+        page.add_script_tag(path=str(ROOT / "autofill_extension/src/background.js"))
+
+        error = page.evaluate(
+            """async () => {
+              const hung = new Promise((resolve) => setTimeout(() => resolve('still waiting after 3 s'), 3000));
+              const attempt = fetchWithLocalhostFallback('http://127.0.0.1:8000/map-fields', { method: 'POST' }, 200)
+                .then(() => 'resolved', (error) => error.message);
+              return Promise.race([attempt, hung]);
+            }"""
+        )
+
+        assert "did not answer within" in error
+        assert page.evaluate("() => window.__fetchCalls") == ["http://127.0.0.1:8000/map-fields"]
+
+        browser.close()
