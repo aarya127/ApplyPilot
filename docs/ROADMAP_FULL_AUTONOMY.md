@@ -314,6 +314,18 @@ by the kind of failure and ordered by how much harm the failure would do once su
 20. **Typeahead fields.** Lever's "Current location" typeahead ("No location found") was never
     filled on any of the 3 Lever jobs; it was required on 2. Type a short query (city only), wait for
     suggestions, then pick one. The August School typeahead bug belongs here too (see below).
+    **Done 2026-11-16 (fixture-tested only, not verified on live Lever):**
+    - Plain text inputs that act as typeaheads (Lever's `location-input`, `aria-autocomplete`, or
+      a suggestion list beside the input) now type a short query (the city for a location), wait
+      up to 3 s for suggestions, and click the best one. A city must match a suggestion's first
+      part exactly, never "Chicago Heights" for Chicago, and the state too when known.
+    - If nothing matches on a field that only accepts a picked suggestion, the field is put back
+      as it was and becomes a hand-off.
+    - Labels no longer include text the page hides: Lever's "No location found" message had been
+      part of the location question's label.
+    - School comboboxes keep their mapping before any options exist, as location fields already
+      did, and still have to click a matching suggestion. A school typeahead is in the regression
+      tests.
 21. **Multi-select and consent fills don't stick.** On Reddit, the required "I agree" consent, the
     ethnicity multi-select, gender and sexual orientation all stayed "ready to fill" after two fill
     passes.

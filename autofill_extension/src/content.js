@@ -1392,6 +1392,7 @@
       placeholder: element.getAttribute("placeholder") || "",
       ariaLabel: element.getAttribute("aria-label") || "",
       ariaAutocomplete: element.getAttribute("aria-autocomplete") || "",
+      textTypeahead: isTextTypeahead(element),
       autocomplete: element.getAttribute("autocomplete") || "",
       dataAutomationId: element.getAttribute("data-automation-id") || "",
       required: isRequiredElement(element, [rawLabel, recoveredLabel, questionText].filter(Boolean).join(" ")),
@@ -2151,14 +2152,34 @@
     return current.length > 80 || current.split(" ").length > 8;
   }
 
+  // A label's own visible text: controls (and option lists) are skipped, and so is text the
+  // page hides, such as Lever's "No location found" message inside the location label.
   function labelTextWithoutControls(label) {
     if (!label) {
       return "";
     }
 
-    const clone = label.cloneNode(true);
-    clone.querySelectorAll("input, textarea, select, button, option, [role='option']").forEach((node) => node.remove());
-    return compactText(clone.innerText || clone.textContent || "");
+    const collect = (node) => {
+      let text = "";
+      for (const child of node.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          text += child.textContent;
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE || child.matches("input, textarea, select, button, option, [role='option'], script, style")) {
+          continue;
+        }
+        const style = getComputedStyle(child);
+        if (child.hidden || style.display === "none" || style.visibility === "hidden") {
+          continue;
+        }
+        const block = !/^inline/.test(style.display);
+        text += block ? ` ${collect(child)} ` : collect(child);
+      }
+      return text;
+    };
+
+    return compactText(collect(label));
   }
 
   function getSurroundingText(element) {
@@ -3944,6 +3965,7 @@
       || field.type === "combobox"
       || /listbox|combobox/i.test([field.type, field.ariaLabel, field.ariaAutocomplete, field.surroundingText].join(" "))
       || /selectwidget|selectshowall/i.test(field.dataAutomationId || "")
+      || Boolean(field.textTypeahead)
       || /autocomplete|typeahead|start typing/.test(haystack);
   }
 
@@ -5549,6 +5571,13 @@
     return typeable;
   }
 
+  function isTypedSchoolLikeField(field) {
+    const identity = normalize([field.label, field.placeholder, field.name, field.id, field.ariaLabel].join(" "));
+    return /\b(school|university|college|institution)\b/.test(identity)
+      && field.tag !== "button"
+      && (field.type === "combobox" || /list|both/i.test(field.ariaAutocomplete || ""));
+  }
+
   function canAttemptUnoptionedOptionLikeMapping(field, value, source = "") {
     const haystack = fullFieldHaystack(field);
     const normalizedValue = normalize(value);
@@ -5565,6 +5594,12 @@
     // user types, so they arrive here with no discovered options. fillCombobox
     // can still type the value and pick the matching suggestion, so allow it.
     if (isTypedLocationLikeField(field) && hasValue(value)) {
+      return true;
+    }
+
+    // School comboboxes are the same kind of typeahead; the fill still has to click a
+    // matching suggestion (or it restores the field).
+    if (isTypedSchoolLikeField(field) && hasValue(value)) {
       return true;
     }
 
@@ -6297,6 +6332,10 @@
       return true;
     }
 
+    if (isTextTypeahead(element)) {
+      return fillTextTypeahead(element, mapping.value, field);
+    }
+
     if (valueMatches(getCurrentValue(element), mapping.value)) {
       return false;
     }
@@ -6304,6 +6343,120 @@
     setNativeValue(element, String(mapping.value));
     dispatchFormEvents(element);
     return true;
+  }
+
+  // A plain text input that behaves as a typeahead: Lever's "Current location"
+  // (class location-input, a hidden selectedLocation that only a suggestion click sets),
+  // or any input announcing aria-autocomplete or sitting next to a suggestion list.
+  function isTextTypeahead(element) {
+    if (element?.tagName?.toLowerCase() !== "input") {
+      return false;
+    }
+    const type = (element.getAttribute("type") || "text").toLowerCase();
+    if (!["text", "search"].includes(type) || (element.getAttribute("role") || "").toLowerCase() === "combobox") {
+      return false;
+    }
+    if (/^(list|both)$/i.test(element.getAttribute("aria-autocomplete") || "")) {
+      return true;
+    }
+    const marker = `${typeof element.className === "string" ? element.className : ""} ${element.name || ""} ${element.id || ""}`;
+    if (/location-input|typeahead|autosuggest|autocomplete/i.test(marker)) {
+      return true;
+    }
+    return Boolean(element.parentElement?.querySelector(".dropdown-results, [role='listbox'], [class*='suggestion' i]"));
+  }
+
+  // The ATS only accepts a value picked from its suggestions (typed text alone is dropped).
+  function typeaheadRequiresPick(element) {
+    const marker = `${typeof element.className === "string" ? element.className : ""} ${element.name || ""}`;
+    return /location-input/i.test(marker)
+      || Boolean(element.parentElement?.querySelector("input[type='hidden'][name*='selected' i]"))
+      || requiresDropdownOptionClick();
+  }
+
+  const TYPEAHEAD_NON_OPTION_PATTERN = /no .*(found|results)|try entering|loading|searching|type to search|start typing/i;
+
+  function typeaheadSuggestionElements(element) {
+    const containers = [];
+    for (const id of [element.getAttribute("aria-controls"), element.getAttribute("aria-owns")].filter(Boolean)) {
+      const container = document.getElementById(id);
+      if (container) {
+        containers.push(container);
+      }
+    }
+    let ancestor = element.parentElement;
+    for (let depth = 0; ancestor && depth < 3; depth += 1, ancestor = ancestor.parentElement) {
+      containers.push(ancestor);
+    }
+    const selector = `${DROPDOWN_OPTION_SELECTOR}, .dropdown-location, .dropdown-results > *, [class*='suggestion' i] li, [class*='autocomplete' i] li`;
+    return uniqueElements(containers.flatMap((container) => Array.from(container.querySelectorAll(selector))))
+      .filter((option) => option !== element && isVisibleElement(option))
+      .filter((option) => !TYPEAHEAD_NON_OPTION_PATTERN.test(compactText(option.textContent || "")));
+  }
+
+  // Type a short query (the city for a location), then pick the suggestion that matches the
+  // full answer. A city must match a suggestion's first part exactly ("Chicago", never
+  // "Chicago Heights"), and the region when the answer has one.
+  function bestTypeaheadOption(options, desiredValue) {
+    const textOf = (option) => compactText(option.textContent || option.getAttribute("aria-label") || "");
+    const exact = options.find((option) => optionMatchTier(textOf(option), "", desiredValue) === 1);
+    if (exact) {
+      return exact;
+    }
+    const [city, region] = String(desiredValue).split(",").map((part) => normalize(part));
+    const sameCity = options.filter((option) => normalize(textOf(option).split(",")[0]) === city);
+    const regionName = region ? normalize(stateNameOrValue(region)) : "";
+    const inRegion = region
+      ? sameCity.filter((option) => {
+        const parts = textOf(option).split(",").slice(1).map((part) => normalize(part));
+        return parts.includes(region) || (regionName && parts.includes(regionName));
+      })
+      : sameCity;
+    return inRegion[0] || null;
+  }
+
+  function typeaheadQuery(field, value) {
+    const identity = normalize([field?.label, field?.name, field?.placeholder].join(" "));
+    return /\b(location|city)\b/.test(identity) ? cityFromLocation(value) : String(value);
+  }
+
+  async function fillTextTypeahead(element, desiredValue, field) {
+    const previousValue = getCurrentValue(element);
+    if (verificationValuesMatch(previousValue, desiredValue)) {
+      return false;
+    }
+
+    const query = typeaheadQuery(field, desiredValue);
+    setEditableText(element, query);
+
+    let option = null;
+    let sawSuggestions = false;
+    const deadline = Date.now() + 3000;
+    while (!option && Date.now() < deadline) {
+      await sleep(150);
+      const suggestions = typeaheadSuggestionElements(element);
+      sawSuggestions = sawSuggestions || suggestions.length > 0;
+      option = bestTypeaheadOption(suggestions, desiredValue);
+    }
+
+    if (option) {
+      // The suggestion's own click handler sets the value (and Lever's hidden field);
+      // another input event here would restart the search and clear the selection.
+      clickOption(option);
+      await sleep(100);
+      return true;
+    }
+
+    if (!sawSuggestions && !typeaheadRequiresPick(element)) {
+      // A free-text field with optional suggestions: keep the full answer.
+      setEditableText(element, desiredValue);
+      return true;
+    }
+
+    // Nothing matched on a field that only accepts a picked suggestion: leave it as it was
+    // and let it surface as a hand-off instead of keeping text the ATS will drop.
+    setEditableText(element, previousValue);
+    return false;
   }
 
   function fillChoiceGroup(field, desiredValue, allowMultiple) {

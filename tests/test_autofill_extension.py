@@ -7029,3 +7029,150 @@ def test_resume_status_is_consistent_after_attach():
         assert "Upload resume manually" not in tasks
         assert "Attach resume automatically" not in tasks
         browser.close()
+
+
+# --- Typeahead fields (roadmap Phase 1 #20; fixture-tested only) -----------------------------
+
+
+def _lever_location_page(suggestions):
+    """Lever's "Current location": a plain text input, a hidden selectedLocation input and
+    a results list that a debounced input handler fills; only a click on a result sets
+    the hidden input (which is what Lever submits)."""
+    return f"""
+      <form>
+        <ul>
+          <li class="application-question">
+            <label>
+              <div class="application-label">Current location<span class="required">&#10033;</span></div>
+              <div class="application-field">
+                <input type="text" name="location" class="location-input" autocomplete="off" required>
+                <input type="hidden" name="selectedLocation">
+                <div class="dropdown-container">
+                  <div class="dropdown-results"></div>
+                  <div class="dropdown-no-results" style="display:none">No location found. Try entering a different location</div>
+                </div>
+              </div>
+            </label>
+          </li>
+        </ul>
+      </form>
+      <script>
+        const all = {json.dumps(suggestions)};
+        const input = document.querySelector('.location-input');
+        const hidden = document.querySelector('[name=selectedLocation]');
+        const results = document.querySelector('.dropdown-results');
+        const none = document.querySelector('.dropdown-no-results');
+        window.__queries = [];
+        let timer = null;
+        input.addEventListener('input', () => {{
+          window.__queries.push(input.value);
+          clearTimeout(timer);
+          timer = setTimeout(() => {{
+            results.innerHTML = '';
+            const query = input.value.trim().toLowerCase();
+            const hits = query ? all.filter((name) => name.toLowerCase().startsWith(query)) : [];
+            none.style.display = query && !hits.length ? 'block' : 'none';
+            for (const name of hits) {{
+              const item = document.createElement('div');
+              item.className = 'dropdown-location';
+              item.textContent = name;
+              item.addEventListener('click', () => {{
+                input.value = name;
+                hidden.value = name;
+                results.innerHTML = '';
+              }});
+              results.appendChild(item);
+            }}
+          }}, 150);
+        }});
+      </script>
+    """
+
+
+_LOCATION_PROFILE = {
+    "firstName": "Sample",
+    "location": "Chicago, IL",
+    "currentLocation": "Chicago, IL",
+    "currentCity": "Chicago",
+    "currentState": "IL",
+    "currentCountry": "United States",
+    "addresses": {"usa": {"city": "Chicago", "state": "IL", "country": "United States", "fullAddress": ""}},
+    "answers": {},
+    "demographics": {},
+}
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_lever_location_typeahead_picks_city_suggestion():
+    html = _lever_location_page(
+        ["Chicago, Illinois, United States", "Chicago Heights, Illinois, United States", "Toronto, Ontario, Canada"]
+    )
+    _, [queries, selected, shown] = _content_script_run(
+        "https://jobs.lever.co/acme/123/apply", html, _LOCATION_PROFILE, SENSITIVE_SETTINGS,
+        [
+            "() => window.__queries.filter(Boolean)",
+            "() => document.querySelector('[name=selectedLocation]').value",
+            "() => document.querySelector('.location-input').value",
+        ],
+    )
+
+    assert queries == ["Chicago"]
+    assert selected == "Chicago, Illinois, United States"
+    assert shown == "Chicago, Illinois, United States"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_lever_location_without_matching_suggestion_is_handed_off():
+    html = _lever_location_page(["Toronto, Ontario, Canada"])
+    _, [selected, shown, preview] = _content_script_run(
+        "https://jobs.lever.co/acme/123/apply", html, _LOCATION_PROFILE, SENSITIVE_SETTINGS,
+        [
+            "() => document.querySelector('[name=selectedLocation]').value",
+            "() => document.querySelector('.location-input').value",
+            """() => new Promise((resolve) => {
+              window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+            })""",
+        ],
+    )
+
+    assert selected == ""
+    assert shown == ""
+    unmapped = [field["label"] for field in preview["result"]["unmappedFields"]]
+    mapped = [mapping.get("label") or "" for mapping in preview["result"]["mappings"]]
+    assert any("location" in label.lower() for label in unmapped + mapped), (unmapped, mapped)
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_school_typeahead_combobox_picks_school():
+    html = """
+      <form>
+        <label for="school">School *</label>
+        <input id="school" role="combobox" aria-autocomplete="list" aria-controls="school-list" aria-expanded="false" required>
+        <div id="school-list" role="listbox"></div>
+      </form>
+      <script>
+        const schools = ['Waterloo Collegiate Institute', 'University of Waterloo', 'Wilfrid Laurier University'];
+        const input = document.getElementById('school');
+        const list = document.getElementById('school-list');
+        input.addEventListener('input', () => {
+          setTimeout(() => {
+            list.innerHTML = '';
+            const query = input.value.trim().toLowerCase();
+            for (const name of schools.filter((school) => query && school.toLowerCase().includes(query.split(' ').pop()))) {
+              const option = document.createElement('div');
+              option.setAttribute('role', 'option');
+              option.textContent = name;
+              option.addEventListener('click', () => { input.value = name; list.innerHTML = ''; });
+              list.appendChild(option);
+            }
+            input.setAttribute('aria-expanded', 'true');
+          }, 200);
+        });
+      </script>
+    """
+    profile = {"firstName": "Sample", "school": "University of Waterloo", "answers": {}, "demographics": {}}
+    _, [school] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/11", html, profile, SENSITIVE_SETTINGS,
+        ["() => document.getElementById('school').value"],
+    )
+    assert school == "University of Waterloo"
