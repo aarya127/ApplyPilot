@@ -192,8 +192,11 @@ by the kind of failure and ordered by how much harm the failure would do once su
 
    Live result on Reddit: gender Male, orientation Heterosexual, ethnicity South Asian. The day
    before it was "I don't wish to answer" and East Asian.
-   **Still open:** "Remove South Asian"-style chip buttons are still scanned as fields and show up
-   as phantom verification mismatches.
+   **Done 2026-11-16:** the old note here said "Remove South Asian"-style chip buttons were still
+   scanned as fields and showed up as phantom verification mismatches. Multi-select chip remove
+   buttons (`multi-value__remove`, or "Remove X" inside a chip) are now treated like a dropdown's
+   own ✕ and arrow: they are never scanned, never grouped into a fake choice group, and never
+   clicked. The chips' values are still read.
 8. **Where the candidate lives right now.** The owner confirmed it is Chicago. On the two Canada jobs,
    the tool used the Canadian address instead: Instacart got "(CAN) Ontario" for "Which state or
    province do you currently live in?" and Mississauga as the city, and Cohere got Mississauga. The

@@ -1048,9 +1048,25 @@
       return true;
     }
 
+    if (isMultiValueRemoveControl(element, accessibleLabel)) {
+      return true;
+    }
+
     return Boolean(element.closest?.(
       "[class*='clear-indicator' i], [class*='clearIndicator'], [class*='dropdown-indicator' i], [class*='dropdownIndicator'], [class*='indicatorContainer']"
     ));
+  }
+
+  // The ✕ on a multi-select chip ("Remove South Asian"). Clicking it as a "fill" deletes
+  // the answer, and scanning it produces phantom choice groups and verification mismatches.
+  // The chip's own label is still read by getCurrentValue.
+  function isMultiValueRemoveControl(element, accessibleLabel = "") {
+    if (element.closest?.("[class*='multi-value__remove' i], [class*='multiValueRemove'], [class*='multi-value-remove' i]")) {
+      return true;
+    }
+
+    return /^remove \S/.test(accessibleLabel)
+      && Boolean(element.closest?.("[class*='multi-value' i], [class*='multiValue']"));
   }
 
   // An element that is itself an option list (role=listbox/option) or that lives inside an

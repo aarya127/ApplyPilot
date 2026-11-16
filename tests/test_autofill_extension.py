@@ -6478,3 +6478,80 @@ def test_content_script_scan_skips_cookie_switches_and_job_alert_widgets():
     assert cookie_checked is False
     assert perf_checked is False
     assert frequency == ""
+
+
+# --- "Remove X" chip buttons (roadmap Phase 1 #7, still-open note) -------------------------
+
+_PREVIEW_THEN_FILL_JS = """() => new Promise((resolve) => {
+  window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (preview) => {
+    window.__autofillListener({ type: 'APPLY_AUTOFILL_MAPPINGS', mappings: preview.result.mappings }, null, resolve);
+  });
+})"""
+
+
+def _chip(label):
+    return (
+        f'<div class="select__multi-value"><div class="select__multi-value__label">{label}</div>'
+        f'<div role="button" class="select__multi-value__remove" aria-label="Remove {label}">'
+        '<svg width="14" height="14"></svg></div></div>'
+    )
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+@pytest.mark.parametrize(
+    "chips, extra",
+    [
+        (["South Asian", "White"], ""),
+        (["South Asian"], '<button type="button">Upload</button>'),
+    ],
+)
+def test_content_script_ignores_react_select_chip_remove_buttons(chips, extra):
+    html = f"""
+      <form>
+        <label for="eth-input">Please select up to 2 ethnicities that you most closely identify with *</label>
+        <div class="select__control">
+          <div class="select__value-container">
+            {''.join(_chip(chip) for chip in chips)}
+            <input id="eth-input" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-required="true">
+          </div>
+        </div>
+        {extra}
+        <div id="menu" class="select__menu" role="listbox" hidden>
+          <div class="select__option" role="option">East Asian</div>
+          <div class="select__option" role="option">Southeast Asian</div>
+        </div>
+      </form>
+      <script>
+        document.querySelectorAll('.select__multi-value__remove').forEach((button) => {{
+          button.addEventListener('click', () => button.closest('.select__multi-value').remove());
+        }});
+        const input = document.getElementById('eth-input');
+        const menu = document.getElementById('menu');
+        const open = () => {{ menu.hidden = false; input.setAttribute('aria-expanded', 'true'); }};
+        input.addEventListener('click', open);
+        input.addEventListener('mousedown', open);
+      </script>
+    """
+    profile = {"firstName": "Sample", "demographics": {"race": "Asian", "ethnicity": "South Asian"}}
+
+    preview, [fill, remaining_chips] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/3",
+        html,
+        profile,
+        SENSITIVE_SETTINGS,
+        [
+            _PREVIEW_THEN_FILL_JS,
+            "() => Array.from(document.querySelectorAll('.select__multi-value__label')).map((el) => el.textContent)",
+        ],
+    )
+
+    fields = preview["result"].get("debugFields") or []
+    for field in fields:
+        option_labels = [option.get("label") or "" for option in field.get("options") or []]
+        assert "remove" not in (field.get("label") or "").lower(), field
+        assert not any(label.lower().startswith("remove") for label in option_labels), field
+    ethnicity = next(f for f in fields if "ethnicities" in (f.get("label") or "").lower())
+    assert ethnicity["value"] == "; ".join(chips)
+    assert remaining_chips == chips
+    mismatched = fill["result"]["verification"]["mismatched"]
+    assert not any("remove" in (record.get("label") or "").lower() for record in mismatched), mismatched
