@@ -271,6 +271,12 @@ by the kind of failure and ordered by how much harm the failure would do once su
     tool ticked OneTrust cookie switches, including "Consent to all Advertising Cookies". It also set a
     job-alert frequency and filled search boxes. Extend the junk-field filter to OneTrust
     `ot-group-id-*` switches, cookie toggles and job-alert widgets.
+    **Done 2026-11-16:** the scan skips OneTrust preference-centre switches (`ot-group-id-*`,
+    `ot-switch`, `ot-pc-*`, `category-switch-handler`), even outside a onetrust-named wrapper. It
+    also skips any control labelled as a cookie category ("Advertising/Performance/… Cookies",
+    "Consent to all … Cookies"), job-alert widgets (by container class, or labels like "job
+    alerts", "Email me jobs like this", "Get notified about new jobs") and SuccessFactors'
+    `keywordsearch`/`locationsearch` boxes. Skipped controls are never filled or verified.
 19. **Dropdown options.** Three failures:
     - JazzHR stores options as numbers ("0", "60"), so the required citizenship question ended on
       "No answer". Select and verify dropdowns by the visible option text.

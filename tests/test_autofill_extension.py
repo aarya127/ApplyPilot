@@ -6424,3 +6424,57 @@ def test_background_fetch_times_out_without_localhost_retry():
         assert page.evaluate("() => window.__fetchCalls") == ["http://127.0.0.1:8000/map-fields"]
 
         browser.close()
+
+
+# --- Cookie-settings switches and job-alert widgets (roadmap Phase 1 #18) ---------------
+
+_SCAN_FIELDS_JS = """() => new Promise((resolve) => {
+  window.__autofillListener({ type: 'SCAN_FIELDS' }, null, (response) => resolve(response));
+})"""
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_scan_skips_cookie_switches_and_job_alert_widgets():
+    # Shapes seen on SuccessFactors job pages and Databricks: a OneTrust preference
+    # centre switch rendered outside any onetrust-named wrapper, a generic cookie toggle,
+    # and a job-alert widget with a frequency select and keyword/location search boxes.
+    html = """
+    <div class="ot-cat-item">
+      <input type="checkbox" id="ot-group-id-C0004" name="C0004" class="category-switch-handler" required>
+      <label for="ot-group-id-C0004">Consent to all Advertising Cookies</label>
+    </div>
+    <div class="pref-row">
+      <input type="checkbox" role="switch" id="perf" name="perf" required>
+      <label for="perf">Performance Cookies</label>
+    </div>
+    <div class="jobAlertsWidget">
+      <h3>Get notified about new jobs</h3>
+      <label>Email me jobs like this
+        <select name="frequency" required><option value="">Choose</option><option>Daily</option><option>Weekly</option></select>
+      </label>
+      <input name="keywordsearch" placeholder="Keywords">
+      <input name="locationsearch" placeholder="Location">
+    </div>
+    <form>
+      <label>First Name *<input name="firstName" required></label>
+    </form>
+    """
+    profile = {"firstName": "Sample", "answers": {"subscribeEmails": "Yes"}, "demographics": {}}
+    _, [scan, cookie_checked, perf_checked, frequency] = _content_script_run(
+        "https://career.example.com/job/1",
+        html,
+        profile,
+        SENSITIVE_SETTINGS,
+        [
+            _SCAN_FIELDS_JS,
+            "() => document.getElementById('ot-group-id-C0004').checked",
+            "() => document.getElementById('perf').checked",
+            "() => document.querySelector('[name=frequency]').value",
+        ],
+    )
+
+    assert scan["ok"] is True
+    assert [field["name"] for field in scan["fields"]] == ["firstName"]
+    assert cookie_checked is False
+    assert perf_checked is False
+    assert frequency == ""

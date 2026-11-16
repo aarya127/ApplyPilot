@@ -966,9 +966,57 @@
   function isJunkFieldElement(element) {
     return isAriaHiddenElement(element)
       || isInsideConsentUi(element)
+      || isCookiePreferenceControl(element)
+      || isJobAlertWidgetControl(element)
       || isStandaloneSearchElement(element)
       || isDropdownAuxiliaryControl(element)
       || isInsideOpenOptionList(element);
+  }
+
+  // Cookie preference-centre switches (OneTrust renders its category switches as
+  // ot-group-id-* checkboxes, sometimes outside any onetrust-named wrapper) and generic
+  // cookie-category toggles. They are site settings, never application questions.
+  const COOKIE_PREFERENCE_CONTAINER_SELECTOR = [
+    "[id*='ot-group-id' i]",
+    "[class*='ot-switch' i]",
+    "[class*='ot-pc-' i]",
+    "[id*='onetrust-pc' i]",
+    "[class*='category-switch-handler' i]",
+    "[id*='cookie-preference' i]",
+    "[class*='cookie-preference' i]",
+    "[id*='cookie-setting' i]",
+    "[class*='cookie-setting' i]"
+  ].join(", ");
+  const COOKIE_PREFERENCE_LABEL_PATTERN = /\b(advertising|analytics|performance|functional|targeting|marketing|social media|strictly necessary)\s+cookies\b|consent to all\b.*\bcookies\b|\bcookies? (preferences|settings)\b/;
+
+  function isCookiePreferenceControl(element) {
+    if (element.closest?.(COOKIE_PREFERENCE_CONTAINER_SELECTOR)) {
+      return true;
+    }
+
+    return COOKIE_PREFERENCE_LABEL_PATTERN.test(normalize(getLabelText(element) || ""));
+  }
+
+  // Job-alert sign-up widgets and the job-search boxes next to them (SuccessFactors job
+  // pages): filling them subscribes the candidate to alerts or runs a search.
+  const JOB_ALERT_CONTAINER_PATTERN = /job[-_ ]?alerts?|jobalert|talent[-_ ]?community/i;
+  const JOB_ALERT_LABEL_PATTERN = /\bjob alerts?\b|\balert frequency\b|\bemail me (similar )?jobs\b|\bjobs like this\b|\bcreate (a )?job alert\b|\bget notified about (new )?jobs\b/;
+
+  function isJobAlertWidgetControl(element) {
+    const nameOrId = `${element.getAttribute?.("name") || ""} ${element.id || ""}`;
+    if (/(^|\s)(keywordsearch|locationsearch)(\s|$)/i.test(nameOrId)) {
+      return true;
+    }
+
+    let ancestor = element.parentElement;
+    for (let depth = 0; ancestor && depth < 6; depth += 1, ancestor = ancestor.parentElement) {
+      const marker = `${ancestor.id || ""} ${typeof ancestor.className === "string" ? ancestor.className : ""}`;
+      if (JOB_ALERT_CONTAINER_PATTERN.test(marker)) {
+        return true;
+      }
+    }
+
+    return JOB_ALERT_LABEL_PATTERN.test(normalize(getLabelText(element) || ""));
   }
 
   // react-select style widgets keep a shadow required <input aria-hidden tabindex=-1>
