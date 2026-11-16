@@ -6915,3 +6915,117 @@ def test_verification_is_exact_not_containment(typed, shown, matched):
         [_fill_label_js("team name", typed)],
     )
     assert _verification_records(fill)[0] == (1 if matched else 0)
+
+
+# --- Résumé upload on more layouts (roadmap Phase 1 #22; fixture-tested only) ---------------
+
+_RESUME_B64 = base64.b64encode(b"%PDF-1.4 sample resume bytes").decode("ascii")
+_RESUME_OK = {"ok": True, "filename": "My Resume.pdf", "mimeType": "application/pdf", "bytes": _RESUME_B64}
+_RESUME_PROFILE = {"firstName": "Test", "lastName": "Candidate", "resumeFileName": "My Resume.pdf", "answers": {}, "demographics": {}}
+
+_RESUME_LAYOUTS = {
+    # Rippling: required "Résumé*" with a "Drop or select" zone around a hidden input.
+    "rippling": """
+      <form>
+        <div class="field"><label>Résumé*</label>
+          <div class="dropzone">Drop or select<input id="u1" type="file" style="display:none"></div>
+        </div>
+        <div class="field"><label>Cover letter</label>
+          <div class="dropzone">Drop or select<input id="u2" type="file" style="display:none"></div>
+        </div>
+      </form>
+    """,
+    # An accented "Résumé" label is the only thing marking the input as the résumé.
+    "accented": """
+      <form>
+        <div><label for="u1">Résumé *</label><input id="u1" type="file"></div>
+        <div><label for="u2">Cover letter</label><input id="u2" type="file"></div>
+      </form>
+    """,
+    # Jobvite: generic "File" inputs, told apart only by their fieldset legend.
+    "jobvite": """
+      <form>
+        <fieldset><legend>Resume</legend><label>File<input id="u1" type="file" name="file"></label></fieldset>
+        <fieldset><legend>Cover Letter</legend><label>File<input id="u2" type="file" name="file2"></label></fieldset>
+      </form>
+    """,
+    # SmartRecruiters: a "Choose a file" button that injects the input when clicked.
+    "smartrecruiters": """
+      <form>
+        <section id="resume-section"><h3>Resume</h3><button type="button" id="choose">Choose a file</button></section>
+        <section><h3>Cover letter</h3><input id="u2" type="file"></section>
+      </form>
+      <script>
+        document.getElementById('choose').addEventListener('click', () => {
+          if (document.getElementById('u1')) return;
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.id = 'u1';
+          input.style.display = 'none';
+          document.getElementById('resume-section').appendChild(input);
+        });
+      </script>
+    """,
+}
+
+
+def _resume_page(p, html):
+    browser = p.chromium.launch(headless=True)
+    page = browser.new_page()
+    page.set_content(html)
+    install_chrome_mock_with_resume(page, _RESUME_PROFILE, SENSITIVE_SETTINGS, _RESUME_OK)
+    page.add_script_tag(path=str(ROOT / "autofill_extension/src/content.js"))
+    return browser, page
+
+
+def _send(page, message):
+    return page.evaluate(
+        f"""() => new Promise((resolve) => {{
+          window.__autofillListener({json.dumps(message)}, null, (response) => resolve(response));
+        }})"""
+    )
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+@pytest.mark.parametrize("layout", sorted(_RESUME_LAYOUTS))
+def test_resume_attached_to_generic_file_input_in_resume_section(layout):
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        try:
+            browser, page = _resume_page(p, _RESUME_LAYOUTS[layout])
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        _send(page, {"type": "PREVIEW_AUTOFILL"})
+        fill = _send(page, {"type": "APPLY_AUTOFILL_MAPPINGS", "mappings": []})
+
+        assert fill["ok"] is True, fill
+        assert fill["result"]["attached"] == [{"label": "Resume/CV", "filename": "My Resume.pdf"}]
+        assert page.evaluate("() => document.getElementById('u1')?.files.length || 0") == 1
+        assert page.evaluate("() => document.getElementById('u2').files.length") == 0
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_resume_status_is_consistent_after_attach():
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        try:
+            # JazzHR: a visible, required résumé input.
+            browser, page = _resume_page(p, '<form><label>Resume *<input id="u1" type="file" required></label></form>')
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        _send(page, {"type": "PREVIEW_AUTOFILL"})
+        fill = _send(page, {"type": "APPLY_AUTOFILL_MAPPINGS", "mappings": []})
+        assert fill["result"]["attached"] == [{"label": "Resume/CV", "filename": "My Resume.pdf"}]
+
+        after = _send(page, {"type": "PREVIEW_AUTOFILL"})["result"]
+        resume_unmapped = [f for f in after["unmappedFields"] if "resume" in (f.get("label") or "").lower()]
+        assert resume_unmapped == [], resume_unmapped
+        tasks = [task["task"] for task in after["manualTasks"]]
+        assert "Upload resume manually" not in tasks
+        assert "Attach resume automatically" not in tasks
+        browser.close()

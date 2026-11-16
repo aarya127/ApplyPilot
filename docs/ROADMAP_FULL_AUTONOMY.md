@@ -324,6 +324,15 @@ by the kind of failure and ordered by how much harm the failure would do once su
     "Résumé*" is required), on Jobvite ("File" inputs), or on SmartRecruiters. JazzHR reported both
     "Attached" and "File inputs require manual browser confirmation". Detect drop zones ("Drop or
     select", "Choose a file") and generic "File" inputs inside résumé sections.
+    **Done 2026-11-16 (fixture-tested only, not verified on the live ATSs):**
+    - Résumé detection ignores accents, so "Résumé*" counts.
+    - A file input is a résumé input when its own label, its field group's label, or its section
+      heading says so. That covers a generic "File" input under a "Resume" legend and a hidden
+      input inside a "Drop or select" zone under "Résumé*".
+    - "Choose a file", "Select a file", "Drop or select" and "Browse" reveal the input when they
+      sit in a résumé section.
+    - An input that already holds a file counts as answered, so the panel no longer reports
+      "Attached" and "File inputs require manual browser confirmation" for the same field.
 
 **E. Know what page you're on**
 

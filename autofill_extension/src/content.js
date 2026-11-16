@@ -438,7 +438,9 @@
 
   function isAlreadyAnsweredField(field) {
     if (field.type === "file") {
-      return false;
+      // An input that already holds a file (the résumé attached on an earlier pass) is
+      // answered; listing it as "needs manual confirmation" contradicted "Attached".
+      return Boolean(field.elementRef?.deref?.()?.files?.length);
     }
 
     const current = String(field.value || "").trim();
@@ -803,7 +805,9 @@
   // The "Attach" trigger (or "Upload resume") that reveals a hidden file input. Kept
   // deliberately narrow so it never matches the Dropbox / Google Drive / "Enter manually"
   // alternatives, which do not open the native file picker we can drive.
-  const RESUME_ATTACH_TRIGGER_TEXT_PATTERN = /^attach$|attach (resume|cv|file)|upload (resume|cv)/i;
+  // Also the drop-zone and picker wording other ATSs use ("Drop or select" on Rippling,
+  // "Choose a file" on SmartRecruiters); a trigger only counts inside a résumé context.
+  const RESUME_ATTACH_TRIGGER_TEXT_PATTERN = /^attach$|attach (resume|cv|file)|upload (resume|cv)|choose (a )?file|select (a )?file|drop or select|^browse( files)?$/i;
   const RESUME_ATTACH_TRIGGER_SKIP_PATTERN = /dropbox|google\s*drive|enter manually|paste|url/i;
   const NATIVE_RESUME_AUTOFILL_AUTOMATION_ID_PATTERN = /quickapplyupload|autofillwithresume/i;
   const NATIVE_RESUME_AUTOFILL_TEXT_PATTERN = /autofill with resume|apply with resume|upload.*resume.*autofill/i;
@@ -1011,8 +1015,12 @@
   }
 
   function resumeAttachContextTexts(element) {
-    const [ownText, headingText] = fileInputContextTexts(element);
-    return [ownText, resumeFieldGroupLabel(element), headingText];
+    return fileInputContextTexts(element);
+  }
+
+  // "Résumé" must match the same patterns as "Resume".
+  function stripAccents(text) {
+    return String(text || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   }
 
   // Nearest ancestor field group's label/legend text (Greenhouse renders "Resume/CV" as a
@@ -1025,7 +1033,7 @@
       const labelNode = current.querySelector?.("label, legend, [role='heading'], h1, h2, h3, h4, h5, h6, [class*='label' i]");
 
       if (labelNode && !labelNode.contains(element)) {
-        const text = compactText(labelNode.textContent || "");
+        const text = stripAccents(compactText(labelNode.textContent || ""));
         if (RESUME_FILE_CONTEXT_PATTERN.test(text) || NON_RESUME_FILE_CONTEXT_PATTERN.test(text)) {
           return text;
         }
@@ -1059,7 +1067,7 @@
   }
 
   function isResumeContextText(text) {
-    const value = String(text || "");
+    const value = stripAccents(text);
     return RESUME_FILE_CONTEXT_PATTERN.test(value) && !NON_RESUME_FILE_CONTEXT_PATTERN.test(value);
   }
 
@@ -1076,7 +1084,9 @@
       : "";
     const headingText = compactText([containerHeading, precedingHeadingText(input)].join(" "));
 
-    return [ownText, headingText];
+    // Own text first, then the field group's label (a generic "File" input or a drop zone
+    // under a "Résumé*" label), then the section heading.
+    return [stripAccents(ownText), resumeFieldGroupLabel(input), stripAccents(headingText)];
   }
 
   function precedingHeadingText(input) {
