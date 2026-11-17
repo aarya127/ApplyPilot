@@ -20,7 +20,7 @@ app = Flask(__name__)
 # set FLASK_SECRET_KEY to keep sessions valid across restarts.
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 apply_queue = ApplyQueue()
-SHORTLIST_STATUSES = ["shortlisted", "queued", "running", "paused", "submitted", "failed", "skipped"]
+SHORTLIST_STATUSES = ["shortlisted", "queued", "running", "filling", "filled", "paused", "submitted", "confirmed", "interview", "rejected", "failed", "skipped"]
 @app.route("/")
 def index() -> str:
     return redirect(url_for("applied"))

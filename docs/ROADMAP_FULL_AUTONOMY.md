@@ -424,6 +424,20 @@ Work items:
 1. **One ledger.** Merge the backend's `applications` table and the dashboard's apply queue into one
    store. Each row holds the job URL, a normalized ATS job ID, company, title, ATS, and status history
    (`queued → filling → filled → submitted → confirmed → interview / rejected`).
+   **Done 2026-11-16:** `application_agent/agent/ledger.py` is now the one store, in
+   `application_agent/data/applications.sqlite3`.
+   - One row per job (`shortlisted_jobs`, now with `ats` and `ats_job_id`), plus a status history
+     in `application_events`. Rows match on the Greenhouse/Lever/Ashby job ID when known,
+     otherwise the exact URL.
+   - The backend's Track endpoint, the dashboard queue and the agent's logger all write through
+     it. The agent's separate `applications` table is no longer created.
+   - Status only moves forward. An earlier-stage event, or an unknown status, is still
+     recorded in the history, and Track never fails because of its status.
+   - `GET /applications` lists applied jobs with the same keys as before.
+   - The dashboard shortlist now shows extension-tracked jobs, with tabs for the new statuses.
+   - The backend's old `autofill_extension/generated/applications.sqlite3` rows are copied in
+     once, read-only. The old file is kept untouched as a backup, as the owner decided.
+   - Still to do: items 2–5, including removing the Track button and linking emails.
 2. **Record without a button.** Write a row on first fill and update it on every step. Remove the
    Track button.
 3. **Snapshot what was sent.** Store the final value of every field, the résumé version, and

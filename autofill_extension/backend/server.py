@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -24,8 +25,16 @@ from flask import Flask, jsonify, request, send_file
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = ROOT.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))  # run as a script: python autofill_extension/backend/server.py
+
+from application_agent.agent.ledger import DEFAULT_LEDGER_PATH, Ledger  # noqa: E402  (stdlib-only, no side effects)
+
 GENERATED_DIR = ROOT / "generated"
+# The old Track store. Its rows were copied into the one ledger; it is no longer written.
 DB_PATH = GENERATED_DIR / "applications.sqlite3"
+LEDGER_PATH = DEFAULT_LEDGER_PATH
 LLM_TRACE_PATH = GENERATED_DIR / "llm_trace.private.jsonl"
 PRIVATE_ENV_PATH = Path(__file__).resolve().parent / "env.private"
 NVIDIA_CHAT_COMPLETIONS_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
@@ -616,47 +625,27 @@ def track_application():
     if request.method == "OPTIONS":
         return ("", 204)
 
-    init_db()
     payload = request.get_json(force=True) or {}
-    created_at = payload.get("createdAt") or datetime.now(timezone.utc).isoformat()
+    job_id = application_ledger().record(
+        payload.get("url", ""),
+        status=payload.get("status") or "filled",
+        source=payload.get("source") or "chrome_extension",
+        title=payload.get("title") or "",
+        details=payload,
+    )
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO applications
-                (url, title, status, filled_count, mapped_count, source, created_at, payload_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload.get("url", ""),
-                payload.get("title", ""),
-                payload.get("status", "filled"),
-                int(payload.get("filledCount") or 0),
-                int(payload.get("mappedCount") or 0),
-                payload.get("source", "chrome_extension"),
-                created_at,
-                json.dumps(payload, sort_keys=True),
-            ),
-        )
-
-    return jsonify({"tracked": True, "id": cursor.lastrowid})
+    return jsonify({"tracked": True, "id": job_id})
 
 
 @app.route("/applications", methods=["GET"])
 def applications():
-    init_db()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
-        rows = conn.execute(
-            """
-            SELECT id, url, title, status, filled_count, mapped_count, source, created_at
-            FROM applications
-            ORDER BY id DESC
-            LIMIT 100
-            """
-        ).fetchall()
+    return jsonify({"applications": application_ledger().list_jobs(limit=100)})
 
-    return jsonify({"applications": [dict(row) for row in rows]})
+
+def application_ledger() -> Ledger:
+    """The one ledger shared with the dashboard queue and the application agent. Rows
+    from the old backend store (DB_PATH) are copied in once, read-only."""
+    return Ledger(LEDGER_PATH, legacy_db=DB_PATH)
 
 
 @app.route("/llm-traces", methods=["GET"])

@@ -6,9 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from application_agent.agent.ledger import ALL_STATUSES, DEFAULT_LEDGER_PATH, Ledger
+
 
 ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DB_PATH = ROOT / "application_agent/data/applications.sqlite3"
+# The queue lives in the one application ledger (application_agent/agent/ledger.py).
+DEFAULT_DB_PATH = DEFAULT_LEDGER_PATH
 
 
 class ApplyQueue:
@@ -101,19 +104,16 @@ class ApplyQueue:
 
     def update_status(self, job_id: int, status: str) -> dict[str, Any] | None:
         self._ensure_schema()
-        if status not in {"shortlisted", "queued", "running", "paused", "submitted", "failed", "skipped"}:
+        if status not in ALL_STATUSES:
             raise ValueError(f"Unsupported status: {status}")
 
         with sqlite3.connect(self.db_path) as connection:
+            exists = connection.execute("SELECT 1 FROM shortlisted_jobs WHERE id = ?", (job_id,)).fetchone()
+        if exists:
+            self._ledger().set_status(job_id, status, source="dashboard")
+
+        with sqlite3.connect(self.db_path) as connection:
             connection.row_factory = sqlite3.Row
-            connection.execute(
-                """
-                UPDATE shortlisted_jobs
-                SET status = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (status, utc_now(), job_id),
-            )
             row = connection.execute("SELECT * FROM shortlisted_jobs WHERE id = ?", (job_id,)).fetchone()
 
         return row_to_job(row) if row else None
@@ -159,6 +159,11 @@ class ApplyQueue:
                 (cursor.lastrowid,),
             ).fetchone()
 
+        if job_id is not None:
+            self._ledger().add_event(
+                job_id, status, source="agent_report", details={"filled": filled, "skipped": skipped, "reportId": row["id"]}
+            )
+
         return row_to_report(row)
 
     def list_reports(self, job_id: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
@@ -177,47 +182,11 @@ class ApplyQueue:
 
         return [row_to_report(row) for row in rows]
 
+    def _ledger(self) -> Ledger:
+        return Ledger(self.db_path)
+
     def _ensure_schema(self) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS shortlisted_jobs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    source TEXT,
-                    title TEXT,
-                    company TEXT,
-                    location TEXT,
-                    url TEXT NOT NULL UNIQUE,
-                    category TEXT,
-                    salary TEXT,
-                    posted TEXT,
-                    status TEXT NOT NULL DEFAULT 'shortlisted',
-                    priority INTEGER NOT NULL DEFAULT 0,
-                    notes TEXT,
-                    metadata TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS application_reports (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    job_id INTEGER,
-                    url TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    confidence REAL NOT NULL DEFAULT 0,
-                    filled_count INTEGER NOT NULL DEFAULT 0,
-                    skipped_count INTEGER NOT NULL DEFAULT 0,
-                    corrected_count INTEGER NOT NULL DEFAULT 0,
-                    report TEXT,
-                    FOREIGN KEY(job_id) REFERENCES shortlisted_jobs(id)
-                )
-                """
-            )
+        self._ledger().connect().close()
 
 
 def row_to_job(row: sqlite3.Row) -> dict[str, Any]:

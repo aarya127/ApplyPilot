@@ -37,3 +37,14 @@ def _no_local_backend_for_agent(monkeypatch):
     answer_generator.reset_backend_cache()
     yield
     answer_generator.reset_backend_cache()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_backend_ledger(tmp_path, monkeypatch):
+    """The backend's Track endpoint writes the one application ledger; point it (and the
+    old store it imports from) at temp files so tests never touch the real ones."""
+    server = sys.modules.get("autofill_extension.backend.server")
+    if server is not None:
+        monkeypatch.setattr(server, "LEDGER_PATH", tmp_path / "ledger.sqlite3", raising=False)
+        monkeypatch.setattr(server, "DB_PATH", tmp_path / "legacy_applications.sqlite3", raising=False)
+    yield

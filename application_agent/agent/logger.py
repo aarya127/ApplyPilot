@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-import sqlite3
-import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from application_agent.agent.ledger import DEFAULT_LEDGER_PATH, Ledger
 
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DB_PATH = ROOT / "application_agent/data/applications.sqlite3"
+
+DEFAULT_DB_PATH = DEFAULT_LEDGER_PATH
+# The agent's own statuses, mapped onto the ledger's; the original is kept in the event.
+AGENT_STATUS_TO_LEDGER = {
+    "started": "filling",
+    "paused_before_submit": "paused",
+    "paused_for_review": "paused",
+    "max_steps_reached": "paused",
+}
 
 
 class ApplicationLogger:
@@ -16,33 +21,11 @@ class ApplicationLogger:
         self.db_path = db_path
 
     def log(self, *, url: str, title: str, ats: str, status: str, details: dict[str, Any] | None = None) -> None:
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with sqlite3.connect(self.db_path) as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS applications (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    title TEXT,
-                    ats TEXT,
-                    status TEXT NOT NULL,
-                    details TEXT
-                )
-                """
-            )
-            connection.execute(
-                """
-                INSERT INTO applications (created_at, url, title, ats, status, details)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    datetime.now(timezone.utc).isoformat(),
-                    url,
-                    title,
-                    ats,
-                    status,
-                    json.dumps(details or {}, ensure_ascii=True),
-                ),
-            )
+        Ledger(self.db_path).record(
+            url,
+            status=AGENT_STATUS_TO_LEDGER.get(status, status),
+            source="application_agent",
+            title=title,
+            ats=ats or None,
+            details={"agentStatus": status, **(details or {})},
+        )
