@@ -140,8 +140,14 @@ def backend_answer(
     options: list[str] | None = None,
     field: dict[str, Any] | None = None,
 ) -> tuple[str, str] | None:
-    """One-field /map-fields call. Returns (answer, source), or None when the backend is
-    down, errors, or has no answer. Model-written answers keep the review flag."""
+    """One-field /map-fields call.
+
+    - (answer, source) when the backend answers. Model-written answers keep the review flag.
+    - ("", "needs_manual_answer") when the backend worked but gave no answer on purpose
+      (reference fields, unsupported domain years, ungrounded employer essays): the
+      agent must not ask its own model for those.
+    - None when the backend is down, errors or reports a failure (warning): the caller
+      falls back to its direct model path."""
     if not question or not backend_available():
         return None
 
@@ -172,16 +178,18 @@ def backend_answer(
         )
         if response.status_code != 200:
             return None
-        mappings = response.json().get("mappings") or []
+        body = response.json()
+        mappings = body.get("mappings") or []
     except (requests.RequestException, ValueError):
         return None
 
     mapping = next((item for item in mappings if isinstance(item, dict) and item.get("index") == 0), None)
     value = str((mapping or {}).get("value") or "").strip()
     if not value:
-        return None
+        return None if body.get("warning") else ("", "needs_manual_answer")
     source = str(mapping.get("source") or "")
-    return value, "backend_policy" if source.startswith(DETERMINISTIC_BACKEND_SOURCES) else "generated_review_required"
+    deterministic = mapping.get("origin") != "model" and source.startswith(DETERMINISTIC_BACKEND_SOURCES)
+    return value, "backend_policy" if deterministic else "generated_review_required"
 
 
 def answer_question(
@@ -199,7 +207,7 @@ def answer_question(
             return saved_answer, "saved"
 
     from_backend = backend_answer(question, profile, field=field)
-    if from_backend:
+    if from_backend is not None:
         return from_backend
 
     generated = generate_answer_with_llm(question, profile)
@@ -231,8 +239,11 @@ def answer_option_question(
                 return matched, "saved"
 
     from_backend = backend_answer(question, profile, options=labels, field=field)
-    if from_backend and exact_option(from_backend[0], labels):
-        return exact_option(from_backend[0], labels), from_backend[1]
+    if from_backend is not None:
+        if not from_backend[0]:
+            return from_backend  # handed off on purpose
+        if exact_option(from_backend[0], labels):
+            return exact_option(from_backend[0], labels), from_backend[1]
 
     generated = generate_option_answer_with_llm(question, labels, profile)
     matched = exact_option(generated, labels)

@@ -577,7 +577,7 @@ class _BackendResponse:
         return self._payload
 
 
-def _backend(monkeypatch, *, health=None, mapping=None, post_error=None):
+def _backend(monkeypatch, *, health=None, mapping=None, post_error=None, warning=None):
     """Point the agent at a fake backend; returns the recorded calls."""
     calls = {"get": [], "post": []}
 
@@ -593,7 +593,10 @@ def _backend(monkeypatch, *, health=None, mapping=None, post_error=None):
         calls["post"].append({"url": url, "json": json, "timeout": timeout})
         if post_error:
             raise post_error
-        return _BackendResponse(200, {"mappings": [mapping] if mapping else []})
+        body = {"mappings": [mapping] if mapping else []}
+        if warning:
+            body["warning"] = warning
+        return _BackendResponse(200, body)
 
     monkeypatch.setenv("APPLYPILOT_BACKEND_URL", "http://127.0.0.1:8765")
     monkeypatch.setattr(answer_generator.requests, "get", fake_get)
@@ -652,11 +655,34 @@ def test_agent_ignores_backend_option_not_in_list(monkeypatch):
     assert answer_option_question("Are you authorized?", _AUTH_OPTIONS, _AGENT_PROFILE) == ("Yes", "generated_review_required")
 
 
-def test_agent_backend_empty_answer_falls_back(monkeypatch):
-    _backend(monkeypatch, mapping=None)
+def test_agent_falls_back_when_backend_mapper_failed(monkeypatch):
+    _backend(monkeypatch, mapping=None, warning="Mapper request failed: every model timed out")
     monkeypatch.setattr(answer_generator, "generate_answer_with_llm", lambda question, profile: "Direct answer")
 
     assert answer_generator.answer_question("Why this role?", _AGENT_PROFILE) == ("Direct answer", "generated_review_required")
+
+
+def _no_direct_model(*args, **kwargs):
+    raise AssertionError("the agent must not ask its own model for a question the backend hands off")
+
+
+def test_agent_hands_off_when_backend_withholds_answer(monkeypatch):
+    # The backend answered (no warning) but returned nothing: it keeps reference fields,
+    # unsupported domain years and ungrounded employer essays for the human.
+    _backend(monkeypatch, mapping=None)
+    monkeypatch.setattr(answer_generator, "generate_answer_with_llm", _no_direct_model)
+    monkeypatch.setattr(answer_generator, "generate_option_answer_with_llm", _no_direct_model)
+
+    assert answer_generator.answer_question("Reference name and relationship", _AGENT_PROFILE) == ("", "needs_manual_answer")
+    assert answer_option_question("Years of experience with Kafka?", [{"label": "0-1"}, {"label": "2+"}], _AGENT_PROFILE) == (
+        "", "needs_manual_answer"
+    )
+
+
+def test_model_written_backend_answer_with_rule_label_stays_flagged(monkeypatch):
+    _backend(monkeypatch, mapping={"index": 0, "value": "Yes", "source": "profile", "origin": "model"})
+
+    assert answer_option_question("Are you authorized?", _AUTH_OPTIONS, _AGENT_PROFILE) == ("Yes", "generated_review_required")
 
 
 def test_agent_backend_error_mid_run_falls_back(monkeypatch):

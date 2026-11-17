@@ -7364,3 +7364,26 @@ def test_yes_answer_selects_the_only_affirmation_option():
     assert ack == "1"
     # More than one option: never guessed from a bare "Yes".
     assert pick == ""
+
+
+
+def test_map_fields_tags_model_written_mappings(monkeypatch, tmp_path):
+    # The model picks its own "source" label, so callers need a tag they can trust.
+    monkeypatch.setattr(server, "GENERATED_DIR", tmp_path)
+    monkeypatch.setattr(server, "api_key", lambda: "test-key")
+    monkeypatch.setattr(server, "call_nvidia_mapper", lambda fields, profile, page: [
+        {"index": f["index"], "value": "Rust expert", "confidence": 0.9, "source": "profile"} for f in fields
+    ])
+    monkeypatch.setattr(server, "regenerate_mapper_narratives", lambda fields, mappings, *a: mappings)
+    monkeypatch.setattr(server, "compact_retry_unanswered_option_fields", lambda *a: [])
+    monkeypatch.setattr(server, "rewrite_third_person_narratives", lambda fields, mappings, profile: mappings)
+    fields = [
+        {"index": 0, "label": "Describe your Rust experience", "tag": "textarea", "type": "textarea"},
+        {"index": 1, "label": "How did you hear about us?", "tag": "input", "type": "text"},
+    ]
+
+    body = server.app.test_client().post("/map-fields", json={"fields": fields, "profile": {"answers": {}}, "page": {}}).get_json()
+    by_index = {mapping["index"]: mapping for mapping in body["mappings"]}
+
+    assert by_index[0]["origin"] == "model"
+    assert "origin" not in by_index[1]

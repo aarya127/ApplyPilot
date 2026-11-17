@@ -497,6 +497,9 @@ def map_fields():
         mappings = rewrite_third_person_narratives(remaining_fields, mappings, profile)
     mappings = drop_contradictory_relocation_refusals(mappings, profile)
     mappings = drop_employer_specific_narratives(mappings, remaining_fields)
+    # The model chooses its own "source" label ("profile", "policy"...), so callers that
+    # must tell rule answers from model-written ones read this tag instead.
+    mappings = [{**mapping, "origin": "model"} for mapping in mappings]
 
     return jsonify({"mappings": conditional_mappings + mappings, "aiUsage": ai_usage_snapshot()})
 

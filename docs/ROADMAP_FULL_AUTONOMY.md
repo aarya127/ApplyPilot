@@ -542,8 +542,12 @@ Work items:
    - The agent checks `/health` once per run with a 1 s limit (`APPLYPILOT_BACKEND_URL`,
      default `http://127.0.0.1:8000`; empty turns it off). A backend that is down, erroring or
      returning an option not in the list falls back to the direct-model path.
-   - Model-written backend answers stay flagged for review. Rule answers come back as
-     `backend_policy`.
+   - When the backend works but deliberately returns no answer (reference fields, domain years
+     with no matching job, ungrounded employer essays), the agent hands off instead of asking
+     its own model.
+   - Model-written backend answers stay flagged for review. `/map-fields` now tags them
+     `origin: "model"`, because the model picks its own `source` label. Only untagged rule
+     answers come back as `backend_policy`.
    - `/audit-fields` isn't used: it checks a whole page at once and adds nothing for one field.
    - The agent still doesn't import `server.py`.
    - Still to do: drive the real extension instead.
