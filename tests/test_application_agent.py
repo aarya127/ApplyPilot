@@ -561,3 +561,115 @@ def test_agent_stops_on_a_rejected_key(monkeypatch):
 
     assert answer_generator.generate_option_answer_with_llm("Q?", ["Yes", "No"], {}) == ""
     assert calls == ["nvidia/nemotron-3-ultra-550b-a55b"]
+
+
+# --- Agent answers from the local backend (roadmap Phase 5 #1 overlap) ----------------------
+
+import requests as _requests
+
+
+class _BackendResponse:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def _backend(monkeypatch, *, health=None, mapping=None, post_error=None):
+    """Point the agent at a fake backend; returns the recorded calls."""
+    calls = {"get": [], "post": []}
+
+    def fake_get(url, timeout=None, **kwargs):
+        calls["get"].append({"url": url, "timeout": timeout})
+        if isinstance(health, Exception):
+            raise health
+        return _BackendResponse(200, {"ok": True})
+
+    def fake_post(url, json=None, timeout=None, **kwargs):
+        if "/map-fields" not in url:
+            raise AssertionError(f"unexpected POST {url}")
+        calls["post"].append({"url": url, "json": json, "timeout": timeout})
+        if post_error:
+            raise post_error
+        return _BackendResponse(200, {"mappings": [mapping] if mapping else []})
+
+    monkeypatch.setenv("APPLYPILOT_BACKEND_URL", "http://127.0.0.1:8765")
+    monkeypatch.setattr(answer_generator.requests, "get", fake_get)
+    monkeypatch.setattr(answer_generator.requests, "post", fake_post)
+    answer_generator.reset_backend_cache()
+    return calls
+
+
+_AUTH_OPTIONS = [{"label": "Yes"}, {"label": "No"}]
+_AGENT_PROFILE = {"_raw": {"firstName": "Sample", "workAuthorization": "Yes"}, "_standard_answers": {}}
+
+
+def test_agent_uses_backend_answer_when_available(monkeypatch):
+    calls = _backend(monkeypatch, mapping={"index": 0, "value": "Yes", "source": "policy"})
+    field = {"tag": "select", "type": "select", "name": "q1", "page_url": "https://boards.greenhouse.io/acme/jobs/1"}
+
+    answer = answer_option_question("Are you authorized to work in the US?", _AUTH_OPTIONS, _AGENT_PROFILE, field=field)
+
+    assert answer == ("Yes", "backend_policy")
+    [post] = calls["post"]
+    [sent] = post["json"]["fields"]
+    assert "required" not in sent
+    assert sent["label"] == "Are you authorized to work in the US?"
+    assert [option["label"] for option in sent["options"]] == ["Yes", "No"]
+    assert post["json"]["profile"] == _AGENT_PROFILE["_raw"]
+    assert post["json"]["page"]["url"] == "https://boards.greenhouse.io/acme/jobs/1"
+
+
+def test_agent_model_written_backend_answer_stays_flagged_for_review(monkeypatch):
+    _backend(monkeypatch, mapping={"index": 0, "value": "I enjoy data work.", "source": "llm"})
+    field = {"tag": "textarea", "type": "textarea", "page_url": "https://jobs.lever.co/acme/1"}
+
+    assert answer_generator.answer_question("Why this role?", _AGENT_PROFILE, field=field) == (
+        "I enjoy data work.", "generated_review_required"
+    )
+
+
+def test_agent_falls_back_when_backend_down(monkeypatch):
+    calls = _backend(monkeypatch, health=_requests.ConnectionError("refused"))
+    monkeypatch.setattr(answer_generator, "generate_option_answer_with_llm", lambda question, labels, profile: "No")
+
+    first = answer_option_question("Are you a veteran?", _AUTH_OPTIONS, _AGENT_PROFILE)
+    second = answer_option_question("Do you need sponsorship?", _AUTH_OPTIONS, _AGENT_PROFILE)
+
+    assert first == ("No", "generated_review_required")
+    assert second == ("No", "generated_review_required")
+    assert len(calls["get"]) == 1  # probed once per process, not per question
+    assert calls["get"][0]["timeout"] == 1.0
+    assert calls["post"] == []
+
+
+def test_agent_ignores_backend_option_not_in_list(monkeypatch):
+    _backend(monkeypatch, mapping={"index": 0, "value": "Maybe", "source": "llm"})
+    monkeypatch.setattr(answer_generator, "generate_option_answer_with_llm", lambda question, labels, profile: "Yes")
+
+    assert answer_option_question("Are you authorized?", _AUTH_OPTIONS, _AGENT_PROFILE) == ("Yes", "generated_review_required")
+
+
+def test_agent_backend_empty_answer_falls_back(monkeypatch):
+    _backend(monkeypatch, mapping=None)
+    monkeypatch.setattr(answer_generator, "generate_answer_with_llm", lambda question, profile: "Direct answer")
+
+    assert answer_generator.answer_question("Why this role?", _AGENT_PROFILE) == ("Direct answer", "generated_review_required")
+
+
+def test_agent_backend_error_mid_run_falls_back(monkeypatch):
+    calls = _backend(monkeypatch, post_error=_requests.ReadTimeout("slow"))
+    monkeypatch.setattr(answer_generator, "generate_answer_with_llm", lambda question, profile: "Direct answer")
+
+    assert answer_generator.answer_question("Why this role?", _AGENT_PROFILE) == ("Direct answer", "generated_review_required")
+    assert calls["post"][0]["timeout"] == (1.0, 190)
+
+
+def test_saved_answer_still_wins_over_backend(monkeypatch):
+    calls = _backend(monkeypatch, mapping={"index": 0, "value": "No", "source": "llm"})
+    profile = {**_AGENT_PROFILE, "_standard_answers": {"are you authorized": "Yes"}}
+
+    assert answer_option_question("Are you authorized to work?", _AUTH_OPTIONS, profile, profile["_standard_answers"]) == ("Yes", "saved")
+    assert calls["post"] == []

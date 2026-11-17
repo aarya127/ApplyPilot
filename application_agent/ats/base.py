@@ -81,7 +81,7 @@ class BaseAdapter:
         if not question:
             return None
 
-        answer, source = answer_question(question, profile, profile.get("_standard_answers", {}))
+        answer, source = answer_question(question, profile, profile.get("_standard_answers", {}), field=field)
         if not answer:
             return None
 
@@ -96,7 +96,7 @@ class BaseAdapter:
         if not question:
             return None
 
-        answer, source = answer_option_question(question, options, profile, profile.get("_standard_answers", {}))
+        answer, source = answer_option_question(question, options, profile, profile.get("_standard_answers", {}), field=field)
         if not answer:
             return None
 

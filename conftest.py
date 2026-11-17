@@ -22,3 +22,18 @@ def _isolated_apply_queue(tmp_path, monkeypatch):
         app_module, "apply_queue", ApplyQueue(tmp_path / "applications.sqlite3"), raising=False
     )
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_local_backend_for_agent(monkeypatch):
+    """The application agent asks a running local backend first. Tests must never reach a
+    real one, so it is disabled unless a test points the agent at a fake."""
+    monkeypatch.setenv("APPLYPILOT_BACKEND_URL", "")
+    try:
+        from application_agent.agent import answer_generator
+    except ImportError:
+        yield
+        return
+    answer_generator.reset_backend_cache()
+    yield
+    answer_generator.reset_backend_cache()

@@ -451,7 +451,8 @@ Work items:
 2. **Multi-page navigation.** Click **Next / Continue / Save and continue** after each page passes
    the gate, then scan and fill again. Workday, SmartRecruiters, iCIMS and SuccessFactors are all
    multi-page. Today only `application_agent/agent/runner.py` has a page loop, and it uses the
-   weaker answer engine (see Phase 5).
+   weaker answer engine (see Phase 5). (Since 2026-11-16 the agent asks the local backend first;
+   see Phase 5 item 1.)
 3. **Detect the outcome after submit.** Tell apart a confirmation page (per-ATS URL and text
    patterns), validation errors (fix and retry, at most twice), a CAPTCHA challenge (pause and
    notify) and an unknown result (pause and notify).
@@ -519,6 +520,19 @@ Work items:
    retries or grounding, and its default model has been retired. Retire it and drive the real
    extension from Playwright instead. `docs/e2e_batch.py` already does this and is the starting point
    for the orchestrator.
+   **Partly done 2026-11-16:** when the local backend is running, the agent's
+   `answer_question` / `answer_option_question` now ask it first.
+   - The flow is: saved answer, then a one-field `/map-fields` call, then the agent's own
+     direct-model path as the fallback. So the agent gets the backend's policy rules, hand-offs,
+     grounding and retries.
+   - The agent checks `/health` once per run with a 1 s limit (`APPLYPILOT_BACKEND_URL`,
+     default `http://127.0.0.1:8000`; empty turns it off). A backend that is down, erroring or
+     returning an option not in the list falls back to the direct-model path.
+   - Model-written backend answers stay flagged for review. Rule answers come back as
+     `backend_policy`.
+   - `/audit-fields` isn't used: it checks a whole page at once and adds nothing for one field.
+   - The agent still doesn't import `server.py`.
+   - Still to do: drive the real extension instead.
 2. **State machine per job.**
    `open → entry → login → fill page → gate → next or submit → confirm → record`. Each state
    records where it stopped and why, so a paused job resumes at the same step.

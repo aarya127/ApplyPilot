@@ -23,6 +23,16 @@ DEFAULT_FALLBACK_MODELS = ["z-ai/glm-5.3", "moonshotai/kimi-k3", "nvidia/nemotro
 DEFAULT_NARRATIVE_FALLBACK_MODELS = ["nvidia/nemotron-3-super-120b-a12b"]
 CHAIN_DEADLINE_SECONDS = 90
 
+# The local autofill backend (autofill_extension/backend/server.py) carries the policy rules,
+# grounding and retries this module lacks. When it is running the agent asks it first. It is
+# reached over HTTP only: importing server.py would run init_db and build the Flask app.
+BACKEND_URL_ENV = "APPLYPILOT_BACKEND_URL"
+DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_CONNECT_TIMEOUT = 1.0
+BACKEND_READ_TIMEOUT = 190  # the backend caps one /map-fields request at 180 s
+DETERMINISTIC_BACKEND_SOURCES = ("policy", "rule", "saved", "profile", "deterministic")
+_backend_status: dict[str, bool] = {}
+
 
 def load_private_env() -> None:
     if os.getenv("NVIDIA_API_KEY"):
@@ -101,7 +111,85 @@ def chat_completion(api_key: str, body: dict[str, Any], models: list[str], timeo
     return ""
 
 
-def answer_question(question: str, profile: dict[str, Any], standard_answers: dict[str, str] | None = None) -> tuple[str, str]:
+def backend_url() -> str:
+    return os.environ.get(BACKEND_URL_ENV, DEFAULT_BACKEND_URL).strip().rstrip("/")
+
+
+def reset_backend_cache() -> None:
+    _backend_status.clear()
+
+
+def backend_available() -> bool:
+    """Probe the backend's /health once per process (1 s connect limit)."""
+    url = backend_url()
+    if not url:
+        return False
+    if url not in _backend_status:
+        try:
+            response = requests.get(f"{url}/health", timeout=BACKEND_CONNECT_TIMEOUT)
+            _backend_status[url] = response.status_code == 200
+        except requests.RequestException:
+            _backend_status[url] = False
+    return _backend_status[url]
+
+
+def backend_answer(
+    question: str,
+    profile: dict[str, Any],
+    *,
+    options: list[str] | None = None,
+    field: dict[str, Any] | None = None,
+) -> tuple[str, str] | None:
+    """One-field /map-fields call. Returns (answer, source), or None when the backend is
+    down, errors, or has no answer. Model-written answers keep the review flag."""
+    if not question or not backend_available():
+        return None
+
+    field = field or {}
+    payload_field: dict[str, Any] = {
+        "index": 0,
+        "label": question,
+        "questionText": question,
+        "tag": field.get("tag") or ("select" if options else "textarea"),
+        "type": field.get("type") or ("select" if options else "textarea"),
+        "name": field.get("name") or "",
+        "placeholder": field.get("placeholder") or "",
+    }
+    # No "required" key: the agent's scanner can't tell, and the backend answers fields
+    # without the flag (it only skips fields marked optional).
+    if options:
+        payload_field["options"] = [{"label": option, "value": option} for option in options]
+    raw_profile = profile.get("_raw") if isinstance(profile.get("_raw"), dict) else {
+        key: value for key, value in profile.items() if not str(key).startswith("_")
+    }
+    page_url = str(field.get("frame_url") or field.get("page_url") or "")
+
+    try:
+        response = requests.post(
+            f"{backend_url()}/map-fields",
+            json={"fields": [payload_field], "profile": raw_profile, "page": {"url": page_url, "title": ""}},
+            timeout=(BACKEND_CONNECT_TIMEOUT, BACKEND_READ_TIMEOUT),
+        )
+        if response.status_code != 200:
+            return None
+        mappings = response.json().get("mappings") or []
+    except (requests.RequestException, ValueError):
+        return None
+
+    mapping = next((item for item in mappings if isinstance(item, dict) and item.get("index") == 0), None)
+    value = str((mapping or {}).get("value") or "").strip()
+    if not value:
+        return None
+    source = str(mapping.get("source") or "")
+    return value, "backend_policy" if source.startswith(DETERMINISTIC_BACKEND_SOURCES) else "generated_review_required"
+
+
+def answer_question(
+    question: str,
+    profile: dict[str, Any],
+    standard_answers: dict[str, str] | None = None,
+    field: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     standard_answers = standard_answers or {}
     normalized = question.lower().strip()
 
@@ -109,6 +197,10 @@ def answer_question(question: str, profile: dict[str, Any], standard_answers: di
         saved_normalized = saved_question.lower().strip()
         if saved_normalized in normalized or normalized in saved_normalized:
             return saved_answer, "saved"
+
+    from_backend = backend_answer(question, profile, field=field)
+    if from_backend:
+        return from_backend
 
     generated = generate_answer_with_llm(question, profile)
     if generated:
@@ -122,6 +214,7 @@ def answer_option_question(
     options: list[dict[str, str]],
     profile: dict[str, Any],
     standard_answers: dict[str, str] | None = None,
+    field: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     labels = [option_label(option) for option in options if option_label(option)]
     if not question or not labels:
@@ -136,6 +229,10 @@ def answer_option_question(
             matched = exact_option(saved_answer, labels)
             if matched:
                 return matched, "saved"
+
+    from_backend = backend_answer(question, profile, options=labels, field=field)
+    if from_backend and exact_option(from_backend[0], labels):
+        return exact_option(from_backend[0], labels), from_backend[1]
 
     generated = generate_option_answer_with_llm(question, labels, profile)
     matched = exact_option(generated, labels)
