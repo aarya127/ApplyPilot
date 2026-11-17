@@ -148,3 +148,81 @@ def test_extension_tracked_job_shows_on_the_dashboard_queue(tmp_path, monkeypatc
     server.app.test_client().post("/track-application", json={"url": "https://example.com/jobs/5", "title": "Tracked"})
 
     assert [(job["url"], job["status"]) for job in ApplyQueue(path).list_shortlist("filled")] == [("https://example.com/jobs/5", "filled")]
+
+
+# --- Review fixes (2026-11-16 /code-review) ---------------------------------------------------
+
+
+def test_legacy_rows_without_url_are_skipped_and_import_still_completes(tmp_path):
+    legacy = tmp_path / "legacy.sqlite3"
+    _legacy_db(legacy, [("", "No URL", 1), ("https://example.com/jobs/11", "Good Role", 2)])
+
+    first = Ledger(tmp_path / "ledger.sqlite3", legacy_db=legacy).list_jobs()
+    second = Ledger(tmp_path / "ledger.sqlite3", legacy_db=legacy).list_jobs()
+
+    assert [job["url"] for job in first] == ["https://example.com/jobs/11"]
+    assert second == first
+
+
+def test_track_application_without_url_returns_400(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LEDGER_PATH", tmp_path / "ledger.sqlite3")
+    response = server.app.test_client().post("/track-application", json={"title": "No URL"})
+
+    assert response.status_code == 400
+    assert response.get_json()["tracked"] is False
+
+
+def test_track_application_keeps_client_created_at(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "LEDGER_PATH", tmp_path / "ledger.sqlite3")
+    body = {"url": "https://example.com/jobs/12", "createdAt": "2026-11-01T10:00:00+00:00"}
+    job_id = server.app.test_client().post("/track-application", json=body).get_json()["id"]
+
+    assert Ledger(tmp_path / "ledger.sqlite3").events(job_id)[0]["created_at"] == "2026-11-01T10:00:00+00:00"
+
+
+def test_queued_agent_run_logs_onto_the_queued_job(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    queued = ApplyQueue(path).add_shortlist({"url": "https://acme.com/careers/42", "title": "Queued"})
+
+    ApplicationLogger(path).log(
+        url="https://acme.wd5.myworkdayjobs.com/en-US/careers/job/42/apply",
+        job_url="https://acme.com/careers/42",
+        title="Queued",
+        ats="workday",
+        status="paused_before_submit",
+    )
+
+    jobs = _jobs(path)
+    assert len(jobs) == 1
+    [event] = Ledger(path).events(queued["id"])
+    assert event["details"]["pageUrl"] == "https://acme.wd5.myworkdayjobs.com/en-US/careers/job/42/apply"
+
+
+def test_shortlisted_job_gets_its_ats_id_and_matches_a_tracked_variant(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    shortlisted = ApplyQueue(path).add_shortlist({"url": "https://acme.com/careers?gh_jid=123", "title": "Role"})
+
+    tracked = Ledger(path).record("https://boards.greenhouse.io/acme/jobs/123", status="filled", source="chrome_extension")
+
+    assert tracked == shortlisted["id"]
+    assert len(_jobs(path)) == 1
+
+
+def test_shortlisting_a_variant_of_a_tracked_job_does_not_duplicate_it(tmp_path):
+    path = tmp_path / "ledger.sqlite3"
+    tracked = Ledger(path).record("https://boards.greenhouse.io/acme/jobs/321", status="filled", source="chrome_extension")
+
+    shortlisted = ApplyQueue(path).add_shortlist({"url": "https://acme.com/careers?gh_jid=321", "title": "Role", "company": "Acme"})
+
+    assert shortlisted["id"] == tracked
+    assert shortlisted["status"] == "filled"
+    assert len(_jobs(path)) == 1
+
+
+def test_caller_ats_does_not_split_a_known_job(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    first = ledger.record("https://acme.com/careers?gh_jid=555", status="filled", source="chrome_extension")
+
+    second = ledger.record("https://boards.greenhouse.io/acme/jobs/555", status="paused", source="application_agent", ats="generic")
+
+    assert second == first

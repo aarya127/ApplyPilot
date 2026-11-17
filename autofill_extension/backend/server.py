@@ -626,12 +626,17 @@ def track_application():
         return ("", 204)
 
     payload = request.get_json(force=True) or {}
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        return jsonify({"tracked": False, "error": "The page URL is required to track an application."}), 400
+
     job_id = application_ledger().record(
-        payload.get("url", ""),
+        url,
         status=payload.get("status") or "filled",
         source=payload.get("source") or "chrome_extension",
         title=payload.get("title") or "",
         details=payload,
+        created_at=payload.get("createdAt") or None,
     )
 
     return jsonify({"tracked": True, "id": job_id})

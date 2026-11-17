@@ -15,7 +15,7 @@ class ApplicationAgent:
         self.logger = logger or ApplicationLogger()
         self.max_steps = max_steps
 
-    def complete_current_application(self, page: Any) -> dict[str, Any]:
+    def complete_current_application(self, page: Any, job_url: str | None = None) -> dict[str, Any]:
         ats = detect_ats(page.url, page)
         adapter = get_adapter(ats)
         status = "started"
@@ -54,7 +54,7 @@ class ApplicationAgent:
             "confidence": report_confidence(details),
             "details": details,
         }
-        self.logger.log(url=page.url, title=report["title"], ats=ats, status=status, details=details)
+        self.logger.log(url=page.url, title=report["title"], ats=ats, status=status, details=details, job_url=job_url)
         return report
 
 

@@ -20,12 +20,23 @@ class ApplicationLogger:
     def __init__(self, db_path: Path = DEFAULT_DB_PATH) -> None:
         self.db_path = db_path
 
-    def log(self, *, url: str, title: str, ats: str, status: str, details: dict[str, Any] | None = None) -> None:
+    def log(
+        self,
+        *,
+        url: str,
+        title: str,
+        ats: str,
+        status: str,
+        details: dict[str, Any] | None = None,
+        job_url: str | None = None,
+    ) -> None:
+        """Record an agent run. job_url is the queued job's URL: the page URL after
+        navigation (an ATS apply page) would otherwise file the run as a new job."""
         Ledger(self.db_path).record(
-            url,
+            job_url or url,
             status=AGENT_STATUS_TO_LEDGER.get(status, status),
             source="application_agent",
             title=title,
             ats=ats or None,
-            details={"agentStatus": status, **(details or {})},
+            details={"agentStatus": status, "pageUrl": url, **(details or {})},
         )

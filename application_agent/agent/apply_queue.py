@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from application_agent.agent.ledger import ALL_STATUSES, DEFAULT_LEDGER_PATH, Ledger
+from application_agent.agent.ledger import ALL_STATUSES, DEFAULT_LEDGER_PATH, Ledger, find_job, normalize_ats_job_id
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -39,16 +39,25 @@ class ApplyQueue:
             "metadata": json.dumps(job.get("metadata") or {}, ensure_ascii=True),
         }
 
+        ats, ats_job_id = normalize_ats_job_id(url)
+
         with sqlite3.connect(self.db_path) as connection:
             connection.row_factory = sqlite3.Row
+            # The same job may already be in the ledger under another URL for it (the
+            # extension tracked the ATS page); update that row instead of adding a second.
+            existing = find_job(connection, url, ats, ats_job_id)
+            if existing is not None:
+                url = payload["url"] = existing["url"]
             connection.execute(
                 """
                 INSERT INTO shortlisted_jobs (
                     created_at, updated_at, source, title, company, location, url,
-                    category, salary, posted, status, priority, notes, metadata
+                    category, salary, posted, status, priority, notes, metadata, ats, ats_job_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'shortlisted', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'shortlisted', ?, ?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
+                    ats=COALESCE(shortlisted_jobs.ats, excluded.ats),
+                    ats_job_id=COALESCE(shortlisted_jobs.ats_job_id, excluded.ats_job_id),
                     updated_at=excluded.updated_at,
                     source=excluded.source,
                     title=COALESCE(NULLIF(excluded.title, ''), shortlisted_jobs.title),
@@ -75,6 +84,8 @@ class ApplyQueue:
                     payload["priority"],
                     payload["notes"],
                     payload["metadata"],
+                    ats,
+                    ats_job_id,
                 ),
             )
             row = connection.execute(

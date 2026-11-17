@@ -68,7 +68,7 @@ def run_queued_job(
     try:
         page.goto(job["url"], wait_until="domcontentloaded", timeout=45_000)
         click_apply_if_available(page)
-        report = agent.complete_current_application(page)
+        report = agent.complete_current_application(page, job_url=job["url"])
         report["job"] = {
             "id": job.get("id"),
             "title": job.get("title"),

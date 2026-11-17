@@ -176,18 +176,15 @@ class Ledger:
         url = str(url or "").strip()
         if not url:
             raise ValueError("Job URL is required")
-        if not (ats and ats_job_id):
+        if not ats_job_id:
+            # The ATS and job id parsed from the URL go together; a caller's own ATS label
+            # ("generic" from page detection) must not be paired with a parsed id.
             derived_ats, derived_id = normalize_ats_job_id(url)
-            ats, ats_job_id = ats or derived_ats, ats_job_id or derived_id
+            if derived_id:
+                ats, ats_job_id = derived_ats, derived_id
         now = created_at or utc_now()
 
-        row = None
-        if ats and ats_job_id:
-            row = connection.execute(
-                "SELECT * FROM shortlisted_jobs WHERE ats = ? AND ats_job_id = ? ORDER BY id LIMIT 1", (ats, ats_job_id)
-            ).fetchone()
-        if row is None:
-            row = connection.execute("SELECT * FROM shortlisted_jobs WHERE url = ?", (url,)).fetchone()
+        row = find_job(connection, url, ats, ats_job_id)
 
         if row is None:
             initial = status if status in ALL_STATUSES else "shortlisted"
@@ -246,6 +243,8 @@ class Ledger:
             legacy.close()
         with connection:
             for row in rows:
+                if not str(row["url"] or "").strip():
+                    continue  # the old Track endpoint stored empty URLs; there is no job to file them under
                 self._record(
                     connection,
                     row["url"],
@@ -266,6 +265,17 @@ class Ledger:
                 "INSERT INTO ledger_meta (key, value) VALUES ('legacy_backend_import', ?)",
                 (json.dumps({"rows": len(rows), "from": str(self.legacy_db), "at": utc_now()}),),
             )
+
+
+def find_job(connection: sqlite3.Connection, url: str, ats: str | None, ats_job_id: str | None) -> sqlite3.Row | None:
+    """The job a URL belongs to: by ATS job id when known, else by exact URL."""
+    if ats and ats_job_id:
+        row = connection.execute(
+            "SELECT * FROM shortlisted_jobs WHERE ats = ? AND ats_job_id = ? ORDER BY id LIMIT 1", (ats, ats_job_id)
+        ).fetchone()
+        if row is not None:
+            return row
+    return connection.execute("SELECT * FROM shortlisted_jobs WHERE url = ?", (url,)).fetchone()
 
 
 def ensure_schema(connection: sqlite3.Connection) -> None:
