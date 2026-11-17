@@ -5900,6 +5900,16 @@
     return Array.from(byIndex.values());
   }
 
+  // True when the page already shows this mapping's answer, read the same way
+  // verification reads it (a ticked "I agree" box is `true`, not its label text).
+  function pageAlreadyShowsMapping(element, mapping, field) {
+    if (!element || !hasValue(mapping?.value)) {
+      return false;
+    }
+    const expected = verificationExpectedValue(mapping.value, field, element);
+    return verificationActualValues(element, field).some((actual) => hasValue(actual) && verificationValuesMatch(actual, expected));
+  }
+
   function isAlreadyCorrectlyFilledMapping(mapping, fields) {
     const field = resolveFieldForMapping(mapping, fields);
     const current = field?.value;
@@ -5924,7 +5934,8 @@
       return false;
     }
 
-    return mappingValueMatchesField(current, mapping.value);
+    return mappingValueMatchesField(current, mapping.value)
+      || pageAlreadyShowsMapping(field?.elementRef?.deref?.(), mapping, field);
   }
 
   function shouldKeepExistingMapping(existing, candidate, fields) {
@@ -6126,7 +6137,7 @@
       return false;
     }
 
-    if (mappingValueMatchesField(current, mapping.value)) {
+    if (mappingValueMatchesField(current, mapping.value) || pageAlreadyShowsMapping(element, mapping, field)) {
       return true;
     }
 
@@ -6727,6 +6738,23 @@
     }));
   }
 
+  // A consent dropdown whose only real option is an affirmation ("I agree", "I
+  // acknowledge"): a "Yes" answer means that option. Several options are never guessed.
+  const AFFIRMATION_OPTION_PATTERN = /^(yes\b.*|i (agree|accept|acknowledge|consent|confirm|understand|certify)\b.*|agree|accept|acknowledged?|confirmed?)$/;
+
+  function soleAffirmationOption(options) {
+    const usable = options
+      .map((option) => ({ label: compactText(option.label || ""), value: compactText(option.value || "") }))
+      .filter((option) => {
+        const text = normalize(option.label || option.value);
+        return text && !/^(select|choose|please select)\b/.test(text);
+      });
+    if (usable.length !== 1 || !AFFIRMATION_OPTION_PATTERN.test(normalize(usable[0].label || usable[0].value))) {
+      return "";
+    }
+    return usable[0].label || usable[0].value;
+  }
+
   function optionConstrainedValue(options, value) {
     if (!Array.isArray(options) || !options.length) {
       return "";
@@ -6734,7 +6762,7 @@
 
     const yesNo = yesNoOptions(options);
     if (!yesNo) {
-      return "";
+      return semanticYesNoValue(value) === "yes" ? soleAffirmationOption(options) : "";
     }
 
     const semantic = semanticYesNoValue(value);

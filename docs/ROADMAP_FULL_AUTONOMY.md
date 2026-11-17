@@ -329,6 +329,20 @@ by the kind of failure and ordered by how much harm the failure would do once su
 21. **Multi-select and consent fills don't stick.** On Reddit, the required "I agree" consent, the
     ethnicity multi-select, gender and sexual orientation all stayed "ready to fill" after two fill
     passes.
+    **Done 2026-11-16 (fixture-tested only, not verified on live Greenhouse):** reproduced with a
+    fixture that behaves like Greenhouse's react-select. It found two root causes:
+    - **A "Yes" answer never selected an "I agree"-only dropdown.** The privacy rule answers "Yes".
+      The consent dropdown's only option is "I agree", and nothing mapped one to the other, so
+      the dropdown stayed empty and was proposed again on every pass. A "Yes" now selects the
+      option when it is the list's only real option and is an affirmation ("I agree", "I
+      acknowledge", "I consent", "Yes, …"). A list with more options is never guessed from.
+    - **A ticked "I agree" box looked unanswered.** The "already answered" check compared the
+      checkbox's label text with the mapped `true`, so the ticked box was proposed again
+      forever. It now reads the page the same way verification does (#25), so a ticked box is
+      `true`.
+
+    With 2026-10-01's chip reading, the gender, orientation and ethnicity react-selects stick in
+    the fixture. Which consents get ticked is unchanged while owner decision 1 is open.
 
 **D. Résumé**
 

@@ -7176,3 +7176,191 @@ def test_school_typeahead_combobox_picks_school():
         ["() => document.getElementById('school').value"],
     )
     assert school == "University of Waterloo"
+
+
+
+# --- Multi-select and consent fills that stick (roadmap Phase 1 #21; fixture-tested only) ----
+# A vanilla re-implementation of react-select's DOM and events (as on Greenhouse's
+# job-boards), plus a React-controlled "I agree" checkbox.
+GREENHOUSE_REACT_SELECT_FORM = r"""<form id="app">
+  <div class="field" data-select='{"id":"eth","label":"Please select your ethnicity *","multi":true,"options":["East Asian","South Asian","Southeast Asian","White","Black or African American","I don&#39;t wish to answer"]}'></div>
+  <div class="field" data-select='{"id":"gender","label":"Gender *","multi":false,"options":["Male","Female","Non-binary","I don&#39;t wish to answer"]}'></div>
+  <div class="field" data-select='{"id":"orientation","label":"How would you describe your sexual orientation? *","multi":false,"options":["Heterosexual","Gay","Lesbian","Bisexual","I don&#39;t wish to answer"]}'></div>
+  <div class="field" data-select='{"id":"question_9001","label":"By selecting I agree, you confirm you have read the Candidate Privacy Policy *","multi":false,"options":["I agree"]}'></div>
+  <div class="field checkbox-field">
+    <label><input type="checkbox" id="agree-box" name="agree_box" required> I agree to the processing of my data per the privacy notice *</label>
+  </div>
+</form>
+<script>
+  // A small re-implementation of react-select's DOM and event behaviour (v5 defaults):
+  // menu opens on control mousedown or typing, option click selects, single selects close
+  // the menu and clear the input, multi selects add a chip and hide chosen options,
+  // Escape/blur close the menu. All rendering is driven from state, like React.
+  window.__selectState = {};
+  for (const host of document.querySelectorAll('[data-select]')) {
+    const cfg = JSON.parse(host.getAttribute('data-select'));
+    const state = { value: [], open: false, inputValue: '' };
+    window.__selectState[cfg.id] = state;
+    host.innerHTML = `
+      <label id="${cfg.id}-label" for="${cfg.id}">${cfg.label}</label>
+      <div class="select-shell">
+        <div class="select__control">
+          <div class="select__value-container${cfg.multi ? ' select__value-container--is-multi' : ''}">
+            <div class="select__values"></div>
+            <div class="select__input-container">
+              <input id="${cfg.id}" class="select__input" role="combobox" aria-autocomplete="list" aria-expanded="false"
+                aria-haspopup="true" aria-required="true" aria-labelledby="${cfg.id}-label" autocomplete="off" value="">
+            </div>
+          </div>
+          <div class="select__indicators"><div class="select__indicator select__dropdown-indicator" aria-hidden="true">v</div></div>
+        </div>
+        <input tabindex="-1" aria-hidden="true" required class="select__shadow" value="">
+        <div class="select__menu-slot"></div>
+      </div>`;
+    const input = host.querySelector('input.select__input');
+    const control = host.querySelector('.select__control');
+    const values = host.querySelector('.select__values');
+    const slot = host.querySelector('.select__menu-slot');
+    const shadow = host.querySelector('.select__shadow');
+    const render = () => {
+      values.innerHTML = '';
+      if (!state.value.length && !state.inputValue) {
+        values.innerHTML = '<div class="select__placeholder">Select...</div>';
+      } else if (cfg.multi) {
+        for (const chosen of state.value) {
+          const chip = document.createElement('div');
+          chip.className = 'select__multi-value';
+          chip.innerHTML = `<div class="select__multi-value__label">${chosen}</div><div role="button" class="select__multi-value__remove" aria-label="Remove ${chosen}"><svg width="14" height="14"></svg></div>`;
+          chip.querySelector('[role=button]').addEventListener('click', () => {
+            state.value = state.value.filter((v) => v !== chosen);
+            render();
+          });
+          values.appendChild(chip);
+        }
+      } else if (state.value.length && !state.inputValue) {
+        values.innerHTML = `<div class="select__single-value">${state.value[0]}</div>`;
+      }
+      input.value = state.inputValue;
+      shadow.value = state.value.join(',');
+      input.setAttribute('aria-expanded', String(state.open));
+      slot.innerHTML = '';
+      if (state.open) {
+        const menu = document.createElement('div');
+        menu.className = 'select__menu';
+        const list = document.createElement('div');
+        list.className = 'select__menu-list';
+        list.setAttribute('role', 'listbox');
+        const shown = cfg.options
+          .filter((o) => !(cfg.multi && state.value.includes(o)))
+          .filter((o) => o.toLowerCase().includes(state.inputValue.toLowerCase()));
+        if (!shown.length) {
+          list.innerHTML = '<div class="select__menu-notice select__menu-notice--no-options">No options</div>';
+        }
+        shown.forEach((o, i) => {
+          const option = document.createElement('div');
+          option.className = 'select__option';
+          option.id = `react-select-${cfg.id}-option-${i}`;
+          option.setAttribute('role', 'option');
+          option.textContent = o;
+          option.addEventListener('click', () => {
+            state.value = cfg.multi ? [...state.value, o] : [o];
+            state.inputValue = '';
+            state.open = false;
+            render();
+          });
+          list.appendChild(option);
+        });
+        menu.appendChild(list);
+        slot.appendChild(menu);
+      }
+    };
+    control.addEventListener('mousedown', (event) => {
+      if (event.target !== input) event.preventDefault();
+      input.focus();
+      state.open = !state.open || event.target === input;
+      render();
+    });
+    input.addEventListener('input', () => {
+      state.inputValue = input.value;
+      state.open = true;
+      render();
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') { state.open = false; state.inputValue = ''; render(); }
+      if (event.key === 'ArrowDown' && !state.open) { state.open = true; render(); }
+    });
+    input.addEventListener('blur', () => {
+      setTimeout(() => { state.open = false; state.inputValue = ''; render(); }, 0);
+    });
+    render();
+  }
+
+  // A React-controlled checkbox: the click handler flips state, then React re-renders
+  // `checked` from state on the next tick, undoing any direct `.checked =` writes.
+  const box = document.getElementById('agree-box');
+  window.__boxState = false;
+  box.addEventListener('click', () => { window.__boxState = !window.__boxState; });
+  const rerender = () => { box.checked = window.__boxState; };
+  for (const type of ['click', 'input', 'change']) box.addEventListener(type, () => setTimeout(rerender, 0));
+</script>
+"""
+
+_DEMOGRAPHICS_PROFILE = {
+    "firstName": "Sample",
+    "answers": {},
+    "demographics": {"gender": "Male", "sexualOrientation": "Heterosexual", "ethnicity": "South Asian", "race": "Asian"},
+}
+_SELECT_STATE_JS = """() => ({
+  selects: Object.fromEntries(Object.entries(window.__selectState).map(([key, state]) => [key, state.value])),
+  box: document.getElementById('agree-box').checked
+})"""
+_PREVIEW_JS = """() => new Promise((resolve) => {
+  window.__autofillListener({ type: 'PREVIEW_AUTOFILL' }, null, (response) => resolve(response));
+})"""
+_SETTLE_JS = "() => new Promise((resolve) => setTimeout(resolve, 300))"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_greenhouse_react_select_multi_and_consent_fill_sticks():
+    _, [_, after_first, _, _, after_second, preview] = _content_script_run(
+        "https://job-boards.greenhouse.io/acme/jobs/1",
+        GREENHOUSE_REACT_SELECT_FORM,
+        _DEMOGRAPHICS_PROFILE,
+        SENSITIVE_SETTINGS,
+        [_SETTLE_JS, _SELECT_STATE_JS, _PREVIEW_THEN_FILL_JS, _SETTLE_JS, _SELECT_STATE_JS, _PREVIEW_JS],
+    )
+
+    expected = {
+        "selects": {"eth": ["South Asian"], "gender": ["Male"], "orientation": ["Heterosexual"], "question_9001": ["I agree"]},
+        "box": True,
+    }
+    assert after_first == expected
+    assert after_second == expected
+    # Nothing is left "ready to fill" once every answer is on the page.
+    assert preview["result"]["mappings"] == []
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_ticked_agreement_checkbox_is_not_proposed_again():
+    html = '<form><label><input type="checkbox" name="agree" required checked> I agree to the privacy notice *</label></form>'
+    preview, _ = _content_script_run("https://job-boards.greenhouse.io/acme/jobs/2", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS)
+    assert preview["result"]["mappings"] == []
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_yes_answer_selects_the_only_affirmation_option():
+    html = """
+      <form>
+        <label for="ack">I have read the Candidate Privacy Policy *</label>
+        <select id="ack" required><option value="">Select...</option><option value="1">I acknowledge</option></select>
+        <label for="pick">Have you read the Candidate Privacy Notice? *</label>
+        <select id="pick" required><option value="">Select...</option><option>I agree</option><option>I do not agree</option></select>
+      </form>
+    """
+    _, [ack, pick] = _content_script_run(
+        "https://job-boards.greenhouse.io/acme/jobs/3", html, {"firstName": "Sample", "answers": {}}, SENSITIVE_SETTINGS,
+        ["() => document.getElementById('ack').value", "() => document.getElementById('pick').value"],
+    )
+    assert ack == "1"
+    # More than one option: never guessed from a bare "Yes".
+    assert pick == ""
