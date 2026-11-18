@@ -1837,7 +1837,7 @@ def policy_answer_for_field(
     if any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
         return best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
 
-    if HEAR_ABOUT_PATTERN.search(haystack):
+    if is_hear_about_question(field):
         return hear_about_answer(profile, options)
 
     if any(term in haystack for term in ["terms and conditions", "terms of use", "terms of service", "conditions of use", "user agreement", "legal terms", "accept terms", "agree terms", "consent terms"]):
@@ -3013,10 +3013,17 @@ def rewrite_third_person_narratives(
     return result
 
 
+# Read against the question text only: the field's name/id ("job_application[...]") and
+# loose wording ("open-source ... application") must not turn other questions into
+# "LinkedIn", since this rule overrides the model.
 HEAR_ABOUT_PATTERN = re.compile(
-    r"how did you hear about us|how did you hear about this|how did you hear about.*job|source.*application"
-    r"|application source|where did you hear"
+    r"\b(how|where) did you (first )?hear about\b|\bapplication source\b|\bsource of (your |this )?application\b"
+    r"|\breferral source\b"
 )
+
+
+def is_hear_about_question(field: dict[str, Any]) -> bool:
+    return bool(HEAR_ABOUT_PATTERN.search(normalize_for_option(years_question_text(field))))
 
 
 def linkedin_source_option(options: list[dict[str, str]]) -> str | None:
@@ -3078,7 +3085,7 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
         answer = best_available_option(policies["recruitingMessages"], options) or policies["recruitingMessages"]
     elif any(term in haystack for term in ["subscribe", "subscription", "email alert", "job alert", "marketing email", "promotional email", "newsletter", "mailing list"]):
         answer = best_available_option(policies["subscribeEmails"], options) or policies["subscribeEmails"]
-    elif HEAR_ABOUT_PATTERN.search(haystack):
+    elif is_hear_about_question(field):
         # Owner decision 2026-09-26: "How did you hear about us?" is LinkedIn.
         answer = hear_about_answer(profile, options)
     elif has_sponsorship_terms(haystack) and not is_work_eligibility_question(haystack):
@@ -3107,9 +3114,7 @@ def authoritative_policy_mapping(field: Any, profile: dict[str, Any]) -> dict[st
     elif is_years_of_experience_question(haystack) and experience_domain(years_question_text(field)):
         # Years in one domain come only from the jobs that mention it; with none, the
         # answer stays empty and the field is handed off (is_unsupported_domain_years_field).
-        years = domain_years_from_profile(experience_domain(years_question_text(field)), profile)
-        if years is not None:
-            answer = best_available_option(str(years), options) if options else str(years)
+        answer = domain_years_answer(field, profile)
     elif is_work_eligibility_question(haystack):
         authorization = stated_work_authorization(profile)
         if authorization:
@@ -3271,11 +3276,7 @@ def profile_jobs_with_text(profile: dict[str, Any]) -> list[tuple[dict[str, Any]
     texts = [f"{job.get('title') or ''} {job.get('company') or ''}" for job in jobs]
 
     def names_company(line: str, job: dict[str, Any]) -> bool:
-        company = str(job.get("company") or "").lower().strip()
-        if not company:
-            return False
-        first = company.split()[0]
-        return company in line or (len(first) >= 3 and re.search(rf"\b{re.escape(first)}\b", line) is not None)
+        return line_names_company(line, str(job.get("company") or ""))
 
     current = None
     for line in resume_facts.get("experience") or []:
@@ -3292,6 +3293,66 @@ def profile_jobs_with_text(profile: dict[str, Any]) -> list[tuple[dict[str, Any]
     ]
 
 
+MONTH_NUMBERS = {name: number for number, name in enumerate(
+    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], start=1
+)}
+# Words too common to identify a company on their own ("The Home Depot", "Bank of America").
+COMPANY_FILLER_WORDS = {
+    "the", "a", "an", "of", "and", "bank", "global", "group", "company", "co", "inc", "ltd", "llc", "corp",
+    "corporation", "international", "national", "university",
+}
+
+
+def month_number(value: Any, default: int) -> int:
+    """1-12 from "5", "05", "May" or "September"; the default when unreadable."""
+    text = str(value or "").strip().lower()
+    if text.isdigit() and 1 <= int(text) <= 12:
+        return int(text)
+    return MONTH_NUMBERS.get(text[:3], default)
+
+
+def line_names_company(line: str, company: str) -> bool:
+    """A resume line belongs to a job when it names the company: the full name, or its
+    first distinctive word ("Home" for "The Home Depot", never "The")."""
+    company = company.lower().strip()
+    if not company:
+        return False
+    if re.search(rf"\b{re.escape(company)}\b", line):
+        return True
+    words = [word for word in re.findall(r"[a-z0-9&]+", company) if word not in COMPANY_FILLER_WORDS and len(word) >= 3]
+    return bool(words) and re.search(rf"\b{re.escape(words[0])}\b", line) is not None
+
+
+def years_range_option(years: int, options: list[dict[str, str]]) -> str | None:
+    """The option whose range holds the years: "2-4", "2 to 4 years", "5+", "5 or more",
+    "less than 1"."""
+    for option in options:
+        label = str(option.get("label") or option.get("value") or "")
+        text = label.lower()
+        match = re.search(r"(\d+)\s*(?:-|\u2013|to)\s*(\d+)", text)
+        if match and int(match.group(1)) <= years <= int(match.group(2)):
+            return option.get("value") or label
+        match = re.search(r"(\d+)\s*(?:\+|or more|and above|or above|plus)", text)
+        if match and not re.search(r"(\d+)\s*(?:-|\u2013|to)\s*(\d+)", text) and years >= int(match.group(1)):
+            return option.get("value") or label
+        match = re.search(r"(?:less than|under|fewer than|<)\s*(\d+)", text)
+        if match and years < int(match.group(1)):
+            return option.get("value") or label
+    return None
+
+
+def domain_years_answer(field: dict[str, Any], profile: dict[str, Any]) -> str | None:
+    """The domain-years answer in the field's terms (a number, or the matching option)."""
+    domain = experience_domain(years_question_text(field))
+    years = domain_years_from_profile(domain, profile) if domain else None
+    if years is None:
+        return None
+    options = normalized_options(field)
+    if not options:
+        return str(years)
+    return best_available_option(str(years), options) or years_range_option(years, options)
+
+
 def domain_years_from_profile(domain: str, profile: dict[str, Any], today: date | None = None) -> int | None:
     """Years spent in jobs that mention every keyword of the domain, from their dates.
     None when no job mentions it or a matching job has no start date."""
@@ -3304,11 +3365,11 @@ def domain_years_from_profile(domain: str, profile: dict[str, Any], today: date 
         if not keywords <= words:
             continue
         try:
-            start = int(job.get("startYear")) * 12 + int(job.get("startMonth") or 1) - 1
+            start = int(job.get("startYear")) * 12 + month_number(job.get("startMonth"), 1) - 1
         except (TypeError, ValueError):
             return None
         try:
-            end = int(job.get("endYear")) * 12 + int(job.get("endMonth") or 12) - 1
+            end = int(job.get("endYear")) * 12 + month_number(job.get("endMonth"), 12) - 1
         except (TypeError, ValueError):
             end = today.year * 12 + today.month - 1
         if end < start:
@@ -3340,7 +3401,7 @@ def is_unsupported_domain_years_field(field: dict[str, Any], profile: dict[str, 
     domain = experience_domain(question)
     if not domain or unsupported_experience_domain(field_policy_haystack(field), profile):
         return False
-    return domain_years_from_profile(domain, profile) is None
+    return domain_years_answer(field, profile) is None
 
 
 REFERENCE_PERSON_PATTERN = re.compile(

@@ -7387,3 +7387,137 @@ def test_map_fields_tags_model_written_mappings(monkeypatch, tmp_path):
 
     assert by_index[0]["origin"] == "model"
     assert "origin" not in by_index[1]
+
+
+# --- Review fixes for domain years (2026-11-17 /code-review of items 1-8) ---------------------
+
+
+def test_domain_years_accept_month_names():
+    profile = {
+        "workExperience": [
+            {"title": "Platform Engineer", "company": "Shopify", "startMonth": "May", "startYear": "2021", "endMonth": "August", "endYear": "2024"},
+        ],
+        "resumeFacts": {"experience": ["Platform Engineer, Shopify", "Ran Kubernetes clusters"]},
+    }
+
+    assert server.domain_years_from_profile("kubernetes", profile) == 3
+    assert server.is_unsupported_domain_years_field(_years_field("Years of experience with Kubernetes?"), profile) is False
+
+
+def test_resume_bullets_are_not_claimed_by_a_company_starting_with_a_common_word():
+    profile = {
+        "workExperience": [
+            {"title": "Cashier", "company": "The Home Depot", "startMonth": "1", "startYear": "2019", "endMonth": "12", "endYear": "2019"},
+            {"title": "Platform Engineer", "company": "Shopify", "startMonth": "1", "startYear": "2021", "endMonth": "1", "endYear": "2024"},
+        ],
+        "resumeFacts": {"experience": [
+            "Cashier, The Home Depot", "Served customers",
+            "Platform Engineer, Shopify", "Built the Kubernetes platform for the team",
+        ]},
+    }
+
+    assert server.domain_years_from_profile("kubernetes", profile) == 3
+
+
+def test_domain_years_pick_a_range_option_or_hand_off():
+    ranged = _years_field("Years of experience in data engineering?", tag="select", type="select",
+                          options=[{"label": label, "value": label} for label in ["0-1", "2-4", "5+"]])
+    assert server.authoritative_policy_mapping(ranged, _YEARS_PROFILE)["value"] == "2-4"
+
+    unmatched = _years_field("Years of experience in data engineering?", tag="select", type="select",
+                             options=[{"label": label, "value": label} for label in ["Beginner", "Expert"]])
+    assert server.authoritative_policy_mapping(unmatched, _YEARS_PROFILE) is None
+    assert server.is_unsupported_domain_years_field(unmatched, _YEARS_PROFILE) is True
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_content_script_domain_years_accept_month_names_and_skip_common_words():
+    profile = {
+        "firstName": "Sample",
+        "answers": {"yearsOfExperience": "6"},
+        "workExperience": [
+            {"title": "Cashier", "company": "The Home Depot", "startMonth": "January", "startYear": "2019", "endMonth": "December", "endYear": "2019"},
+            {"title": "Platform Engineer", "company": "Shopify", "startMonth": "May", "startYear": "2021", "endMonth": "August", "endYear": "2024"},
+        ],
+        "resumeFacts": {"experience": [
+            "Cashier, The Home Depot", "Served customers",
+            "Platform Engineer, Shopify", "Built the Kubernetes platform for the team",
+        ]},
+        "demographics": {},
+    }
+    html = "<form><label>Years of experience with Kubernetes *<input name='k8s' required></label></form>"
+    _, [value] = _content_script_run(
+        "https://boards.greenhouse.io/acme/jobs/12", html, profile, SENSITIVE_SETTINGS,
+        ["() => document.querySelector('[name=k8s]').value"],
+    )
+    assert value == "3"
+
+
+@pytest.mark.parametrize(
+    "label, name",
+    [
+        ("Have you used any open-source tools?", "job_application[answers_attributes][2][text_value]"),
+        ("Which human resources systems have you used in your application work?", "q7"),
+    ],
+)
+def test_hear_about_rule_only_matches_the_question_itself(label, name):
+    field = {"index": 0, "label": label, "name": name, "tag": "input", "type": "text"}
+    mapping = server.authoritative_policy_mapping(field, {"answers": {}})
+    assert (mapping or {}).get("value") != "LinkedIn"
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["How did you hear about us?", "Where did you hear about this job?", "Application source", "How did you hear about this position? *"],
+)
+def test_hear_about_rule_still_matches_real_questions(label):
+    field = {"index": 0, "label": label, "name": "q1", "tag": "input", "type": "text"}
+    assert server.authoritative_policy_mapping(field, {"answers": {}})["value"] == "LinkedIn"
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_free_text_typeahead_keeps_the_answer_when_no_suggestion_matches():
+    html = """
+      <form>
+        <label>Team name *<input name="team" aria-autocomplete="list" required></label>
+        <ul class="suggestions"></ul>
+      </form>
+      <script>
+        const input = document.querySelector('[name=team]');
+        const list = document.querySelector('.suggestions');
+        input.addEventListener('input', () => {
+          list.innerHTML = input.value ? '<li role="option">Data Science Guild</li>' : '';
+        });
+      </script>
+    """
+    _, [fill, value] = _content_script_run(
+        "https://example.com/apply", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS,
+        [_fill_label_js("team name", "Data Platform"), "() => document.querySelector('[name=team]').value"],
+    )
+    assert value == "Data Platform"
+    assert _verification_records(fill)[0] == 1
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_verification_accepts_the_option_the_fill_picked_by_containment():
+    html = """
+      <form>
+        <fieldset><legend>Preferred team *</legend>
+          <label><input type="radio" name="team" value="a" required> Data Platform team</label>
+          <label><input type="radio" name="team" value="b"> Growth team</label>
+        </fieldset>
+        <label>Office *<select name="office" required><option value=""></option><option value="1">Chicago office</option><option value="2">Toronto office</option></select></label>
+      </form>
+    """
+    _, [team_fill, office_fill, team, office] = _content_script_run(
+        "https://example.com/apply", html, {"firstName": "Sample"}, SENSITIVE_SETTINGS,
+        [
+            _fill_label_js("preferred team", "Growth"),
+            _fill_label_js("office", "Toronto"),
+            "() => document.querySelector('input[name=team]:checked')?.value || ''",
+            "() => document.querySelector('[name=office]').value",
+        ],
+    )
+    assert (team, office) == ("b", "2")
+    assert _verification_records(team_fill) == (1, [])
+    assert _verification_records(office_fill) == (1, [])

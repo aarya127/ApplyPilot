@@ -172,6 +172,12 @@ by the kind of failure and ordered by how much harm the failure would do once su
    question goes to the human: `/map-fields` doesn't send it to the model, and the audit skips it
    and drops any model fill. "Total", "professional", "relevant" and "in a similar role" still get
    the stated total. The audit no longer puts total years back over a domain answer.
+   *Review fix 2026-11-17:*
+   - Month names ("May") count, as real profiles store them.
+   - A résumé bullet belongs to a job only if it names the full company or the company's first
+     distinctive word, never "The".
+   - Range options ("2-4", "5+") are matched. A list with no fitting option is handed off,
+     not sent to the model.
 6. **The candidate as their own referrer.** "Who referred you to this position?" got "Aarya Shah".
    Referral questions stay blank or "N/A" unless the profile names a referrer. **Fixed
    2026-10-01:** the extension's name rule had matched "Enter their first and last name". Referrer
@@ -255,6 +261,8 @@ by the kind of failure and ordered by how much harm the failure would do once su
       override it. On both sides it picks plain "LinkedIn" first, then "LinkedIn (Job)
       Post(ing)", then the shortest other LinkedIn option ("LinkedIn Sponsored Job/Ad",
       "Linked In"). Before, a list with two LinkedIn options and no plain "LinkedIn" got nothing.
+      *Review fix 2026-11-17:* the rule reads only the question text, not the field's name or id,
+      so "open-source tools" no longer gets "LinkedIn".
 13. **Check values the ATS pre-filled.** Lever's résumé parser pre-filled LinkedIn as
     `http://linkedin/aarya` and "Other website" as `http://aarya127.com`. The profile has
     `linkedin.com/in/AaryaShah127` and `aarya127.github.io`, and the tool never corrected them.
@@ -320,7 +328,8 @@ by the kind of failure and ordered by how much harm the failure would do once su
       up to 3 s for suggestions, and click the best one. A city must match a suggestion's first
       part exactly, never "Chicago Heights" for Chicago, and the state too when known.
     - If nothing matches on a field that only accepts a picked suggestion, the field is put back
-      as it was and becomes a hand-off.
+      as it was and becomes a hand-off. A free-text field with optional suggestions keeps the
+      typed answer when none match (review fix 2026-11-17).
     - Labels no longer include text the page hides: Lever's "No location found" message had been
       part of the location question's label.
     - School comboboxes keep their mapping before any options exist, as location fields already

@@ -77,13 +77,19 @@
     const facts = profile?.resumeFacts || {};
     const jobs = (profile?.workExperience || facts.workExperience || []).filter((job) => job && typeof job === "object");
     const texts = jobs.map((job) => `${job.title || ""} ${job.company || ""}`);
+    // Same rule as server.py line_names_company: the full name, or the company's first
+    // distinctive word ("Home" for "The Home Depot", never "The").
+    const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const namesCompany = (line, job) => {
       const company = String(job.company || "").toLowerCase().trim();
       if (!company) {
         return false;
       }
-      const first = company.split(/\s+/)[0];
-      return line.includes(company) || (first.length >= 3 && new RegExp(`\\b${first.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`).test(line));
+      if (new RegExp(`\\b${escape(company)}\\b`).test(line)) {
+        return true;
+      }
+      const words = (company.match(/[a-z0-9&]+/g) || []).filter((word) => !COMPANY_FILLER_WORDS.has(word) && word.length >= 3);
+      return words.length > 0 && new RegExp(`\\b${escape(words[0])}\\b`).test(line);
     };
     let current = null;
     for (const line of facts.experience || []) {
@@ -97,6 +103,22 @@
       }
     }
     return jobs.map((job, index) => [job, new Set((texts[index].toLowerCase().match(/[a-z0-9+#]+/g) || []).map(stemWord))]);
+  }
+
+  const COMPANY_FILLER_WORDS = new Set([
+    "the", "a", "an", "of", "and", "bank", "global", "group", "company", "co", "inc", "ltd", "llc", "corp",
+    "corporation", "international", "national", "university"
+  ]);
+  const MONTH_ABBREVIATIONS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+  // 1-12 from "5", "05", "May" or "September"; the fallback when unreadable.
+  function monthNumber(value, fallback) {
+    const text = String(value ?? "").trim().toLowerCase();
+    if (/^\d+$/.test(text) && Number(text) >= 1 && Number(text) <= 12) {
+      return Number(text);
+    }
+    const index = MONTH_ABBREVIATIONS.indexOf(text.slice(0, 3));
+    return index >= 0 ? index + 1 : fallback;
   }
 
   function domainYearsFromProfile(domain, profile, today = new Date()) {
@@ -113,10 +135,10 @@
       if (!Number.isFinite(startYear)) {
         return null;
       }
-      const start = startYear * 12 + (parseInt(job.startMonth, 10) || 1) - 1;
+      const start = startYear * 12 + monthNumber(job.startMonth, 1) - 1;
       const endYear = parseInt(job.endYear, 10);
       const end = Number.isFinite(endYear)
-        ? endYear * 12 + (parseInt(job.endMonth, 10) || 12) - 1
+        ? endYear * 12 + monthNumber(job.endMonth, 12) - 1
         : today.getFullYear() * 12 + today.getMonth();
       if (end < start) {
         return null;
@@ -6441,13 +6463,10 @@
     setEditableText(element, query);
 
     let option = null;
-    let sawSuggestions = false;
     const deadline = Date.now() + 3000;
     while (!option && Date.now() < deadline) {
       await sleep(150);
-      const suggestions = typeaheadSuggestionElements(element);
-      sawSuggestions = sawSuggestions || suggestions.length > 0;
-      option = bestTypeaheadOption(suggestions, desiredValue);
+      option = bestTypeaheadOption(typeaheadSuggestionElements(element), desiredValue);
     }
 
     if (option) {
@@ -6458,8 +6477,9 @@
       return true;
     }
 
-    if (!sawSuggestions && !typeaheadRequiresPick(element)) {
-      // A free-text field with optional suggestions: keep the full answer.
+    if (!typeaheadRequiresPick(element)) {
+      // A free-text field whose suggestions are optional: keep the full answer even when
+      // none of them matched.
       setEditableText(element, desiredValue);
       return true;
     }
