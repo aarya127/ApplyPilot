@@ -335,6 +335,21 @@ by the kind of failure and ordered by how much harm the failure would do once su
     - School comboboxes keep their mapping before any options exist, as location fields already
       did, and still have to click a matching suggestion. A school typeahead is in the regression
       tests.
+
+    **Done 2026-11-20 (verified on live Lever):** the 2026-11-20 live run showed the fix above did
+    not work on real Lever forms; "Current location" stayed empty on all 3. Lever's live script
+    (`jobs.lever.co/js/retrieveLocations.js`) differs from the old fixture in three ways, and the
+    fixture now copies all three:
+    - It searches on `keydown` (500 ms debounce), not on `input`. The query is now typed with an
+      `input` event plus a key event, and the wait for suggestions is up to 6 s.
+    - A `blur` while suggestions are open clears the field. Typing the query no longer fires
+      `change`/`blur`.
+    - After every fill the extension pressed Enter to confirm, and Lever's Enter handler copies the
+      highlighted suggestion into the field, which is none after a pick, so the field went blank.
+      Text typeaheads no longer get that Enter.
+
+    Loading the content script into the live Spotify Lever form now leaves "Chicago, IL, USA" in
+    the field and in Lever's hidden `selectedLocation`.
 21. **Multi-select and consent fills don't stick.** On Reddit, the required "I agree" consent, the
     ethnicity multi-select, gender and sexual orientation all stayed "ready to fill" after two fill
     passes.

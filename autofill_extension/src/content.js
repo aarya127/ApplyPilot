@@ -6453,6 +6453,19 @@
     return /\b(location|city)\b/.test(identity) ? cityFromLocation(value) : String(value);
   }
 
+  // Type the query like a person: some typeaheads search only on key events (Lever's live
+  // location field searches on keydown), and a blur while the suggestions are open makes
+  // Lever clear the field, so no change/blur here.
+  function typeTypeaheadQuery(element, query) {
+    element.focus();
+    setNativeValue(element, String(query));
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+    const key = String(query).slice(-1) || "Unidentified";
+    for (const type of ["keydown", "keyup"]) {
+      element.dispatchEvent(new KeyboardEvent(type, { key, bubbles: true, cancelable: true }));
+    }
+  }
+
   async function fillTextTypeahead(element, desiredValue, field) {
     const previousValue = getCurrentValue(element);
     if (verificationValuesMatch(previousValue, desiredValue)) {
@@ -6460,10 +6473,11 @@
     }
 
     const query = typeaheadQuery(field, desiredValue);
-    setEditableText(element, query);
+    typeTypeaheadQuery(element, query);
 
+    // Long enough for a debounced search (Lever waits 500 ms) plus the network round trip.
     let option = null;
-    const deadline = Date.now() + 3000;
+    const deadline = Date.now() + 6000;
     while (!option && Date.now() < deadline) {
       await sleep(150);
       option = bestTypeaheadOption(typeaheadSuggestionElements(element), desiredValue);
@@ -7597,7 +7611,11 @@
   }
 
   function confirmFilledElement(element) {
-    dispatchEnterOrEscape(element, "Enter");
+    // A text typeahead is confirmed by the suggestion pick; an extra Enter makes Lever copy
+    // the highlighted suggestion (none, after a pick) into the field and blank it.
+    if (!isTextTypeahead(element)) {
+      dispatchEnterOrEscape(element, "Enter");
+    }
     element.dispatchEvent(new Event("change", { bubbles: true }));
     element.blur?.();
   }

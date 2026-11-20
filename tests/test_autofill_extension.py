@@ -7035,21 +7035,25 @@ def test_resume_status_is_consistent_after_attach():
 
 
 def _lever_location_page(suggestions):
-    """Lever's "Current location": a plain text input, a hidden selectedLocation input and
-    a results list that a debounced input handler fills; only a click on a result sets
-    the hidden input (which is what Lever submits)."""
+    """Lever's "Current location", modelled on the live jobs.lever.co/js/retrieveLocations.js
+    (checked 2026-11-20): an `input` event only opens the dropdown; the search runs on
+    `keydown` after a 500 ms debounce; a `mousedown` on a `.dropdown-location` result
+    (delegated on the document) sets the input and the hidden #selected-location JSON;
+    an Enter keydown sets the input to the highlighted result's text ('' when none); a
+    `blur` while the dropdown is open clears both."""
     return f"""
       <form>
         <ul>
-          <li class="application-question">
+          <li class="application-question" data-qa="structured-contact-location-question">
             <label>
-              <div class="application-label">Current location<span class="required">&#10033;</span></div>
+              <div class="application-label">Current location <span class="required">&#10033;</span></div>
               <div class="application-field">
-                <input type="text" name="location" class="location-input" autocomplete="off" required>
-                <input type="hidden" name="selectedLocation">
-                <div class="dropdown-container">
+                <input class="location-input" data-qa="location-input" id="location-input" type="text" maxlength="100" name="location" required>
+                <input id="selected-location" type="hidden" name="selectedLocation">
+                <div class="dropdown-container" style="display:none">
                   <div class="dropdown-results"></div>
                   <div class="dropdown-no-results" style="display:none">No location found. Try entering a different location</div>
+                  <div class="dropdown-loading-results" style="display:none"><span>Loading</span></div>
                 </div>
               </div>
             </label>
@@ -7058,32 +7062,54 @@ def _lever_location_page(suggestions):
       </form>
       <script>
         const all = {json.dumps(suggestions)};
-        const input = document.querySelector('.location-input');
-        const hidden = document.querySelector('[name=selectedLocation]');
+        const input = document.querySelector('input.location-input');
+        const hidden = document.querySelector('#selected-location');
+        const container = document.querySelector('.dropdown-container');
         const results = document.querySelector('.dropdown-results');
         const none = document.querySelector('.dropdown-no-results');
-        window.__queries = [];
+        let searched;
         let timer = null;
-        input.addEventListener('input', () => {{
-          window.__queries.push(input.value);
+        window.__queries = [];
+        const show = (el, on) => {{ el.style.display = on ? 'flex' : 'none'; }};
+        const empty = () => {{ results.innerHTML = ''; show(none, false); searched = undefined; }};
+        input.addEventListener('input', () => show(container, true));
+        input.addEventListener('keydown', (event) => {{
+          if (event.key === 'Enter') {{
+            // Lever's handleEnter: the input takes the highlighted result's text ('' when none).
+            event.preventDefault();
+            show(container, false);
+            const active = document.querySelector('.dropdown-location.dropdown-location-active');
+            input.value = active ? active.textContent : '';
+            if (!searched || !active) return;
+            hidden.value = JSON.stringify(searched[Number(active.id.split('-')[1])]);
+            empty();
+            return;
+          }}
+          if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
           clearTimeout(timer);
           timer = setTimeout(() => {{
-            results.innerHTML = '';
-            const query = input.value.trim().toLowerCase();
-            const hits = query ? all.filter((name) => name.toLowerCase().startsWith(query)) : [];
-            none.style.display = query && !hits.length ? 'block' : 'none';
-            for (const name of hits) {{
-              const item = document.createElement('div');
-              item.className = 'dropdown-location';
-              item.textContent = name;
-              item.addEventListener('click', () => {{
-                input.value = name;
-                hidden.value = name;
-                results.innerHTML = '';
-              }});
-              results.appendChild(item);
-            }}
-          }}, 150);
+            empty();
+            const query = input.value;
+            if (!query) return;
+            window.__queries.push(query);
+            searched = all.filter((name) => name.toLowerCase().startsWith(query.trim().toLowerCase())).map((name) => ({{ name }}));
+            searched.forEach((location, index) => {{
+              results.insertAdjacentHTML('beforeend', `<div class="break-word dropdown-location" id="location-${{index}}">${{location.name}}</div>`);
+            }});
+            if (!searched.length) show(none, true);
+          }}, 500);
+        }});
+        input.addEventListener('blur', () => {{
+          if (container.style.display !== 'none') {{
+            show(container, false); empty(); input.value = ''; hidden.value = '';
+          }}
+        }});
+        document.addEventListener('mousedown', (event) => {{
+          if (!event.target.classList.contains('dropdown-location')) return;
+          show(container, false);
+          input.value = event.target.textContent;
+          hidden.value = JSON.stringify(searched[Number(event.target.id.split('-')[1])]);
+          empty();
         }});
       </script>
     """
@@ -7104,26 +7130,27 @@ _LOCATION_PROFILE = {
 
 @pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
 def test_lever_location_typeahead_picks_city_suggestion():
+    # Live Lever suggestion text (2026-11-20) is "City, ST, USA".
     html = _lever_location_page(
-        ["Chicago, Illinois, United States", "Chicago Heights, Illinois, United States", "Toronto, Ontario, Canada"]
+        ["Chicago Heights, IL, USA", "Chicago, IL, USA", "Chicago, BLZ", "Toronto, ON, CAN"]
     )
     _, [queries, selected, shown] = _content_script_run(
         "https://jobs.lever.co/acme/123/apply", html, _LOCATION_PROFILE, SENSITIVE_SETTINGS,
         [
-            "() => window.__queries.filter(Boolean)",
+            "() => window.__queries",
             "() => document.querySelector('[name=selectedLocation]').value",
             "() => document.querySelector('.location-input').value",
         ],
     )
 
     assert queries == ["Chicago"]
-    assert selected == "Chicago, Illinois, United States"
-    assert shown == "Chicago, Illinois, United States"
+    assert json.loads(selected) == {"name": "Chicago, IL, USA"}
+    assert shown == "Chicago, IL, USA"
 
 
 @pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
 def test_lever_location_without_matching_suggestion_is_handed_off():
-    html = _lever_location_page(["Toronto, Ontario, Canada"])
+    html = _lever_location_page(["Toronto, ON, CAN"])
     _, [selected, shown, preview] = _content_script_run(
         "https://jobs.lever.co/acme/123/apply", html, _LOCATION_PROFILE, SENSITIVE_SETTINGS,
         [
