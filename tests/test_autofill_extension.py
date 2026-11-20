@@ -6387,6 +6387,36 @@ def test_assistant_ask_ai_stops_at_deadline_and_hands_off_rest():
 
 
 @pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
+def test_assistant_ask_ai_with_nothing_to_do_does_not_stay_working():
+    """Live run 2026-11-20 (Zoox, Cohere): the one-shot audit set the status to "Working",
+    then Ask AI found nothing to answer and returned without resetting it."""
+    from playwright.sync_api import sync_playwright
+
+    form = """
+    <form>
+      <label>First name *<input name="first" required value="Test"></label>
+      <label>Last name *<input name="last" required value="Candidate"></label>
+    </form>
+    """
+    profile = {"firstName": "Test", "lastName": "Candidate", "answers": {}, "demographics": {}}
+    settings = {"autoFillDynamicFields": False, "autoFillSensitiveFields": False}
+
+    with sync_playwright() as p:
+        try:
+            browser, page = _assistant_panel_page(p, form, profile, settings, "return { ok: true, payload: { mappings: [] } };")
+        except Exception as exc:
+            pytest.skip(f"Chromium could not launch in this environment: {exc}")
+
+        page.evaluate("() => document.getElementById('askAiButton').disabled = false")
+        page.evaluate("() => document.getElementById('askAiButton').click()")
+        page.wait_for_function("() => document.getElementById('chatLog').textContent.includes('passed the audit')", timeout=15000)
+        page.wait_for_function("() => document.getElementById('aiStatusText').textContent === 'AI idle'", timeout=15000)
+
+        assert page.evaluate("() => document.getElementById('assistantStatus').textContent") != "Working"
+        browser.close()
+
+
+@pytest.mark.skipif(importlib.util.find_spec("playwright") is None, reason="playwright is not installed")
 def test_background_fetch_times_out_without_localhost_retry():
     from playwright.sync_api import sync_playwright
 

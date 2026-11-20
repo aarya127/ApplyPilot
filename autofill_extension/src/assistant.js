@@ -299,6 +299,11 @@ async function askAiForMissingAnswers() {
   try {
     return await askAiForMissingAnswersImpl();
   } finally {
+    // Paths that end without filling (nothing left to ask, audit only) never reset the
+    // "Working" status the audit set.
+    if (assistantStatus.textContent === "Working") {
+      assistantStatus.textContent = "Preview ready";
+    }
     setAiWorking(false, "AI idle");
     await refreshAiUsage(true);
   }

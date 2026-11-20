@@ -127,6 +127,11 @@ by the kind of failure and ordered by how much harm the failure would do once su
    still fills the answers it already has. Every backend fetch from the extension times out after
    200 s, just over the backend's 180 s `/map-fields` budget. A timeout doesn't retry on
    `localhost`, which would double the wait.
+   **Done 2026-11-20:** the 2026-11-20 live run found a second cause. When Ask AI's one-shot
+   audit found nothing to change and no field was left to ask, Ask AI returned without
+   resetting the "Working" status the audit had set, so the panel looked busy forever and the
+   E2E batch waited out its 10 minutes (Zoox, Cohere). A stale "Working" is now reset to
+   "Preview ready" whenever Ask AI ends.
 3. **Shrink the prompts.** Mapper prompts run from 24k to 548k characters. Palantir's is about 137k
    tokens, and only 3 of the 10 working models returned answers for it. Send each field's retrieved
    context instead of the whole profile and page for every field, and split large forms into
